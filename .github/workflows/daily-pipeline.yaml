@@ -2,7 +2,7 @@ name: Mini Lakehouse Daily Pipeline
 
 on:
   schedule:
-    - cron: "10 1 * * *" # 08:10 Asia/Ho_Chi_Minh (UTC+7)
+    - cron: "10 1,13 * * *" # 08:10 and 20:10 Asia/Ho_Chi_Minh (UTC+7)
   workflow_dispatch:
 
 permissions:
@@ -34,6 +34,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PIPELINE_LOOKBACK_DAYS: "14"
+          PIPELINE_LOOKBACK_HOURS: "24"
           MAX_FEED_ENTRIES_PER_SOURCE: "250"
           REQUEST_TIMEOUT_SECONDS: "25"
           TIMEZONE: Asia/Ho_Chi_Minh
