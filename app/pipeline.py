@@ -198,7 +198,14 @@ def discover_topic_candidates():
     if len(articles) < 5: return 0
     texts = [f"{a['title']} {a['summary']}".strip() for a in articles]
     try:
-        vectorizer = TfidfVectorizer(stop_words='english',ngram_range=(1,2),min_df=2,max_features=3500,token_pattern=r'(?u)\b[a-zA-Z][a-zA-Z0-9-]{2,}\b', sublinear_tf=True)
+        # Tokenization supports Vietnamese diacritics as well as English titles.
+        multilingual_stop_words = '''
+        the a an and or but for with from after before over under this that those these
+        là và của có cho với trong trên dưới tại từ đến khi những các một các này đó được đang sẽ đã
+        người ngày năm tháng theo về việc không cũng nhưng nếu thì mà để bởi tại do vào ra như hơn nhất
+        các tin bài báo mới cập nhật hôm nay qua sáng chiều tối thứ về sau trước một số nhiều giữa
+        '''.split()
+        vectorizer = TfidfVectorizer(stop_words=multilingual_stop_words,ngram_range=(1,2),min_df=2,max_features=3500,token_pattern=r'(?u)\b[^\W\d_][^\W_]{1,}\b', sublinear_tf=True)
         matrix = vectorizer.fit_transform(texts)
         if matrix.shape[1] < 2: return 0
         labels = DBSCAN(eps=0.72,min_samples=3,metric='cosine').fit_predict(matrix)
@@ -267,6 +274,88 @@ def refresh_facts():
         cur.execute("""insert into fact_source_daily(stat_date,source_id,article_count,excluded_count,avg_quality_score)
                        select coalesce((published_at at time zone %s)::date,(collected_at at time zone %s)::date),source_id,count(*),count(*) filter(where is_excluded),avg(quality_score)
                        from news_articles where coalesce((published_at at time zone %s)::date,(collected_at at time zone %s)::date)>=current_date-30 group by 1,2""",(settings.timezone,settings.timezone,settings.timezone,settings.timezone))
+    refresh_topic_trending()
+
+def refresh_topic_trending():
+    """Recompute topic rankings for today, rolling weeks and calendar months in the configured timezone.
+
+    Ranking favors article volume, then cross-source coverage, with a small bonus for positive
+    period-over-period growth. It is a descriptive heat score, not a truth or importance score.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""select (now() at time zone %s)::date as local_today""", (settings.timezone,))
+        today = cur.fetchone()['local_today']
+        cur.execute("""delete from fact_topic_trending
+                       where (period_type='day' and period_start >= %s - 60)
+                          or (period_type='week' and period_start >= %s - 183)
+                          or (period_type='month' and period_start >= date_trunc('month', %s::timestamp)::date - interval '12 months')""",
+                    (today, today, today))
+        cur.execute(r"""
+            WITH cfg AS (
+              SELECT %s::text AS tz, (now() at time zone %s)::date AS today
+            ), article_topic_base AS (
+              SELECT a.article_id, a.source_id, at.topic_id,
+                     (coalesce(a.published_at,a.collected_at) at time zone cfg.tz) AS local_ts,
+                     ((coalesce(a.published_at,a.collected_at) at time zone cfg.tz)::date) AS local_date,
+                     cfg.today
+              FROM news_articles a
+              JOIN article_topics at ON at.article_id=a.article_id
+              JOIN topics t ON t.topic_id=at.topic_id AND t.status='active'
+              CROSS JOIN cfg
+              WHERE a.is_excluded=false
+                AND ((coalesce(a.published_at,a.collected_at) at time zone cfg.tz)::date) >= cfg.today - 400
+            ), period_rows AS (
+              SELECT 'day'::text AS period_type, local_date AS period_start, topic_id, article_id, source_id, today
+              FROM article_topic_base WHERE local_date >= today - 60 AND local_date <= today
+              UNION ALL
+              SELECT 'week'::text, date_trunc('week',local_ts)::date, topic_id, article_id, source_id, today
+              FROM article_topic_base WHERE local_date >= today - 183 AND local_date <= today
+              UNION ALL
+              SELECT 'month'::text, date_trunc('month',local_ts)::date, topic_id, article_id, source_id, today
+              FROM article_topic_base
+              WHERE local_date >= (date_trunc('month',today::timestamp) - interval '12 months')::date
+                AND local_date <= today
+            ), aggregated AS (
+              SELECT period_type, period_start, topic_id,
+                     count(DISTINCT article_id)::int AS article_count,
+                     count(DISTINCT source_id)::int AS source_count
+              FROM period_rows GROUP BY period_type, period_start, topic_id
+            ), with_previous AS (
+              SELECT a.*,
+                coalesce(p.article_count,0)::int AS previous_article_count,
+                CASE WHEN coalesce(p.article_count,0) > 0
+                     THEN round(100.0 * (a.article_count - p.article_count) / p.article_count, 2)
+                     ELSE NULL END AS growth_pct
+              FROM aggregated a
+              LEFT JOIN aggregated p ON p.period_type=a.period_type AND p.topic_id=a.topic_id
+                AND p.period_start = CASE
+                  WHEN a.period_type='day' THEN a.period_start - 1
+                  WHEN a.period_type='week' THEN a.period_start - 7
+                  WHEN a.period_type='month' THEN (a.period_start - interval '1 month')::date
+                END
+            ), scored AS (
+              SELECT *,
+                (article_count + (2.0 * ln(1 + source_count))
+                  + (least(greatest(coalesce(growth_pct,0),0),200) / 100.0))::numeric(12,3) AS hotness_score
+              FROM with_previous
+            ), ranked AS (
+              SELECT *, row_number() OVER (PARTITION BY period_type,period_start
+                            ORDER BY hotness_score DESC, article_count DESC, source_count DESC, topic_id)::int AS rank_position
+              FROM scored
+            )
+            INSERT INTO fact_topic_trending(
+              period_type,period_start,topic_id,article_count,source_count,
+              previous_article_count,growth_pct,hotness_score,rank_position,updated_at
+            )
+            SELECT period_type,period_start,topic_id,article_count,source_count,
+                   previous_article_count,growth_pct,hotness_score,rank_position,now()
+            FROM ranked
+            ON CONFLICT(period_type,period_start,topic_id) DO UPDATE SET
+              article_count=excluded.article_count, source_count=excluded.source_count,
+              previous_article_count=excluded.previous_article_count, growth_pct=excluded.growth_pct,
+              hotness_score=excluded.hotness_score, rank_position=excluded.rank_position, updated_at=now()
+        """, (settings.timezone, settings.timezone))
+
 
 def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) -> dict:
     started = datetime.now(timezone.utc)
