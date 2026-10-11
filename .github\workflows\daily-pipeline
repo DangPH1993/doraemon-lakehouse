@@ -1,0 +1,42 @@
+name: Mini Lakehouse Daily Pipeline
+
+on:
+  schedule:
+    - cron: "10 1 * * *" # 08:10 Asia/Ho_Chi_Minh (UTC+7)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mini-lakehouse-pipeline
+  cancel-in-progress: false
+
+jobs:
+  collect-clean-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Install English NER package and model
+        run: |
+          pip install "spacy>=3.7,<4.0"
+          python -m spacy download en_core_web_sm
+      - name: Run ingestion, cleaning, catalog discovery and FACT refresh
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PIPELINE_LOOKBACK_DAYS: "14"
+          MAX_FEED_ENTRIES_PER_SOURCE: "250"
+          REQUEST_TIMEOUT_SECONDS: "25"
+          TIMEZONE: Asia/Ho_Chi_Minh
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
+          python -m app.pipeline
