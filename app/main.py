@@ -14,7 +14,7 @@ from .processing import canonicalize_url, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.1.0',description='Admin portal for RSS ingestion, catalog, data quality and analytics.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.2.0',description='Admin portal for RSS ingestion, catalog, data quality and analytics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -56,7 +56,7 @@ class RuleBody(BaseModel):
 @app.get('/')
 def index(): return FileResponse('static/index.html')
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.1.0'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.2.0'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -99,7 +99,20 @@ def dashboard():
                            from data_sources s left join news_articles a on a.source_id=s.source_id and a.collected_at>=now()-interval '7 days'
                            group by s.source_id,s.name order by article_count desc limit 8""")
     recent_runs=fetch_all('select run_id,trigger_type,status,started_at,finished_at,entries_seen,articles_inserted,articles_updated,message from pipeline_runs order by started_at desc limit 5')
-    return {'counts':counts,'collection_trend':trend,'top_topics':top_topics,'top_sources':top_sources,'recent_runs':recent_runs}
+    hot_topics=fetch_all("""WITH clock AS (SELECT (now() at time zone %s)::date AS today), periods AS (
+      SELECT 'day'::text AS period_type, today AS period_start, 'Hôm nay'::text AS period_label FROM clock
+      UNION ALL SELECT 'week', date_trunc('week',today::timestamp)::date, 'Tuần này' FROM clock
+      UNION ALL SELECT 'month', date_trunc('month',today::timestamp)::date, 'Tháng này' FROM clock
+    )
+    SELECT p.period_type,p.period_start,p.period_label,t.topic_id,t.name AS topic_name,
+           f.article_count,f.source_count,f.previous_article_count,f.growth_pct,f.hotness_score,f.rank_position
+    FROM periods p
+    LEFT JOIN fact_topic_trending f ON f.period_type=p.period_type AND f.period_start=p.period_start
+    LEFT JOIN topics t ON t.topic_id=f.topic_id AND t.status='active'
+    WHERE f.topic_id IS NOT NULL
+    ORDER BY CASE p.period_type WHEN 'day' THEN 1 WHEN 'week' THEN 2 ELSE 3 END, f.rank_position
+    """, (settings.timezone,))
+    return {'counts':counts,'collection_trend':trend,'top_topics':top_topics,'top_sources':top_sources,'recent_runs':recent_runs,'hot_topics':hot_topics}
 
 @app.get('/api/sources',dependencies=[Depends(require_admin)])
 def list_sources():
@@ -352,6 +365,7 @@ def patch_data_model(model_id:int,patch:dict=Body(...)):
 FACT_QUERIES={
  'fact_news_article':"""select f.article_id,s.name as source_name,f.published_date,a.title,f.title_length,f.word_count,f.detected_entity_count,f.detected_topic_count,f.quality_score,f.is_excluded,f.loaded_at from fact_news_article f join data_sources s on s.source_id=f.source_id join news_articles a on a.article_id=f.article_id order by f.published_date desc nulls last limit %s""",
  'fact_topic_daily':"""select f.stat_date,t.name as topic,s.name as source,f.article_count,f.updated_at from fact_topic_daily f join topics t on t.topic_id=f.topic_id join data_sources s on s.source_id=f.source_id order by f.stat_date desc,f.article_count desc limit %s""",
+ 'fact_topic_trending':"""select f.period_type,f.period_start,t.name as topic,f.article_count,f.source_count,f.previous_article_count,f.growth_pct,f.hotness_score,f.rank_position,f.updated_at from fact_topic_trending f join topics t on t.topic_id=f.topic_id order by case f.period_type when 'day' then 1 when 'week' then 2 else 3 end,f.period_start desc,f.rank_position limit %s""",
  'fact_entity_daily':"""select f.stat_date,e.canonical_name as entity,e.entity_type,s.name as source,f.article_count,f.updated_at from fact_entity_daily f join entities e on e.entity_id=f.entity_id join data_sources s on s.source_id=f.source_id order by f.stat_date desc,f.article_count desc limit %s""",
  'fact_source_daily':"""select f.stat_date,s.name as source,f.article_count,f.excluded_count,f.avg_quality_score,f.updated_at from fact_source_daily f join data_sources s on s.source_id=f.source_id order by f.stat_date desc,f.article_count desc limit %s"""
 }
