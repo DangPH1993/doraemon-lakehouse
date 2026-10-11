@@ -18,7 +18,17 @@ create table if not exists data_sources (
 );
 
 insert into data_sources(name,feed_url,language,category,license_name,license_url,enabled)
-values('Vocemundi Wire','https://vocemundi.com/wire/feeds/en/','en','international news','CC BY-ND 4.0 text; verify media separately','https://vocemundi.com/republish/',true)
+values
+ ('VnExpress - Tin mới nhất','https://vnexpress.net/rss/tin-moi-nhat.rss','vi','tổng hợp','RSS; chỉ dùng metadata theo điều khoản nhà xuất bản','https://vnexpress.net/rss',true),
+ ('Tuổi Trẻ - Trang chủ','https://tuoitre.vn/home.rss','vi','tổng hợp','RSS; ghi nguồn; kiểm tra điều khoản hiện hành','https://tuoitre.vn/rss.htm',true),
+ ('Thanh Niên - Trang chủ','https://thanhnien.vn/rss/home.rss','vi','tổng hợp','RSS; ghi nguồn; kiểm tra điều khoản hiện hành','https://thanhnien.vn/rss.html',true),
+ ('Dân trí - Trang chủ','https://dantri.com.vn/rss/home.rss','vi','tổng hợp','RSS; ghi nguồn; không đăng lại toàn văn nếu chưa được phép','https://dantri.com.vn/rss.htm',true),
+ ('VTV - Trang chủ','https://vtv.vn/rss/home.rss','vi','tổng hợp','RSS; attribution: Theo Báo điện tử VTV','https://vtv.vn/rss.htm',true),
+ ('VietnamPlus - Trang chủ','https://www.vietnamplus.vn/rss/home.rss','vi','tổng hợp','RSS; chỉ dùng metadata; tái xuất bản cần chấp thuận','https://www.vietnamplus.vn/rss.vnp',true),
+ ('Báo Tin tức & Dân tộc - Trang chủ','https://baotintuc.vn/rss/home.rss','vi','tổng hợp','RSS; cần xác nhận endpoint và điều khoản trước khi bật','https://baotintuc.vn/rss.html',false),
+ ('Báo Quân đội nhân dân - RSS','https://www.qdnd.vn/rss','vi','quốc phòng; chưa xác nhận feed XML trực tiếp','RSS directory; chưa bật cho đến khi đặt URL feed trực tiếp','https://www.qdnd.vn/rss',false),
+ ('Báo Văn hóa - RSS','https://baovanhoa.vn/rss.html','vi','văn hóa; chưa xác nhận feed XML trực tiếp','RSS directory; chưa bật cho đến khi đặt URL feed trực tiếp','https://baovanhoa.vn/rss.html',false),
+ ('Infonet - Đời sống','https://infonet.vietnamnet.vn/rss/doi-song.rss','vi','đời sống','RSS; ghi nguồn và chỉ dùng theo điều khoản nhà xuất bản','https://infonet.vietnamnet.vn/rss',true)
 on conflict(feed_url) do nothing;
 
 create table if not exists pipeline_runs (
@@ -223,6 +233,22 @@ create table if not exists fact_topic_daily (
   updated_at timestamptz not null default now(),
   primary key(stat_date, topic_id, source_id)
 );
+create table if not exists fact_topic_trending (
+  period_type text not null check (period_type in ('day','week','month')),
+  period_start date not null,
+  topic_id bigint not null references topics(topic_id) on delete cascade,
+  article_count int not null default 0,
+  source_count int not null default 0,
+  previous_article_count int not null default 0,
+  growth_pct numeric(10,2),
+  hotness_score numeric(12,3) not null default 0,
+  rank_position int not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key(period_type, period_start, topic_id)
+);
+create index if not exists idx_fact_topic_trending_period_rank
+  on fact_topic_trending(period_type, period_start, rank_position);
+
 create table if not exists fact_entity_daily (
   stat_date date not null,
   entity_id bigint not null references entities(entity_id) on delete cascade,
@@ -241,17 +267,21 @@ create table if not exists fact_source_daily (
   primary key(stat_date, source_id)
 );
 
--- Starter topics; change keywords from the admin portal at any time.
+-- Starter topics: Vietnamese news categories with Vietnamese and English keywords.
 insert into topics(slug,name,description,keywords,origin) values
- ('artificial-intelligence','Artificial Intelligence','AI, machine learning, and AI products', array['artificial intelligence','AI model','machine learning','generative AI','AI agent','ChatGPT','OpenAI','LLM'], 'manual'),
- ('technology','Technology','Technology products and industry', array['technology','software','cybersecurity','semiconductor','chipmaker','smartphone','cloud computing'], 'manual'),
- ('economy-business','Economy & Business','Markets, companies, economic policy', array['economy','inflation','interest rate','GDP','stock market','earnings','investment','trade'], 'manual'),
- ('politics-policy','Politics & Policy','Government, elections and public policy', array['election','government','parliament','president','minister','policy','sanction'], 'manual'),
- ('defence-security','Defence & Security','Military, defence and security', array['NATO','military','defence','defense','nuclear deterrence','missile','armed forces','security'], 'manual'),
- ('climate-environment','Climate & Environment','Climate, energy and environment', array['climate','emissions','renewable energy','solar power','wind power','fossil fuel','biodiversity'], 'manual'),
- ('health-science','Health & Science','Health, research and science', array['health','disease','clinical trial','research','scientists','vaccine','study finds'], 'manual')
+ ('artificial-intelligence','Trí tuệ nhân tạo','AI, mô hình AI, học máy và ứng dụng AI',array['trí tuệ nhân tạo','AI','mô hình AI','học máy','AI tạo sinh','trợ lý AI','ChatGPT','OpenAI','LLM','artificial intelligence','machine learning','generative AI'],'manual'),
+ ('technology','Công nghệ','Công nghệ, phần mềm, an ninh mạng, chip và sản phẩm số',array['công nghệ','phần mềm','an ninh mạng','bán dẫn','chip','điện thoại thông minh','điện toán đám mây','chuyển đổi số','technology','software','cybersecurity'],'manual'),
+ ('economy-business','Kinh tế & doanh nghiệp','Kinh tế vĩ mô, thị trường, doanh nghiệp và đầu tư',array['kinh tế','lạm phát','lãi suất','GDP','chứng khoán','doanh nghiệp','đầu tư','xuất khẩu','nhập khẩu','thương mại','tăng trưởng kinh tế','economy','inflation','interest rate'],'manual'),
+ ('politics-policy','Chính trị & chính sách','Chính phủ, chính sách công, bầu cử và nghị viện',array['chính phủ','chính sách','quốc hội','bầu cử','thủ tướng','chủ tịch nước','bộ trưởng','nghị định','luật mới','politics','government','election','policy'],'manual'),
+ ('defence-security','Quốc phòng & an ninh','Quốc phòng, quân sự, an ninh và quan hệ chiến lược',array['quốc phòng','an ninh','quân sự','NATO','tên lửa','hạt nhân','biên giới','lực lượng vũ trang','defence','defense','military','missile'],'manual'),
+ ('climate-environment','Môi trường & khí hậu','Khí hậu, môi trường, năng lượng tái tạo và thiên tai',array['môi trường','biến đổi khí hậu','khí hậu','phát thải','năng lượng tái tạo','điện mặt trời','điện gió','ô nhiễm','bão','lũ lụt','climate','emissions','renewable energy'],'manual'),
+ ('health-science','Y tế, sức khỏe & khoa học','Sức khỏe, bệnh tật, y tế và nghiên cứu khoa học',array['sức khỏe','y tế','bệnh','vắc xin','dịch bệnh','bệnh viện','bác sĩ','nghiên cứu khoa học','thí nghiệm lâm sàng','health','disease','vaccine','science'],'manual'),
+ ('social-daily-life','Xã hội & đời sống','An sinh, cộng đồng, đời sống dân sinh và các vấn đề xã hội',array['xã hội','đời sống','dân sinh','người dân','cộng đồng','an sinh xã hội','tai nạn','cháy nổ','xã hội hóa','social','community'],'manual'),
+ ('education','Giáo dục','Trường học, đào tạo, tuyển sinh và chính sách giáo dục',array['giáo dục','trường học','học sinh','sinh viên','giáo viên','tuyển sinh','thi tốt nghiệp','đại học','học phí','education','school','students'],'manual'),
+ ('sports','Thể thao','Bóng đá, thể thao thành tích cao và các giải đấu',array['thể thao','bóng đá','đội tuyển','giải đấu','vận động viên','World Cup','SEA Games','V-League','Olympic','sports','football'],'manual'),
+ ('culture-tourism','Văn hóa & du lịch','Văn hóa, nghệ thuật, giải trí, du lịch và di sản',array['văn hóa','du lịch','di sản','nghệ thuật','điện ảnh','âm nhạc','lễ hội','khách du lịch','điểm đến','culture','tourism','heritage'],'manual'),
+ ('real-estate','Bất động sản & hạ tầng','Nhà đất, xây dựng, giao thông và hạ tầng',array['bất động sản','nhà đất','chung cư','giá nhà','thị trường bất động sản','xây dựng','hạ tầng','giao thông','đường cao tốc','quy hoạch','real estate','infrastructure'],'manual')
 on conflict(slug) do nothing;
-
 
 insert into data_model_catalog(table_name,model_type,description,grain) values
  ('news_articles','operational','Clean-layer news items with canonical URL and quality status','One record per source + canonical URL'),
@@ -264,6 +294,7 @@ insert into data_model_catalog(table_name,model_type,description,grain) values
  ('article_entities','bridge','Article-to-entity mentions','One record per article + entity + mention text'),
  ('fact_news_article','fact','Article-level analytical metrics','One record per article'),
  ('fact_topic_daily','fact','Daily article counts by topic and source','One record per day + topic + source'),
+ ('fact_topic_trending','fact','Topic heat ranking by day, week and month with source coverage and period-over-period change','One record per period type + period start + topic'),
  ('fact_entity_daily','fact','Daily article counts by entity and source','One record per day + entity + source'),
  ('fact_source_daily','fact','Daily collection and quality metrics by source','One record per day + source')
 on conflict(table_name) do update set description=excluded.description,grain=excluded.grain;
