@@ -1,4 +1,4 @@
-# Doraemon Mini Lakehouse — MVP 0.1
+# Doraemon Mini Lakehouse — MVP 0.2
 
 Một project độc lập để thu thập RSS và xây kho dữ liệu tin tức nhỏ cho Doraemon. Không thay thế hoặc sửa server/web học tập Doraemon. Admin portal được FastAPI phục vụ từ cùng một Render Web Service; dữ liệu lưu ở PostgreSQL/Supabase; tác vụ theo lịch chạy từ GitHub Actions.
 
@@ -9,18 +9,18 @@ Một project độc lập để thu thập RSS và xây kho dữ liệu tin t�
 - Raw capture lưu JSON RSS gốc; Clean layer lưu trường đã chuẩn hóa, URL canonical, hash, chất lượng và quy tắc loại trừ.
 - NER bằng `spaCy en_core_web_sm` trong workflow hằng ngày; regex fallback nếu model chưa có. Thực thể chưa biết đi vào candidate list để duyệt, không tự ý trở thành entity chính thức.
 - Topic assignment dựa trên từ khóa trong catalog; các cụm tiêu đề chưa khớp được khám phá bằng TF-IDF + DBSCAN và tạo topic candidates để admin duyệt.
-- FACT tables: `fact_news_article`, `fact_topic_daily`, `fact_entity_daily`, `fact_source_daily`; có `data_model_catalog` để quản lý metadata, mô tả và grain của các bảng.
+- FACT tables: `fact_news_article`, `fact_topic_daily`, `fact_entity_daily`, `fact_source_daily`, `fact_topic_trending`; bảng mới xếp hạng topic nóng theo ngày, tuần, tháng với số bài, độ phủ nguồn, so sánh kỳ trước và hotness score. Admin dashboard hiển thị 3 bảng xếp hạng.
 - Cleaning rules: loại theo từ khóa tiêu đề, URL, độ dài tiêu đề hoặc source ID; có thể áp dụng lên dữ liệu đã lưu.
 - Pipeline run logging và quality issues.
 - GitHub Actions chạy hằng ngày lúc 08:10 giờ Việt Nam (`01:10 UTC`) và có thể chạy thủ công.
-- Có sẵn một RSS nguồn Vocemundi Wire và 7 topic khởi đầu trong schema SQL; có thể xóa/thay trong giao diện.
+- Cấu hình sẵn các nguồn tin Việt Nam: VnExpress, Tuổi Trẻ, Thanh Niên, Dân trí, VTV, VietnamPlus, Báo Tin tức & Dân tộc, Báo Quân đội nhân dân, Báo Văn hóa và Infonet. Vocemundi Wire được loại khỏi nguồn hoạt động; migration tắt nguồn cũ nhưng giữ lịch sử đã nạp. Một số nguồn được để tắt nếu URL RSS trực tiếp cần xác minh.
 
 ## Kiến trúc / hạn chế MVP
 
 - Đây là Mini Lakehouse, chưa phải Spark/Delta Lake/Iceberg lakehouse. PostgreSQL là kho Raw/Clean/Data Mart trong giai đoạn thử nghiệm.
-- Discovery hiện tối ưu cho tiêu đề tiếng Anh. Model NER mặc định là English; nếu cấu hình nguồn tiếng Việt/Nhật, chất lượng entity sẽ thấp hơn cho đến khi thêm model ngôn ngữ tương ứng.
+- Topic keyword matching và phân cụm tiêu đề đã hỗ trợ văn bản tiếng Việt và tiếng Anh ở mức cơ bản. Model NER mặc định vẫn là English (`en_core_web_sm`), vì vậy việc nhận diện người/tổ chức/địa điểm trong tin tiếng Việt chưa tối ưu và cần được đánh giá trước khi dùng cho phân tích quan trọng.
 - Topic discovery dùng clustering trên tiêu đề + mô tả RSS; chủ đề mới là ứng viên cần duyệt, không phải kết luận chắc chắn rằng đó là chủ đề mới trên thế giới.
-- Pipeline giới hạn 250 entries mỗi feed mỗi lần chạy; chỉnh bằng `MAX_FEED_ENTRIES_PER_SOURCE`.
+- Pipeline ingest các entries hiện có trong RSS feed theo thứ tự nguồn trả về, tối đa 250 entries/feed/lần chạy; không tự giới hạn bài xuất bản trong ngày. RSS thường chỉ cung cấp một cửa sổ các bài gần đây, không phải kho lưu trữ toàn bộ lịch sử. Có thể chỉnh giới hạn bằng `MAX_FEED_ENTRIES_PER_SOURCE`.
 - `fact_topic_daily`, `fact_entity_daily` và `fact_source_daily` được tái tính cho cửa sổ 30 ngày gần nhất; dữ liệu fact cũ hơn giữ nguyên. Data model catalog là metadata quản trị; nó không tự tạo/xóa bảng vật lý theo cấu hình UI.
 - Admin bấm “Chạy pipeline” có thể khởi chạy pipeline trên Render; cho phân tích NER tốt nhất, ưu tiên workflow GitHub Actions vì workflow cài model spaCy tiếng Anh trước khi chạy.
 - RSS và metadata không đồng nghĩa với quyền tái xuất bản toàn văn. Hãy cấu hình `license_name`/`license_url` cho từng nguồn, chỉ lưu và dùng nội dung theo điều khoản áp dụng.
@@ -29,9 +29,10 @@ Một project độc lập để thu thập RSS và xây kho dữ liệu tin t�
 
 1. Tạo một Supabase PostgreSQL project riêng cho Lakehouse để tách biệt dữ liệu ứng dụng Doraemon.
 2. Vào **SQL Editor → New query**.
-3. Mở `sql/schema.sql`, copy toàn bộ nội dung, paste vào SQL Editor và Run.
-4. Kiểm tra các bảng `data_sources`, `raw_feed_items`, `news_articles`, `topics`, `entities`, `topic_candidates`, `entity_candidates`, `cleaning_rules`, `pipeline_runs`, `fact_*` đã được tạo.
-5. Copy kết nối PostgreSQL từ Supabase Project Settings → Database → Connection string. Với runtime cloud, dùng hostname/port connection pooler phù hợp với hướng dẫn của Supabase và bắt buộc SSL (`sslmode=require`). Không đưa URL này vào code hoặc frontend.
+3. Nếu đây là database hoàn toàn mới, mở `sql/schema.sql`, copy toàn bộ nội dung, paste vào SQL Editor và Run.
+4. Nếu đã triển khai v0.1/v0.1.1 và đang có dữ liệu, KHÔNG chạy lại toàn bộ schema để cập nhật; thay vào đó chạy một lần `sql/migrations/002_vietnam_sources_and_topic_trending.sql` trong SQL Editor. Migration idempotent, thêm nguồn/topic Việt Nam, tắt Vocemundi Wire và tạo FACT mới nhưng giữ các bài cũ.
+5. Kiểm tra các bảng `data_sources`, `raw_feed_items`, `news_articles`, `topics`, `entities`, `topic_candidates`, `entity_candidates`, `cleaning_rules`, `pipeline_runs`, `fact_*` đã được tạo.
+6. Copy kết nối PostgreSQL từ Supabase Project Settings → Database → Connection string. Với runtime cloud, dùng hostname/port connection pooler phù hợp với hướng dẫn của Supabase và bắt buộc SSL (`sslmode=require`). Không đưa URL này vào code hoặc frontend.
 
 ## B. Deploy Admin Portal trên Render
 
@@ -54,7 +55,7 @@ Trong repository GitHub vào **Settings → Secrets and variables → Actions �
 
 - `DATABASE_URL` = cùng connection string PostgreSQL của Supabase (đừng đưa vào repository).
 
-Mở tab **Actions → Mini Lakehouse Daily Pipeline → Run workflow** để thử lần đầu. Workflow cũng chạy hằng ngày lúc 08:10 giờ Việt Nam. Private repository có hạn mức Actions theo gói GitHub; theo dõi Billing/Actions usage, không giả định vô hạn.
+Mở tab **Actions → Mini Lakehouse Daily Pipeline → Run workflow** để chạy thủ công. Workflow cũng chạy hằng ngày lúc 08:10 giờ Việt Nam. Trước khi chạy, cần commit phiên bản code mới nhất để tránh lỗi SQL refresh FACT đã được sửa trong v0.1.1. Private repository có hạn mức Actions theo gói GitHub; theo dõi Billing/Actions usage, không giả định vô hạn.
 
 Workflow cài spaCy và model `en_core_web_sm` rồi chạy:
 
@@ -64,7 +65,7 @@ python -m app.pipeline
 
 ## D. Cách dùng
 
-1. Mở **Nguồn dữ liệu**, test feed Vocemundi Wire có sẵn hoặc thêm RSS đáng tin cậy khác.
+1. Mở **Nguồn dữ liệu**, bấm Test RSS cho các nguồn bật sẵn. Các nguồn đang tắt cần chỉnh URL RSS trực tiếp nếu feed directory không trả XML rồi mới bật.
 2. Chạy workflow từ Actions hoặc bấm **Chạy pipeline** trong admin.
 3. Xem **Bài báo & làm sạch** để kiểm tra Raw Layer, dữ liệu Clean và các quality issues.
 4. Thêm quy tắc làm sạch ở tab tương ứng. Sau khi tạo/sửa rule, bấm **Áp dụng quy tắc hiện tại** để tính lại trạng thái excluded cho bài đã lưu, hoặc đợi pipeline kế tiếp.
@@ -85,6 +86,10 @@ python -m app.pipeline
 | `REQUEST_TIMEOUT_SECONDS` | Không | Timeout HTTP feed, mặc định 25 giây |
 | `TIMEZONE` | Không | Múi giờ cho FACT, mặc định `Asia/Ho_Chi_Minh` |
 
+## Topic nóng theo ngày/tuần/tháng
+
+Bảng `fact_topic_trending` có grain một dòng cho mỗi `period_type` (`day`, `week`, `month`) + `period_start` + topic. `article_count` là số bài không bị loại trừ có liên kết với topic trong kỳ; `source_count` là số nguồn khác nhau; `growth_pct` so với ngày/tuần/tháng liền trước khi kỳ trước có dữ liệu. `hotness_score` = bài viết + `2 * ln(1 + số nguồn)` + bonus tăng trưởng dương bị giới hạn tối đa 2 điểm. Đây là chỉ số xu hướng truyền thông, không phải đánh giá độ đúng hoặc độ quan trọng của tin. Dashboard xếp hạng theo `hotness_score`, sau đó số bài và số nguồn.
+
 ## Cấu trúc repository
 
 ```text
@@ -95,6 +100,10 @@ sql/schema.sql        PostgreSQL schema + starter source/topics
  tests/               Unit tests xử lý URL/HTML/rules
 render.yaml           Render Blueprint
 ```
+
+## Chỉ số độ nóng topic
+
+Dashboard hiển thị 3 bảng xếp hạng độc lập: **Hôm nay** (ngày lịch theo `TIMEZONE`), **Tuần này** (tuần bắt đầu thứ Hai), và **Tháng này** (tháng lịch). Mỗi bảng hiển thị số bài không bị loại trừ đã gắn topic, số nguồn độc lập và phần trăm thay đổi so với ngày/tuần/tháng trước. Nếu kỳ trước chưa có dữ liệu, tăng trưởng hiện là `—`. FACT mới được tính lại cuối mỗi pipeline; sau khi chạy migration, cần chạy pipeline để backfill.
 
 ## Kiểm tra local
 
