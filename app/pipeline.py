@@ -266,7 +266,7 @@ def refresh_facts():
         cur.execute("delete from fact_source_daily where stat_date >= current_date-30")
         cur.execute("""insert into fact_source_daily(stat_date,source_id,article_count,excluded_count,avg_quality_score)
                        select coalesce((published_at at time zone %s)::date,(collected_at at time zone %s)::date),source_id,count(*),count(*) filter(where is_excluded),avg(quality_score)
-                       from news_articles where coalesce((published_at at time zone %s)::date,(collected_at at time zone %s)::date)>=current_date-30 group by 1,2""",(settings.timezone,settings.timezone,settings.timezone))
+                       from news_articles where coalesce((published_at at time zone %s)::date,(collected_at at time zone %s)::date)>=current_date-30 group by 1,2""",(settings.timezone,settings.timezone,settings.timezone,settings.timezone))
 
 def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) -> dict:
     started = datetime.now(timezone.utc)
