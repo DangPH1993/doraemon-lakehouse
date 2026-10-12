@@ -17,3 +17,30 @@
 .hot-topic-growth{font-size:10px;font-weight:750;color:#69758a;white-space:nowrap}
 .hot-topic-growth.up{color:#168052}.hot-topic-growth.down{color:#bc4545}
 @media(max-width:950px){.hot-topic-periods{grid-template-columns:1fr}}
+
+
+/* v0.4.0: topic timeline and article classification editor */
+.topic-timeline{display:grid;gap:0;margin-top:18px}
+.timeline-item{display:grid;grid-template-columns:20px minmax(0,1fr);gap:12px;min-width:0}
+.timeline-rail{display:flex;flex-direction:column;align-items:center;min-height:100%;position:relative}
+.timeline-dot{width:10px;height:10px;flex:0 0 10px;border-radius:50%;background:var(--primary);border:2px solid #e8e7ff;box-shadow:0 0 0 3px #f2f1ff;margin-top:5px;z-index:1}
+.timeline-line{width:2px;flex:1;min-height:35px;background:#e0e2f4;margin-top:5px}
+.timeline-content{border:1px solid var(--line);border-radius:11px;padding:13px 15px;margin-bottom:12px;min-width:0;background:#fff}
+.timeline-date{font-size:10px;color:var(--muted);font-weight:700;margin-bottom:7px}
+.timeline-content h3{font-size:13px;line-height:1.5;margin:0 0 7px;letter-spacing:0}
+.timeline-content h3 a{color:#373a84;text-decoration:none}
+.timeline-content h3 a:hover{text-decoration:underline}
+.timeline-content p{font-size:11px;color:#586379;line-height:1.65;margin:6px 0 10px;overflow-wrap:anywhere}
+.timeline-entities{font-size:10px;color:#747d90;margin-top:7px;overflow-wrap:anywhere}
+.timeline-actions{display:flex;justify-content:flex-end;margin-top:10px}
+.classification-dialog{width:min(680px,calc(100vw - 28px));max-height:min(88vh,760px);border:1px solid var(--line);border-radius:16px;padding:0;box-shadow:0 22px 70px #1d27422c;color:var(--ink)}
+.classification-dialog::backdrop{background:#1d253d66;backdrop-filter:blur(2px)}
+.classification-dialog form{padding:22px;max-height:calc(88vh - 4px);overflow:auto}
+.dialog-header{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}
+.dialog-header h2{font-size:20px;margin:0 0 6px}
+.dialog-header p{margin:0 0 8px}
+.classification-dialog label{display:flex;flex-direction:column;gap:7px;font-size:12px;font-weight:750;color:#515c71}
+.classification-dialog textarea{width:100%;resize:vertical;border:1px solid #dde2ec;background:#fff;border-radius:8px;padding:10px 11px;outline:0;min-width:0;color:var(--ink);font:12px/1.6 ui-monospace,Consolas,monospace}
+.classification-dialog textarea:focus{border-color:#9492ed;box-shadow:0 0 0 3px #7773ed16}
+.classification-dialog .form-actions{display:flex;justify-content:flex-end;grid-column:auto;margin-top:4px}
+@media(max-width:620px){.classification-dialog form{padding:16px}.timeline-content{padding:11px}.timeline-item{gap:8px}}
