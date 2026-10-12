@@ -19,8 +19,33 @@
       <a href="#timeline">Timeline</a>
       <a href="#articles">Tin trong ngày</a>
     </nav>
-    <a class="admin-link" href="/" title="Trang quản trị">Quản trị <span aria-hidden="true">↗</span></a>
+    <div class="header-actions">
+      <div class="auth-area" id="authArea" aria-live="polite">
+        <button class="auth-button auth-button-secondary" type="button" data-auth-open="login">Đăng nhập</button>
+        <button class="auth-button" type="button" data-auth-open="register">Đăng ký</button>
+      </div>
+      <a class="admin-link" href="/" title="Trang quản trị">Quản trị <span aria-hidden="true">↗</span></a>
+    </div>
   </header>
+
+  <div class="auth-modal" id="authModal" hidden>
+    <div class="auth-backdrop" data-auth-close="true"></div>
+    <section class="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <button class="auth-close" type="button" data-auth-close="true" aria-label="Đóng">×</button>
+      <p class="eyebrow">NEWS RADAR ACCOUNT</p>
+      <h2 id="authTitle">Đăng nhập</h2>
+      <p class="auth-description" id="authDescription">Đăng nhập để lưu các topic và entity bạn muốn theo dõi.</p>
+      <form id="authForm">
+        <label class="auth-field" for="authIdentifier"><span id="authIdentifierLabel">Tên đăng nhập hoặc email</span><input id="authIdentifier" name="identifier" autocomplete="username" minlength="3" maxlength="254" required></label>
+        <label class="auth-field" id="authEmailField" for="authEmail" hidden><span>Email</span><input id="authEmail" name="email" type="email" autocomplete="email" maxlength="254"></label>
+        <label class="auth-field" for="authPassword"><span>Mật khẩu</span><input id="authPassword" name="password" type="password" autocomplete="current-password" minlength="8" maxlength="128" required></label>
+        <label class="auth-field" id="authPasswordConfirmField" for="authPasswordConfirm" hidden><span>Nhập lại mật khẩu</span><input id="authPasswordConfirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="8" maxlength="128"></label>
+        <p class="auth-feedback" id="authFeedback" role="status" aria-live="polite"></p>
+        <button class="auth-submit" id="authSubmit" type="submit">Đăng nhập</button>
+      </form>
+      <p class="auth-switch-line"><span id="authSwitchPrompt">Chưa có tài khoản?</span> <button type="button" id="authSwitchMode" data-switch-auth="register">Đăng ký</button></p>
+    </section>
+  </div>
 
   <main class="page-shell">
     <section class="hero">
@@ -43,6 +68,28 @@
       <div class="stat-item"><span class="stat-label">Nguồn tin đang bật</span><strong id="statSources">—</strong><span class="stat-note">Nguồn dữ liệu</span></div>
       <div class="stat-item"><span class="stat-label">Topic sự kiện</span><strong id="statEvents">—</strong><span class="stat-note">Được theo dõi</span></div>
       <div class="stat-item stat-highlight"><span class="stat-label">Góc nhìn</span><strong>Topic → Timeline</strong><span class="stat-note">Xâu chuỗi tin theo sự kiện</span></div>
+    </section>
+
+    <section class="content-section personal-section" id="myRadar" hidden>
+      <div class="section-heading personal-heading">
+        <div><p class="eyebrow">YOUR PERSONAL RADAR</p><h2>Radar của bạn</h2><p class="section-subtitle">Các timeline đã lưu sẽ tự động xuất hiện ở đây mỗi lần bạn quay lại.</p></div>
+        <button class="auth-button" id="openTimelinePicker" type="button">+ Chọn topic / entity</button>
+      </div>
+      <div class="saved-summary" id="savedSummary">Đang tải lựa chọn của bạn…</div>
+      <div id="savedTimelinesContainer" class="saved-timelines" aria-live="polite"><div class="loading-card">Đang tải timeline cá nhân…</div></div>
+      <details class="timeline-picker" id="timelinePickerDetails">
+        <summary>Quản lý topic và entity đang theo dõi</summary>
+        <div class="picker-content">
+          <p class="section-subtitle">Tích chọn tối đa 10 mục. Lựa chọn được lưu theo tài khoản và đồng bộ khi đăng nhập trên thiết bị khác.</p>
+          <label class="picker-search" for="timelineOptionSearch"><span aria-hidden="true">⌕</span><input id="timelineOptionSearch" type="search" placeholder="Tìm topic hoặc entity…" maxlength="120"></label>
+          <div class="picker-columns">
+            <section class="picker-group"><h3>Topic sự kiện <span id="topicOptionCount">0</span></h3><div id="topicOptions" class="picker-option-list"><div class="loading-card">Đang tải topic…</div></div></section>
+            <section class="picker-group"><h3>Entity / thực thể <span id="entityOptionCount">0</span></h3><div id="entityOptions" class="picker-option-list"><div class="loading-card">Đang tải entity…</div></div></section>
+          </div>
+          <div class="picker-footer"><span id="selectionCount">Đã chọn 0/10</span><button class="auth-button" id="saveTimelinesButton" type="button">Lưu lựa chọn</button></div>
+          <p class="auth-feedback" id="saveTimelineFeedback" role="status" aria-live="polite"></p>
+        </div>
+      </details>
     </section>
 
     <section class="content-section" id="trending">
