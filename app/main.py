@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json, logging, threading
+from datetime import date, timedelta
 from urllib.parse import urlparse
 import requests
 from fastapi import FastAPI, Depends, HTTPException, Query, Body
@@ -14,7 +15,7 @@ from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.4.2',description='Admin portal for RSS ingestion, catalog, data quality and analytics.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.5.0',description='News reader, admin portal, RSS ingestion, catalog, data quality and analytics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -68,8 +69,11 @@ def pagination_meta(page: int, page_size: int, total: int) -> dict:
 
 @app.get('/')
 def index(): return FileResponse('static/index.html')
+@app.get('/news')
+def public_news_page(): return FileResponse('static/news.html')
+
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.4.2'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.5.0'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -127,6 +131,132 @@ def dashboard():
     ORDER BY CASE p.period_type WHEN 'day' THEN 1 WHEN 'week' THEN 2 ELSE 3 END, f.rank_position
     """, (settings.timezone,))
     return {'counts':counts,'collection_trend':trend,'top_topics':top_topics,'top_sources':top_sources,'recent_runs':recent_runs,'hot_topics':hot_topics}
+
+@app.get('/api/public/news/overview')
+def public_news_overview():
+    """Public, read-only summary for the user-facing news portal."""
+    row = fetch_one("""WITH clock AS (
+          SELECT (now() at time zone %s)::date AS today
+        )
+        SELECT
+          (SELECT count(*)::int FROM news_articles a, clock c
+           WHERE a.is_excluded=false
+             AND (coalesce(a.published_at,a.collected_at) at time zone %s)::date=c.today) AS articles_today,
+          (SELECT count(*)::int FROM data_sources WHERE enabled=true) AS enabled_sources,
+          (SELECT count(*)::int FROM topics WHERE status='active' AND topic_type='event') AS active_event_topics,
+          (SELECT count(*)::int FROM fact_topic_trending f
+           JOIN topics t ON t.topic_id=f.topic_id
+           CROSS JOIN clock c
+           WHERE f.period_type='day' AND f.period_start=c.today
+             AND t.status='active' AND t.topic_type='event') AS ranked_events_today
+        """, (settings.timezone, settings.timezone))
+    return row or {'articles_today': 0, 'enabled_sources': 0,
+                   'active_event_topics': 0, 'ranked_events_today': 0}
+
+
+@app.get('/api/public/news/hot-topics')
+def public_hot_topics(
+    period: str = Query(default='day', pattern='^(day|week|month)$'),
+    limit: int = Query(default=10, ge=1, le=30),
+):
+    """Return current event-topic ranking for today, this week or this month."""
+    local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
+    today = (local or {}).get('today')
+    if today is None:
+        raise HTTPException(status_code=503, detail='Could not resolve local date')
+    if period == 'day':
+        period_start = today
+        label = 'Hôm nay'
+    elif period == 'week':
+        period_start = today - timedelta(days=today.weekday())
+        label = 'Tuần này'
+    else:
+        period_start = date(today.year, today.month, 1)
+        label = 'Tháng này'
+    items = fetch_all("""SELECT f.topic_id, t.slug, t.name AS topic_name,
+                              t.description, f.period_type, f.period_start,
+                              f.article_count, f.source_count,
+                              f.previous_article_count, f.growth_pct,
+                              f.hotness_score, f.rank_position
+                       FROM fact_topic_trending f
+                       JOIN topics t ON t.topic_id=f.topic_id
+                       WHERE f.period_type=%s AND f.period_start=%s
+                         AND t.status='active' AND t.topic_type='event'
+                       ORDER BY f.rank_position ASC, f.hotness_score DESC
+                       LIMIT %s""", (period, period_start, limit))
+    return {'period': period, 'period_start': period_start, 'period_label': label,
+            'items': items, 'count': len(items)}
+
+
+@app.get('/api/public/news/articles')
+def public_daily_articles(
+    q: str | None = Query(default=None, max_length=150),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=50),
+):
+    """Public today's article list: headlines, short RSS snippets and source links only."""
+    local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
+    today = (local or {}).get('today')
+    if today is None:
+        raise HTTPException(status_code=503, detail='Could not resolve local date')
+    where = ["a.is_excluded=false",
+             "(coalesce(a.published_at,a.collected_at) at time zone %s)::date=%s"]
+    vals: list = [settings.timezone, today]
+    if q and q.strip():
+        term = f"%{q.strip()[:150]}%"
+        where.append("(a.title ILIKE %s OR a.summary ILIKE %s OR s.name ILIKE %s)")
+        vals.extend([term, term, term])
+    from_sql = " FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id"
+    where_sql = " WHERE " + " AND ".join(where)
+    total_row = fetch_one("SELECT count(*)::int AS total" + from_sql + where_sql, vals)
+    total = int((total_row or {}).get('total', 0))
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    items = fetch_all("""SELECT a.article_id, a.title, a.url, a.author, a.language,
+                              left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
+                              a.published_at, a.collected_at,
+                              coalesce(a.published_at,a.collected_at) AS timeline_at,
+                              s.name AS source_name,
+                              coalesce((SELECT json_agg(t.name ORDER BY t.name)
+                                        FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                                        WHERE at.article_id=a.article_id AND t.status='active'), '[]'::json) AS topics
+                       """ + from_sql + where_sql +
+                       " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
+                       vals + [page_size, (page - 1) * page_size])
+    return {'date': today, 'items': items, 'pagination': pagination_meta(page, page_size, total)}
+
+
+@app.get('/api/public/news/topics/{topic_id}/timeline')
+def public_topic_timeline(
+    topic_id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=50),
+):
+    """Public chronological view of articles assigned to one active event topic."""
+    topic = fetch_one("""SELECT topic_id, slug, name, description, topic_type
+                         FROM topics WHERE topic_id=%s AND status='active'""", (topic_id,))
+    if not topic or topic.get('topic_type') != 'event':
+        raise HTTPException(status_code=404, detail='Event topic not found')
+    from_sql = " FROM article_topics at JOIN news_articles a ON a.article_id=at.article_id JOIN data_sources s ON s.source_id=a.source_id"
+    where_sql = " WHERE at.topic_id=%s AND a.is_excluded=false"
+    total_row = fetch_one("SELECT count(DISTINCT a.article_id)::int AS total" + from_sql + where_sql, (topic_id,))
+    total = int((total_row or {}).get('total', 0))
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    items = fetch_all("""SELECT a.article_id, a.title, a.url, a.author, a.language,
+                              left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
+                              a.published_at, a.collected_at,
+                              coalesce(a.published_at,a.collected_at) AS timeline_at,
+                              s.name AS source_name,
+                              coalesce((SELECT string_agg(e.canonical_name, ', ' ORDER BY e.canonical_name)
+                                        FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                                        WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities
+                       """ + from_sql + where_sql +
+                       " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
+                       (topic_id, page_size, (page - 1) * page_size))
+    return {'topic': topic, 'items': items,
+            'pagination': pagination_meta(page, page_size, total)}
+
 
 @app.get('/api/sources',dependencies=[Depends(require_admin)])
 def list_sources():
