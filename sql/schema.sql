@@ -311,3 +311,41 @@ insert into data_model_catalog(table_name,model_type,description,grain) values
  ('fact_entity_daily','fact','Daily article counts by entity and source','One record per day + entity + source'),
  ('fact_source_daily','fact','Daily collection and quality metrics by source','One record per day + source')
 on conflict(table_name) do update set description=excluded.description,grain=excluded.grain;
+
+-- News Radar user accounts and per-user saved timeline preferences.
+-- Safe to rerun; existing news/article/topic/entity data is not modified.
+
+CREATE TABLE IF NOT EXISTS app_users (
+    user_id BIGSERIAL PRIMARY KEY,
+    username VARCHAR(32) NOT NULL,
+    username_normalized VARCHAR(32) NOT NULL UNIQUE,
+    email VARCHAR(254) NOT NULL,
+    email_normalized VARCHAR(254) NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS user_saved_timelines (
+    saved_timeline_id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES app_users(user_id) ON DELETE CASCADE,
+    timeline_type TEXT NOT NULL CHECK (timeline_type IN ('topic', 'entity')),
+    topic_id BIGINT REFERENCES topics(topic_id) ON DELETE CASCADE,
+    entity_id BIGINT REFERENCES entities(entity_id) ON DELETE CASCADE,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_saved_timeline_target CHECK (
+        (timeline_type = 'topic' AND topic_id IS NOT NULL AND entity_id IS NULL)
+        OR
+        (timeline_type = 'entity' AND entity_id IS NOT NULL AND topic_id IS NULL)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_user_saved_topic
+    ON user_saved_timelines(user_id, topic_id) WHERE timeline_type = 'topic';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_user_saved_entity
+    ON user_saved_timelines(user_id, entity_id) WHERE timeline_type = 'entity';
+CREATE INDEX IF NOT EXISTS idx_user_saved_timelines_user_order
+    ON user_saved_timelines(user_id, display_order, saved_timeline_id);
+
