@@ -9,6 +9,16 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: AI_CLASSIFICATION_BATCH_SIZE
+        value: "12"
+      - key: AI_CLASSIFICATION_RUN_LIMIT
+        value: "72"
+      - key: AI_REQUEST_TIMEOUT_SECONDS
+        value: "35"
       - key: ADMIN_USERNAME
         value: admin
       - key: ADMIN_PASSWORD
