@@ -10,11 +10,11 @@ from pydantic import BaseModel, Field, field_validator
 from .config import settings
 from .db import get_conn, fetch_all, fetch_one
 from .security import issue_token, require_admin
-from .processing import canonicalize_url, norm_name, slugify
+from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.2.0',description='Admin portal for RSS ingestion, catalog, data quality and analytics.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.4.0',description='Admin portal for RSS ingestion, catalog, data quality and analytics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -40,6 +40,7 @@ class TopicBody(BaseModel):
     name: str = Field(min_length=2,max_length=180)
     description: str = Field(default='',max_length=2000)
     keywords: list[str] = Field(default_factory=list,max_length=100)
+    topic_type: str = 'category'
     status: str = 'active'
 class EntityBody(BaseModel):
     canonical_name: str = Field(min_length=2,max_length=180)
@@ -47,6 +48,10 @@ class EntityBody(BaseModel):
     external_id: str | None = None
     description: str = Field(default='',max_length=2000)
     aliases: list[str] = Field(default_factory=list,max_length=100)
+class ArticleClassificationBody(BaseModel):
+    topic_names: list[str] = Field(default_factory=list, max_length=30)
+    entity_names: list[str] = Field(default_factory=list, max_length=30)
+
 class RuleBody(BaseModel):
     name: str = Field(min_length=2,max_length=180)
     rule_type: str
@@ -56,7 +61,7 @@ class RuleBody(BaseModel):
 @app.get('/')
 def index(): return FileResponse('static/index.html')
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.2.0'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.4.0'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -83,9 +88,10 @@ def dashboard():
       (select count(*) from news_articles) as articles_total,
       (select count(*) from news_articles where collected_at >= now()-interval '24 hours') as articles_24h,
       (select count(*) from topics where status='active') as topics_active,
+      (select count(*) from topics where status='active' and topic_type='event') as event_topics_active,
       (select count(*) from entities where status='active') as entities_active,
-      (select count(*) from topic_candidates where status='pending') as topic_candidates,
-      (select count(*) from entity_candidates where status='pending') as entity_candidates,
+      (select count(*) from news_articles where ai_classified_at is null and is_excluded=false and coalesce(published_at,collected_at)>=now()-interval '30 days') as ai_pending_articles,
+      (select count(*) from news_articles where ai_classification_error is not null and is_excluded=false) as ai_classification_errors,
       (select count(*) from data_quality_issues where resolved_at is null) as open_issues,
       (select count(*) from pipeline_runs where status in ('failed','partial') and started_at >= now()-interval '7 days') as failed_runs""")
     trend=fetch_all("""select to_char(date_trunc('day',a.collected_at),'YYYY-MM-DD') as day, count(*) as count
@@ -93,7 +99,7 @@ def dashboard():
                       group by 1 order by 1""")
     top_topics=fetch_all("""select t.topic_id,t.name,sum(f.article_count)::int as article_count
                           from fact_topic_daily f join topics t on t.topic_id=f.topic_id
-                          where f.stat_date >= (current_date - 6) and t.status='active'
+                          where f.stat_date >= (current_date - 6) and t.status='active' and t.topic_type='event'
                           group by t.topic_id,t.name order by article_count desc limit 10""")
     top_sources=fetch_all("""select s.source_id,s.name,count(a.article_id)::int as article_count
                            from data_sources s left join news_articles a on a.source_id=s.source_id and a.collected_at>=now()-interval '7 days'
@@ -108,8 +114,8 @@ def dashboard():
            f.article_count,f.source_count,f.previous_article_count,f.growth_pct,f.hotness_score,f.rank_position
     FROM periods p
     LEFT JOIN fact_topic_trending f ON f.period_type=p.period_type AND f.period_start=p.period_start
-    LEFT JOIN topics t ON t.topic_id=f.topic_id AND t.status='active'
-    WHERE f.topic_id IS NOT NULL
+    LEFT JOIN topics t ON t.topic_id=f.topic_id AND t.status='active' AND t.topic_type='event'
+    WHERE f.topic_id IS NOT NULL AND t.topic_id IS NOT NULL
     ORDER BY CASE p.period_type WHEN 'day' THEN 1 WHEN 'week' THEN 2 ELSE 3 END, f.rank_position
     """, (settings.timezone,))
     return {'counts':counts,'collection_trend':trend,'top_topics':top_topics,'top_sources':top_sources,'recent_runs':recent_runs,'hot_topics':hot_topics}
@@ -167,11 +173,124 @@ def list_articles(q:str|None=None,source_id:int|None=None,excluded:bool|None=Non
     if excluded is not None: where.append('a.is_excluded=%s'); vals.append(excluded)
     sql="""select a.article_id,a.title,a.url,a.canonical_url,a.summary,left(a.content_text,500) as content_preview,a.author,a.language,a.published_at,a.collected_at,a.quality_score,a.is_excluded,a.exclude_reason,s.name as source_name,
            coalesce((select string_agg(t.name,', ' order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id),'') as topics,
-           coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id),'') as entities
+           coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id),'') as entities,
+           coalesce((select json_agg(t.name order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id),'[]'::json) as topic_names,
+           coalesce((select json_agg(e.canonical_name order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id),'[]'::json) as entity_names
            from news_articles a join data_sources s on s.source_id=a.source_id"""
     if where: sql+=' where '+' and '.join(where)
     sql+=' order by a.collected_at desc limit %s offset %s'; vals.extend([limit,offset])
     return fetch_all(sql,vals)
+
+@app.get('/api/articles/{article_id}/classifications', dependencies=[Depends(require_admin)])
+def get_article_classifications(article_id: int):
+    article = fetch_one("select article_id,title from news_articles where article_id=%s", (article_id,))
+    if not article:
+        raise HTTPException(status_code=404, detail='Article not found')
+    topics = fetch_all("""select t.topic_id,t.name,t.topic_type from article_topics at
+                         join topics t on t.topic_id=at.topic_id where at.article_id=%s order by t.name""", (article_id,))
+    entities = fetch_all("""select distinct e.entity_id,e.canonical_name,e.entity_type from article_entities ae
+                           join entities e on e.entity_id=ae.entity_id where ae.article_id=%s order by e.canonical_name""", (article_id,))
+    return {'article': article, 'topics': topics, 'entities': entities}
+
+@app.patch('/api/articles/{article_id}/classifications', dependencies=[Depends(require_admin)])
+def patch_article_classifications(article_id: int, body: ArticleClassificationBody):
+    article = fetch_one("select article_id,title from news_articles where article_id=%s", (article_id,))
+    if not article:
+        raise HTTPException(status_code=404, detail='Article not found')
+    topic_names = list(dict.fromkeys(str(x).strip()[:180] for x in body.topic_names if str(x).strip()))
+    entity_names = list(dict.fromkeys(str(x).strip()[:180] for x in body.entity_names if str(x).strip()))
+    topic_ids: list[int] = []
+    entity_records: list[tuple[int, str]] = []
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("select topic_id,name,slug,event_key,topic_type from topics where status='active'")
+        all_topics = cur.fetchall()
+        by_topic_norm = {norm_name(t['name']): t for t in all_topics}
+        by_slug = {t['slug']: t for t in all_topics}
+        for name in topic_names:
+            normalized = norm_name(name)
+            if not normalized:
+                continue
+            topic = by_topic_norm.get(normalized)
+            if not topic:
+                event_key = 'admin:' + hash_text(normalized)[:32]
+                slug = 'event-' + slugify(name)
+                existing_slug = by_slug.get(slug)
+                if existing_slug and norm_name(existing_slug['name']) != normalized:
+                    slug = f"{slug[:155]}-{hash_text(normalized)[:8]}"
+                cur.execute("""insert into topics(slug,event_key,name,description,keywords,topic_type,status,origin)
+                               values(%s,%s,%s,'Topic được tạo/chỉnh trực tiếp từ phân loại bài báo.',%s,'event','active','manual')
+                               on conflict(event_key) do update set name=excluded.name,updated_at=now()
+                               returning topic_id,name,slug,event_key,topic_type""",
+                            (slug,event_key,name,[name]))
+                topic = cur.fetchone()
+                all_topics.append(topic); by_topic_norm[norm_name(topic['name'])] = topic; by_slug[topic['slug']] = topic
+            if topic['topic_id'] not in topic_ids:
+                topic_ids.append(topic['topic_id'])
+        cur.execute("select entity_id,canonical_name,normalized_name,entity_type from entities where status='active'")
+        all_entities = cur.fetchall()
+        by_entity_norm = {norm_name(e['canonical_name']): e for e in all_entities}
+        cur.execute("select entity_id,alias,normalized_alias from entity_aliases")
+        alias_rows = cur.fetchall()
+        by_alias = {r['normalized_alias']: r for r in alias_rows}
+        for name in entity_names:
+            normalized = norm_name(name)
+            if not normalized:
+                continue
+            entity = by_entity_norm.get(normalized)
+            if not entity and normalized in by_alias:
+                alias_entity_id = by_alias[normalized]['entity_id']
+                entity = next((e for e in all_entities if e['entity_id'] == alias_entity_id), None)
+            if not entity:
+                cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,description,origin)
+                               values(%s,%s,'UNKNOWN','Entity được tạo/chỉnh trực tiếp từ phân loại bài báo.','manual')
+                               on conflict(normalized_name,entity_type) do update set updated_at=now()
+                               returning entity_id,canonical_name,normalized_name,entity_type""", (name,normalized))
+                entity = cur.fetchone()
+                cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
+                               values(%s,%s,%s) on conflict do nothing""", (entity['entity_id'],name,normalized))
+                all_entities.append(entity); by_entity_norm[normalized] = entity
+            if not any(eid == entity['entity_id'] for eid, _ in entity_records):
+                entity_records.append((entity['entity_id'], name))
+        cur.execute('delete from article_topics where article_id=%s', (article_id,))
+        cur.execute('delete from article_entities where article_id=%s', (article_id,))
+        for topic_id in topic_ids:
+            cur.execute("""insert into article_topics(article_id,topic_id,confidence,assignment_method)
+                           values(%s,%s,1.0,'admin') on conflict do nothing""", (article_id,topic_id))
+        for entity_id, mention in entity_records:
+            cur.execute("""insert into article_entities(article_id,entity_id,mention_text,confidence)
+                           values(%s,%s,%s,1.0) on conflict do nothing""", (article_id,entity_id,mention))
+        cur.execute("""update news_articles set ai_classified_at=now(),ai_classification='{"manual_override":true}'::jsonb,
+                       ai_classification_error=null,event_topic_scanned_at=now(),updated_at=now() where article_id=%s""", (article_id,))
+    try:
+        from .pipeline import refresh_facts
+        refresh_facts()
+    except Exception as exc:
+        log.warning('FACT refresh after article classification edit failed: %s', exc)
+    return {'article_id': article_id, 'topic_ids': topic_ids, 'entity_ids': [e[0] for e in entity_records], 'saved': True}
+
+@app.get('/api/topics/{topic_id}/timeline', dependencies=[Depends(require_admin)])
+def topic_timeline(topic_id: int, limit: int = Query(default=100, ge=1, le=300)):
+    topic = fetch_one("select topic_id,name,description,topic_type,parent_topic_id from topics where topic_id=%s", (topic_id,))
+    if not topic:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    rows = fetch_all("""select recent.article_id,recent.title,recent.url,recent.summary,recent.author,
+                             recent.source_name,recent.published_at,recent.collected_at,recent.timeline_at,
+                             coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name)
+                                       from article_entities ae join entities e on e.entity_id=ae.entity_id
+                                       where ae.article_id=recent.article_id),'') as entities
+                      from (
+                        select a.article_id,a.title,a.url,a.summary,a.author,s.name as source_name,
+                               a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) as timeline_at
+                        from article_topics at
+                        join news_articles a on a.article_id=at.article_id
+                        join data_sources s on s.source_id=a.source_id
+                        where at.topic_id=%s and a.is_excluded=false
+                        order by coalesce(a.published_at,a.collected_at) desc
+                        limit %s
+                      ) recent
+                      order by recent.timeline_at asc""", (topic_id, limit))
+    total = fetch_one('select count(*)::int as total from article_topics at join news_articles a on a.article_id=at.article_id where at.topic_id=%s and a.is_excluded=false', (topic_id,))
+    return {'topic': topic, 'count': len(rows), 'total_count': (total or {}).get('total', len(rows)), 'items': rows}
 
 @app.get('/api/raw-items',dependencies=[Depends(require_admin)])
 def list_raw_items(q:str|None=None,source_id:int|None=None,limit:int=Query(default=100,ge=1,le=500)):
@@ -193,22 +312,21 @@ def list_raw_items(q:str|None=None,source_id:int|None=None,limit:int=Query(defau
 def list_topics():
     topics=fetch_all("""select t.*, (select count(*) from article_topics at where at.topic_id=t.topic_id) as article_count
                        from topics t order by t.status, t.name""")
-    candidates=fetch_all("""select c.*, (select count(*) from topic_candidate_occurrences o where o.candidate_id=c.candidate_id) as article_count,
-                          (select count(distinct source_id) from topic_candidate_occurrences o where o.candidate_id=c.candidate_id) as source_count,
-                          (select json_agg(samp) from (select json_build_object('article_id',a.article_id,'title',a.title,'url',a.url) as samp from topic_candidate_occurrences o join news_articles a on a.article_id=o.article_id where o.candidate_id=c.candidate_id order by a.collected_at desc limit 5) sample_rows) as samples
-                          from topic_candidates c order by c.last_seen_at desc limit 100""")
-    return {'topics':topics,'candidates':candidates}
+    # Topic discovery is automatic; no manual approval queue is exposed in the admin UI.
+    return {'topics':topics,'candidates':[]}
 @app.post('/api/topics',dependencies=[Depends(require_admin)])
 def create_topic(body:TopicBody):
     if body.status not in {'active','archived'}: raise HTTPException(status_code=400,detail='status must be active or archived')
+    if body.topic_type not in {'category','event'}: raise HTTPException(status_code=400,detail='topic_type must be category or event')
     slug=slugify(body.name)
-    row=fetch_one("""insert into topics(slug,name,description,keywords,status,origin) values(%s,%s,%s,%s,%s,'manual') returning *""",(slug,body.name.strip(),body.description, [x.strip() for x in body.keywords if x.strip()],body.status))
+    row=fetch_one("""insert into topics(slug,name,description,keywords,topic_type,status,origin) values(%s,%s,%s,%s,%s,%s,'manual') returning *""",(slug,body.name.strip(),body.description, [x.strip() for x in body.keywords if x.strip()],body.topic_type,body.status))
     return row
 @app.patch('/api/topics/{topic_id}',dependencies=[Depends(require_admin)])
 def patch_topic(topic_id:int,patch:dict=Body(...)):
-    allowed={'name','description','keywords','status'}; fields={k:v for k,v in patch.items() if k in allowed}
+    allowed={'name','description','keywords','status','topic_type'}; fields={k:v for k,v in patch.items() if k in allowed}
     if not fields: raise HTTPException(status_code=400,detail='No allowed fields')
     if 'status' in fields and fields['status'] not in {'active','archived'}: raise HTTPException(status_code=400,detail='Invalid status')
+    if 'topic_type' in fields and fields['topic_type'] not in {'category','event'}: raise HTTPException(status_code=400,detail='topic_type must be category or event')
     if 'name' in fields: fields['slug']=slugify(fields['name'])
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(f'{k}=%s'); vals.append(v)
@@ -224,8 +342,9 @@ def approve_topic(candidate_id:int):
     if candidate['status']!='pending': raise HTTPException(status_code=409,detail='Candidate is not pending')
     with get_conn() as conn, conn.cursor() as cur:
         slug=slugify(candidate['suggested_name'])
-        cur.execute("""insert into topics(slug,name,description,keywords,origin) values(%s,%s,%s,%s,'discovered')
-                       on conflict(slug) do update set name=excluded.name returning topic_id""",(slug,candidate['suggested_name'],'Discovered from recurring headline cluster',candidate['keywords'] or []))
+        candidate_type = candidate.get('candidate_type') or 'event'
+        cur.execute("""insert into topics(slug,name,description,keywords,topic_type,origin) values(%s,%s,%s,%s,%s,'discovered')
+                       on conflict(slug) do update set name=excluded.name,topic_type=excluded.topic_type returning topic_id""",(slug,candidate['suggested_name'],'Discovered from recurring headline cluster',candidate['keywords'] or [],candidate_type))
         topic_id=cur.fetchone()['topic_id']
         cur.execute("""insert into article_topics(article_id,topic_id,confidence,assignment_method)
                        select article_id,%s,0.55,'approved_cluster' from topic_candidate_occurrences where candidate_id=%s on conflict do nothing""",(topic_id,candidate_id))
@@ -246,11 +365,8 @@ def list_entities():
     ents=fetch_all("""select e.*, (select count(*) from article_entities ae where ae.entity_id=e.entity_id) as article_count,
                      coalesce((select array_agg(a.alias order by a.alias) from entity_aliases a where a.entity_id=e.entity_id),'{}') as aliases
                      from entities e order by e.status,e.canonical_name limit 1000""")
-    candidates=fetch_all("""select c.*, (select count(*) from entity_candidate_occurrences o where o.candidate_id=c.candidate_id) as article_count,
-                          (select count(distinct source_id) from entity_candidate_occurrences o where o.candidate_id=c.candidate_id) as source_count,
-                          (select json_agg(samp) from (select json_build_object('article_id',a.article_id,'title',a.title,'url',a.url) as samp from entity_candidate_occurrences o join news_articles a on a.article_id=o.article_id where o.candidate_id=c.candidate_id order by a.collected_at desc limit 5) sample_rows) as samples
-                          from entity_candidates c order by c.last_seen_at desc limit 200""")
-    return {'entities':ents,'candidates':candidates}
+    # Entities are automatically inserted by GenAI; the admin edits article links as needed.
+    return {'entities':ents,'candidates':[]}
 @app.post('/api/entities',dependencies=[Depends(require_admin)])
 def create_entity(body:EntityBody):
     row=fetch_one("""insert into entities(canonical_name,normalized_name,entity_type,external_id,description,origin)
@@ -365,7 +481,7 @@ def patch_data_model(model_id:int,patch:dict=Body(...)):
 FACT_QUERIES={
  'fact_news_article':"""select f.article_id,s.name as source_name,f.published_date,a.title,f.title_length,f.word_count,f.detected_entity_count,f.detected_topic_count,f.quality_score,f.is_excluded,f.loaded_at from fact_news_article f join data_sources s on s.source_id=f.source_id join news_articles a on a.article_id=f.article_id order by f.published_date desc nulls last limit %s""",
  'fact_topic_daily':"""select f.stat_date,t.name as topic,s.name as source,f.article_count,f.updated_at from fact_topic_daily f join topics t on t.topic_id=f.topic_id join data_sources s on s.source_id=f.source_id order by f.stat_date desc,f.article_count desc limit %s""",
- 'fact_topic_trending':"""select f.period_type,f.period_start,t.name as topic,f.article_count,f.source_count,f.previous_article_count,f.growth_pct,f.hotness_score,f.rank_position,f.updated_at from fact_topic_trending f join topics t on t.topic_id=f.topic_id order by case f.period_type when 'day' then 1 when 'week' then 2 else 3 end,f.period_start desc,f.rank_position limit %s""",
+ 'fact_topic_trending':"""select f.period_type,f.period_start,t.name as topic,t.topic_type,f.article_count,f.source_count,f.previous_article_count,f.growth_pct,f.hotness_score,f.rank_position,f.updated_at from fact_topic_trending f join topics t on t.topic_id=f.topic_id order by case f.period_type when 'day' then 1 when 'week' then 2 else 3 end,f.period_start desc,f.rank_position limit %s""",
  'fact_entity_daily':"""select f.stat_date,e.canonical_name as entity,e.entity_type,s.name as source,f.article_count,f.updated_at from fact_entity_daily f join entities e on e.entity_id=f.entity_id join data_sources s on s.source_id=f.source_id order by f.stat_date desc,f.article_count desc limit %s""",
  'fact_source_daily':"""select f.stat_date,s.name as source,f.article_count,f.excluded_count,f.avg_quality_score,f.updated_at from fact_source_daily f join data_sources s on s.source_id=f.source_id order by f.stat_date desc,f.article_count desc limit %s"""
 }
