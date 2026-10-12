@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102b3f">
+  <meta name="description" content="Theo dõi sự kiện nổi bật, dòng thời gian và tin tức mới trong ngày từ nhiều nguồn báo chí.">
+  <title>News Radar — Doraemon</title>
+  <link rel="stylesheet" href="/static/news.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/news" aria-label="News Radar trang chủ">
+      <span class="brand-mark">N<span>.</span></span>
+      <span class="brand-copy"><strong>NEWS RADAR</strong><small>by Doraemon</small></span>
+    </a>
+    <nav class="header-nav" aria-label="Điều hướng chính">
+      <a href="#trending">Sự kiện nổi bật</a>
+      <a href="#timeline">Timeline</a>
+      <a href="#articles">Tin trong ngày</a>
+    </nav>
+    <a class="admin-link" href="/" title="Trang quản trị">Quản trị <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main class="page-shell">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="live-dot"></span> TIN TỨC ĐƯỢC KẾT NỐI THEO SỰ KIỆN</p>
+        <h1>Nắm bắt <em>diễn biến</em>,<br>không chỉ đọc tiêu đề.</h1>
+        <p class="hero-description">Xem sự kiện nào đang được quan tâm, lần theo dòng thời gian và khám phá những tin mới từ các nguồn báo.</p>
+        <div class="hero-meta"><span class="date-badge" id="currentDate">Hôm nay</span><span class="meta-separator">·</span><span>Cập nhật từ kho tin Doraemon</span></div>
+      </div>
+      <div class="hero-visual" aria-hidden="true">
+        <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div>
+        <div class="planet planet-main"><span>NEWS<br>RADAR</span></div>
+        <div class="planet planet-small planet-a">↗</div><div class="planet planet-small planet-b">●</div><div class="planet planet-small planet-c">✦</div>
+        <div class="visual-caption">FROM HEADLINES<br>TO THE BIG PICTURE</div>
+      </div>
+    </section>
+
+    <section class="stats-strip" aria-label="Tổng quan tin tức">
+      <div class="stat-item"><span class="stat-label">Bài báo hôm nay</span><strong id="statArticles">—</strong><span class="stat-note">Đang có trong kho tin</span></div>
+      <div class="stat-item"><span class="stat-label">Nguồn tin đang bật</span><strong id="statSources">—</strong><span class="stat-note">Nguồn dữ liệu</span></div>
+      <div class="stat-item"><span class="stat-label">Topic sự kiện</span><strong id="statEvents">—</strong><span class="stat-note">Được theo dõi</span></div>
+      <div class="stat-item stat-highlight"><span class="stat-label">Góc nhìn</span><strong>Topic → Timeline</strong><span class="stat-note">Xâu chuỗi tin theo sự kiện</span></div>
+    </section>
+
+    <section class="content-section" id="trending">
+      <div class="section-heading">
+        <div><p class="eyebrow">WHAT MATTERS NOW</p><h2>Sự kiện nổi bật</h2><p class="section-subtitle">Xếp hạng theo lượng bài, độ phủ nguồn và mức tăng so với kỳ trước.</p></div>
+        <div class="period-switch" role="tablist" aria-label="Khoảng thời gian nổi bật">
+          <button class="period-btn active" data-period="day" role="tab" aria-selected="true">Hôm nay</button>
+          <button class="period-btn" data-period="week" role="tab" aria-selected="false">Tuần này</button>
+          <button class="period-btn" data-period="month" role="tab" aria-selected="false">Tháng này</button>
+        </div>
+      </div>
+      <div id="hotTopics" class="hot-topic-grid" aria-live="polite"><div class="loading-card">Đang tải sự kiện nổi bật…</div></div>
+      <div class="section-footnote" id="hotTopicsFootnote">Số liệu phụ thuộc dữ liệu đã được thu thập và phân loại.</div>
+    </section>
+
+    <section class="content-section timeline-section" id="timeline">
+      <div class="section-heading">
+        <div><p class="eyebrow">FOLLOW THE STORY</p><h2>Timeline sự kiện</h2><p class="section-subtitle">Chọn một topic để xem các bài báo theo trình tự mới nhất.</p></div>
+        <div class="timeline-selected" id="timelineSelectionLabel">Chưa chọn sự kiện</div>
+      </div>
+      <div id="timelineContainer" class="timeline-container"><div class="empty-state"><span class="empty-icon">◎</span><strong>Chọn một sự kiện nổi bật</strong><p>Dòng thời gian và những bài báo liên quan sẽ hiển thị tại đây.</p></div></div>
+      <div id="timelinePagination" class="pagination-row"></div>
+    </section>
+
+    <section class="content-section articles-section" id="articles">
+      <div class="section-heading articles-heading">
+        <div><p class="eyebrow">LATEST HEADLINES</p><h2>Tin tức trong ngày</h2><p class="section-subtitle" id="articleDateLabel">Các bài được xuất bản hôm nay, theo giờ Việt Nam.</p></div>
+        <form id="articleSearchForm" class="search-form" role="search">
+          <label class="sr-only" for="articleSearch">Tìm bài báo</label>
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input id="articleSearch" type="search" placeholder="Tìm tiêu đề, nguồn báo…" maxlength="150">
+          <button type="submit">Tìm</button>
+        </form>
+      </div>
+      <div id="dailyArticles" class="article-list" aria-live="polite"><div class="loading-card">Đang tải bài báo…</div></div>
+      <div id="articlePagination" class="pagination-row"></div>
+    </section>
+
+    <footer class="site-footer">
+      <div class="footer-brand"><span class="brand-mark small">N<span>.</span></span><div><strong>NEWS RADAR</strong><small>by Doraemon</small></div></div>
+      <p>News Radar hiển thị tiêu đề, đoạn trích ngắn, nguồn và liên kết đến bài gốc. Nội dung thuộc quyền của nhà xuất bản tương ứng. Vui lòng đọc bài đầy đủ tại website nguồn.</p>
+      <a href="/" class="footer-admin">Trang quản trị ↗</a>
+    </footer>
+  </main>
+  <script src="/static/news.js" defer></script>
+</body>
+</html>
