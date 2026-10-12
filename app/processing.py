@@ -115,3 +115,191 @@ def apply_cleaning_rules(title: str, url: str, source_id: int, rules: list[dict]
             except Exception: ids = set()
             if source_id in ids: return True, f"Cleaning rule: {rule.get('name','exclude_source')}"
     return False, None
+
+
+# Conservative lexicon for high-confidence actor/action/target event topics.
+# It is intentionally a small deterministic first version; uncertain headlines remain
+# under broad category topics or become clustering candidates for admin review.
+_EVENT_ENTITY_ALIASES = {
+    'Mỹ': ['Hoa Kỳ', 'United States of America', 'United States', 'U.S.', 'USA', 'US', 'Mỹ'],
+    'Iran': ['Iran'],
+    'Italy': ['Italy', 'Italian', 'Ý'],
+    'Đức': ['Đức', 'Germany', 'German'],
+    'Pháp': ['Pháp', 'France', 'French'],
+    'Anh': ['Vương quốc Anh', 'United Kingdom', 'Britain', 'British', 'UK', 'Anh'],
+    'Nhật Bản': ['Nhật Bản', 'Japan', 'Japanese'],
+    'Úc': ['Úc', 'Australia', 'Australian'],
+    'Canada': ['Canada', 'Canadian'],
+    'Mexico': ['Mexico', 'Mexican'],
+    'Brazil': ['Brazil', 'Brazilian'],
+    'Thổ Nhĩ Kỳ': ['Thổ Nhĩ Kỳ', 'Turkey', 'Turkish'],
+    'Ả Rập Saudi': ['Ả Rập Saudi', 'Saudi Arabia', 'Saudi'],
+    'Israel': ['Israel', 'Israeli'],
+    'Ukraine': ['Ukraine', 'Ukraina'],
+    'Nga': ['Russian Federation', 'Russia', 'Russian', 'Nga'],
+    'Trung Quốc': ['People\'s Republic of China', 'Trung Quốc', 'China', 'Chinese'],
+    'Đài Loan': ['Đài Loan', 'Taiwan'],
+    'Triều Tiên': ['Bắc Triều Tiên', 'Triều Tiên', 'North Korea', 'North Korean'],
+    'Hàn Quốc': ['Hàn Quốc', 'South Korea', 'South Korean'],
+    'NATO': ['NATO'],
+    'EU': ['Liên minh châu Âu', 'European Union', 'EU'],
+    'Liên Hợp Quốc': ['Liên Hợp Quốc', 'United Nations', 'UN'],
+    'Ấn Độ': ['Ấn Độ', 'India', 'Indian'],
+    'Pakistan': ['Pakistan'],
+    'Iraq': ['Iraq'],
+    'Syria': ['Syria'],
+    'Yemen': ['Yemen'],
+    'Palestine': ['Palestine', 'Palestinian'],
+    'Hamas': ['Hamas'],
+    'Hezbollah': ['Hezbollah'],
+    'OpenAI': ['OpenAI'],
+    'Microsoft': ['Microsoft'],
+    'Google': ['Google'],
+    'Apple': ['Apple'],
+    'Nvidia': ['NVIDIA', 'Nvidia'],
+    'Meta': ['Meta Platforms', 'Meta'],
+    'Samsung': ['Samsung'],
+    'Tesla': ['Tesla'],
+    'VinFast': ['VinFast'],
+    'Viettel': ['Viettel'],
+    'FPT': ['FPT'],
+    'Vingroup': ['Vingroup'],
+    'Mỹ Latinh': ['Mỹ Latinh', 'Latin America'],
+    'Bộ Công an': ['Bộ Công an', 'Ministry of Public Security'],
+    'Quốc hội': ['Quốc hội', 'National Assembly'],
+    'Chính phủ': ['Chính phủ', 'Government of Vietnam', 'Vietnamese government'],
+    'Thủ tướng': ['Thủ tướng', 'Prime Minister'],
+    'Bộ Tài chính': ['Bộ Tài chính', 'Ministry of Finance'],
+    'Ngân hàng Nhà nước': ['Ngân hàng Nhà nước', 'State Bank of Vietnam'],
+    'Bộ Y tế': ['Bộ Y tế', 'Ministry of Health'],
+    'Bộ Giáo dục': ['Bộ Giáo dục và Đào tạo', 'Bộ Giáo dục', 'Ministry of Education'],
+    'EVN': ['EVN', 'Vietnam Electricity'],
+}
+
+_EVENT_ACTIONS = [
+    # (regex, stable key, display verb, parent category slug)
+    (r'tấn công bằng tên lửa|không kích|oanh kích|tập kích|tấn công|đánh(?!\s+giá)|air\s*strike|airstrike|strikes?|attacks?|bombing|bombs?', 'attack', 'tấn công', 'defence-security'),
+    (r'tập trận|diễn tập|military drill|military exercise|exercise|drill', 'exercise', 'tập trận', 'defence-security'),
+    (r'tấn công mạng|cyberattack|cyber attack|hack(?:s|ed|ing)?', 'cyberattack', 'tấn công mạng', 'technology'),
+    (r'đe doạ tấn công|đe dọa tấn công|doạ tấn công|dọa tấn công|threatens? to attack', 'threaten_attack', 'đe dọa tấn công', 'defence-security'),
+    (r'trừng phạt|sanctions?|sanctioned', 'sanction', 'trừng phạt', 'politics-policy'),
+    (r'tăng thuế(?: quan)?|áp thuế|đánh thuế|thuế quan|tariffs?|impose duties|raises? tariffs?', 'tariff', 'áp thuế', 'economy-business'),
+    (r'ký thỏa thuận|ký kết thỏa thuận|đạt thỏa thuận|đàm phán|hội đàm|thương lượng|negotiat(?:e|es|ed|ing)|talks with|meet(?:s|ing)? with', 'talks', 'đàm phán', 'politics-policy'),
+    (r'ra mắt|trình làng|unveils?|launch(?:es|ed)?', 'launch', 'ra mắt', 'technology'),
+    (r'mua lại|thâu tóm|acquires?|acquisition of', 'acquire', 'mua lại', 'economy-business'),
+    (r'khởi tố', 'prosecute_start', 'khởi tố', 'politics-policy'),
+    (r'truy tố|prosecut(?:e|es|ed)', 'prosecute', 'truy tố', 'politics-policy'),
+    (r'xét xử|đưa ra xét xử|trial begins', 'trial', 'xét xử', 'politics-policy'),
+    (r'thông qua|phê duyệt|phê chuẩn|approve(?:s|d)?|passes? (?:a |the )?(?:bill|law|plan)', 'approve', 'thông qua', 'politics-policy'),
+    (r'ban hành|ban bố|issues? (?:a |the )?(?:rule|law|decree)', 'issue_policy', 'ban hành', 'politics-policy'),
+    (r'yêu cầu|calls? on|urges?|orders?', 'request', 'yêu cầu', 'politics-policy'),
+    (r'đề xuất|proposes?|proposed', 'propose', 'đề xuất', 'politics-policy'),
+    (r'tăng giá|giảm giá|price rises?|price falls?|raises? prices?|cuts? prices?', 'price_change', 'điều chỉnh giá', 'economy-business'),
+    (r'bắt giữ|bị bắt|arrests?|arrested|detains?|detained', 'arrest', 'bắt giữ', 'politics-policy'),
+    (r'từ chức|resigns?|steps down', 'resign', 'từ chức', 'politics-policy'),
+    (r'tăng lãi suất|hạ lãi suất|cuts? interest rates?|raises? interest rates?|rate hike', 'rate_change', 'điều chỉnh lãi suất', 'economy-business'),
+]
+
+
+def extract_event_signature(title: str) -> dict | None:
+    """Return a specific event topic only when a recognized actor/action/target pattern is clear.
+
+    Examples: “Mỹ đánh Iran” -> “Mỹ tấn công Iran”; “Iran bị Mỹ không kích” -> same event.
+    Broad categories are deliberately not returned as event topics.
+    """
+    import re
+    text = normalize_space(title or '')
+    if not text:
+        return None
+
+    entity_hits = []
+    aliases = []
+    for canonical, values in _EVENT_ENTITY_ALIASES.items():
+        for alias in values:
+            aliases.append((canonical, alias))
+    aliases.sort(key=lambda x: len(x[1]), reverse=True)
+    for canonical, alias in aliases:
+        pattern = re.compile(r'(?<!\w)' + re.escape(alias) + r'(?!\w)', re.IGNORECASE | re.UNICODE)
+        for match in pattern.finditer(text):
+            entity_hits.append({'canonical': canonical, 'start': match.start(), 'end': match.end(), 'alias': alias})
+    # Resolve overlaps (e.g. “United States” before “US”); preserve repeated mentions.
+    entity_hits.sort(key=lambda x: (x['start'], -(x['end'] - x['start'])))
+    non_overlapping = []
+    for hit in entity_hits:
+        if any(hit['start'] < old['end'] and hit['end'] > old['start'] for old in non_overlapping):
+            continue
+        non_overlapping.append(hit)
+    entity_hits = sorted(non_overlapping, key=lambda x: x['start'])
+    if not entity_hits:
+        return None
+
+    action_hits = []
+    for pattern, key, label, parent_slug in _EVENT_ACTIONS:
+        for match in re.finditer(pattern, text, re.IGNORECASE | re.UNICODE):
+            action_hits.append({'start': match.start(), 'end': match.end(), 'key': key, 'label': label, 'raw': match.group(0), 'parent_slug': parent_slug})
+    action_hits.sort(key=lambda x: (x['start'], -(x['end'] - x['start'])))
+    for action in action_hits:
+        before = [e for e in entity_hits if e['end'] <= action['start']]
+        after = [e for e in entity_hits if e['start'] >= action['end']]
+        actor = target = None
+        if before and after:
+            actor, target = before[-1], after[0]
+        elif len(before) >= 2:
+            # Passive Vietnamese headline: “Iran bị Mỹ tấn công”.
+            first, second = before[-2], before[-1]
+            between = text[first['end']:second['start']].casefold()
+            if re.search(r'\b(bị|được)\b', between):
+                target, actor = first, second
+        # If two recognized entities surround the action, create a relational event label.
+        if actor and target and actor['canonical'] != target['canonical']:
+            between_actor_action = text[actor['end']:action['start']].casefold()
+            relationship_context = between_actor_action
+            # Passive headlines can put negation/modality before the actor: “Iran không bị Mỹ tấn công”.
+            if target['end'] < actor['start']:
+                relationship_context = (text[target['end']:actor['start']] + ' ' + between_actor_action).casefold()
+            action_key, action_label = action['key'], action['label']
+            if action_key == 'attack' and re.search(r'\b(đe dọa|đe doạ|doạ|dọa|threatens?)\b', relationship_context):
+                action_key, action_label = 'threaten_attack', 'đe dọa tấn công'
+            elif action_key == 'attack' and re.search(r'\b(cân nhắc|chuẩn bị|sẵn sàng|có thể|consider(?:s|ed)?|prepare(?:s|d)?|plans? to)\b', relationship_context):
+                action_key, action_label = 'prepare_attack', 'chuẩn bị tấn công'
+            elif action_key == 'attack' and re.search(r"\b(không|chưa|never|not|did not|does not|do not|will not|won't|doesn't|didn't)\b", relationship_context):
+                action_key, action_label = 'deny_attack', 'không tấn công'
+            actor_name, target_name = actor['canonical'], target['canonical']
+            label = f'{actor_name} {action_label} {target_name}'
+            signature = f'{norm_name(actor_name)}|{action_key}|{norm_name(target_name)}'
+            return {
+                'event_key': hash_text(signature), 'name': label, 'actor': actor_name,
+                'action': action_label, 'target': target_name,
+                'keywords': list(dict.fromkeys([actor_name, target_name, action_label, action['raw']])),
+                'parent_slug': action['parent_slug'], 'confidence': 0.82,
+            }
+
+        # Fallback for a clear actor + action + descriptive object phrase, e.g. “OpenAI ra mắt mô hình AI mới”.
+        # This keeps event labels detailed even when the object is not a recognized named entity.
+        if before and not after:
+            actor_one = before[-1]
+            tail = text[action['end']:]
+            tail = re.split(r'[|–—:;.!?]', tail, maxsplit=1)[0]
+            tail = normalize_space(tail).strip(' ,.-')
+            # Drop location-only tails and generic non-events.
+            tail = re.sub(r'^(?:tại|ở|trong|sau|vào|on|in|at)\s+', '', tail, flags=re.IGNORECASE)
+            if len(tail) >= 4 and len(tail.split()) >= 1:
+                action_key, action_label = action['key'], action['label']
+                between_actor_action = text[actor_one['end']:action['start']].casefold()
+                if action_key == 'attack' and re.search(r'\b(đe dọa|đe doạ|doạ|dọa|threatens?)\b', between_actor_action):
+                    action_key, action_label = 'threaten_attack', 'đe dọa tấn công'
+                elif action_key == 'attack' and re.search(r'\b(cân nhắc|chuẩn bị|sẵn sàng|có thể|consider(?:s|ed)?|prepare(?:s|d)?|plans? to)\b', between_actor_action):
+                    action_key, action_label = 'prepare_attack', 'chuẩn bị tấn công'
+                elif action_key == 'attack' and re.search(r"\b(không|chưa|never|not|did not|does not|do not|will not|won't|doesn't|didn't)\b", between_actor_action):
+                    action_key, action_label = 'deny_attack', 'không tấn công'
+                detail = tail[:70].rstrip(' ,.-')
+                actor_name = actor_one['canonical']
+                label = f'{actor_name} {action_label} {detail}'[:180]
+                signature = f'{norm_name(actor_name)}|{action_key}|{norm_name(detail)}'
+                return {
+                    'event_key': hash_text(signature), 'name': label, 'actor': actor_name,
+                    'action': action_label, 'target': detail,
+                    'keywords': list(dict.fromkeys([actor_name, action_label, action['raw']] + detail.split()[:5])),
+                    'parent_slug': action['parent_slug'], 'confidence': 0.72,
+                }
+    return None
