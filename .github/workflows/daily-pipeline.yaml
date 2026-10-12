@@ -15,27 +15,30 @@ concurrency:
 jobs:
   collect-clean-model:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Install English NER package and model
-        run: |
-          pip install "spacy>=3.7,<4.0"
-          python -m spacy download en_core_web_sm
       - name: Run ingestion, cleaning, catalog discovery and FACT refresh
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+          AI_CLASSIFICATION_BATCH_SIZE: "12"
+          AI_CLASSIFICATION_RUN_LIMIT: "72"
+          AI_REQUEST_TIMEOUT_SECONDS: "35"
           PIPELINE_LOOKBACK_DAYS: "14"
           PIPELINE_LOOKBACK_HOURS: "24"
           MAX_FEED_ENTRIES_PER_SOURCE: "250"
+          EVENT_TOPIC_BACKFILL_BATCH_SIZE: "60"
+          TOPIC_DISCOVERY_ARTICLE_LIMIT: "800"
           REQUEST_TIMEOUT_SECONDS: "25"
           TIMEZONE: Asia/Ho_Chi_Minh
         run: |
