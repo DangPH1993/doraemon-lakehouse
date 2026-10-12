@@ -15,7 +15,7 @@ from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.5.0',description='News reader, admin portal, RSS ingestion, catalog, data quality and analytics.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.5.1',description='News reader, admin portal, RSS ingestion, catalog, data quality and analytics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -73,7 +73,7 @@ def index(): return FileResponse('static/index.html')
 def public_news_page(): return FileResponse('static/news.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.5.0'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.5.1'}
 @app.get('/api/health/ready')
 def ready():
     try:
