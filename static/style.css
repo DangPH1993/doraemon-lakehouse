@@ -44,3 +44,6 @@
 .classification-dialog textarea:focus{border-color:#9492ed;box-shadow:0 0 0 3px #7773ed16}
 .classification-dialog .form-actions{display:flex;justify-content:flex-end;grid-column:auto;margin-top:4px}
 @media(max-width:620px){.classification-dialog form{padding:16px}.timeline-content{padding:11px}.timeline-item{gap:8px}}
+
+/* Server-side pagination shared by article, topic and entity catalogs. */
+.pagination-controls{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 2px 2px;color:var(--muted);font-size:11px}.pagination-buttons{display:flex;align-items:center;gap:7px}.pagination-buttons button:disabled{opacity:.45;cursor:not-allowed;pointer-events:none}.pagination-summary{line-height:1.5}
