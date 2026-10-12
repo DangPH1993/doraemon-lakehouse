@@ -1,21 +1,23 @@
 from __future__ import annotations
 import json, logging, threading
 from datetime import date, timedelta
+from typing import Literal
+import re
 from urllib.parse import urlparse
 import requests
-from fastapi import FastAPI, Depends, HTTPException, Query, Body
+from fastapi import FastAPI, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from .config import settings
 from .db import get_conn, fetch_all, fetch_one
-from .security import issue_token, require_admin
+from .security import (issue_token, require_admin, hash_password, verify_password, issue_user_token, require_user)
 from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.5.1',description='News reader, admin portal, RSS ingestion, catalog, data quality and analytics.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.0',description='News Radar with user accounts, saved topic/entity timelines, RSS ingestion and analytics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -23,6 +25,35 @@ _pipeline_thread_lock=threading.Lock()
 class LoginBody(BaseModel):
     username: str
     password: str
+class UserRegisterBody(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=8, max_length=128)
+    @field_validator('username')
+    @classmethod
+    def valid_username(cls, value):
+        value = value.strip()
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{3,32}', value):
+            raise ValueError('Tên đăng nhập gồm 3–32 ký tự: chữ, số, dấu chấm, gạch ngang hoặc gạch dưới.')
+        return value
+    @field_validator('email')
+    @classmethod
+    def valid_email(cls, value):
+        value = value.strip().lower()
+        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', value):
+            raise ValueError('Email chưa đúng định dạng.')
+        return value
+
+class UserLoginBody(BaseModel):
+    identifier: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+
+class SavedTimelineRef(BaseModel):
+    type: Literal['topic', 'entity']
+    id: int = Field(ge=1)
+
+class SaveTimelinesBody(BaseModel):
+    items: list[SavedTimelineRef] = Field(default_factory=list, max_length=10)
 class SourceBody(BaseModel):
     name: str = Field(min_length=2,max_length=180)
     feed_url: str = Field(min_length=8,max_length=2000)
@@ -73,7 +104,7 @@ def index(): return FileResponse('static/index.html')
 def public_news_page(): return FileResponse('static/news.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.5.1'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.6.0'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -91,6 +122,161 @@ def login(body: LoginBody):
     return {'token':issue_token(body.username),'username':body.username,'expires_in':28800}
 @app.get('/api/auth/me',dependencies=[Depends(require_admin)])
 def me(): return {'username':settings.admin_username,'role':'admin'}
+
+
+# End-user auth is separate from the existing administrator login.
+def _set_user_cookie(response: Response, request: Request, token: str):
+    forwarded_proto = request.headers.get('x-forwarded-proto', request.url.scheme).split(',')[0].strip().lower()
+    response.set_cookie(
+        key='news_radar_session', value=token, max_age=7 * 24 * 60 * 60,
+        httponly=True, secure=(forwarded_proto == 'https'), samesite='lax', path='/'
+    )
+
+
+@app.post('/api/user-auth/register')
+def register_user(body: UserRegisterBody, request: Request, response: Response):
+    if not settings.session_secret:
+        raise HTTPException(status_code=503, detail='Máy chủ chưa cấu hình SESSION_SECRET.')
+    username = body.username.strip()
+    username_normalized = username.lower()
+    email = body.email.strip().lower()
+    try:
+        user = fetch_one("""INSERT INTO app_users(username, username_normalized, email, email_normalized, password_hash, last_login_at)
+                             VALUES (%s, %s, %s, %s, %s, now())
+                             ON CONFLICT DO NOTHING
+                             RETURNING user_id, username, email""",
+                         (username, username_normalized, email, email, hash_password(body.password)))
+    except Exception as exc:
+        log.exception('User registration failed')
+        raise HTTPException(status_code=503, detail='Không thể tạo tài khoản lúc này. Vui lòng kiểm tra migration cơ sở dữ liệu.') from exc
+    if not user:
+        raise HTTPException(status_code=409, detail='Tên đăng nhập hoặc email đã được sử dụng.')
+    _set_user_cookie(response, request, issue_user_token(user['user_id'], user['username']))
+    return {'user': user, 'expires_in': 604800}
+
+
+@app.post('/api/user-auth/login')
+def login_user(body: UserLoginBody, request: Request, response: Response):
+    if not settings.session_secret:
+        raise HTTPException(status_code=503, detail='Máy chủ chưa cấu hình SESSION_SECRET.')
+    identifier = body.identifier.strip().lower()
+    try:
+        user = fetch_one("""SELECT user_id, username, email, password_hash
+                             FROM app_users
+                             WHERE (username_normalized=%s OR email_normalized=%s) AND is_active=true""",
+                         (identifier, identifier))
+    except Exception as exc:
+        log.exception('User login could not query account storage')
+        raise HTTPException(status_code=503, detail='Chức năng tài khoản chưa sẵn sàng. Vui lòng kiểm tra migration SQL 007.') from exc
+    if not user or not verify_password(body.password, user['password_hash']):
+        raise HTTPException(status_code=401, detail='Tên đăng nhập/email hoặc mật khẩu không đúng.')
+    try:
+        fetch_one('UPDATE app_users SET last_login_at=now() WHERE user_id=%s RETURNING user_id', (user['user_id'],))
+    except Exception as exc:
+        log.exception('User login timestamp could not be updated')
+        raise HTTPException(status_code=503, detail='Không thể cập nhật phiên đăng nhập lúc này.') from exc
+    _set_user_cookie(response, request, issue_user_token(user['user_id'], user['username']))
+    return {'user': {'user_id': user['user_id'], 'username': user['username'], 'email': user['email']}, 'expires_in': 604800}
+
+
+@app.post('/api/user-auth/logout')
+def logout_user(response: Response):
+    response.delete_cookie('news_radar_session', path='/', httponly=True, samesite='lax')
+    return {'ok': True}
+
+
+@app.get('/api/user-auth/me')
+def current_user(user: dict = Depends(require_user)):
+    return {'user': user}
+
+
+@app.get('/api/user/timeline-options')
+def user_timeline_options(user: dict = Depends(require_user)):
+    topics = fetch_all("""SELECT t.topic_id AS id, t.name, coalesce(t.description,'') AS description,
+                                count(DISTINCT a.article_id)::int AS article_count,
+                                count(DISTINCT a.source_id)::int AS source_count
+                         FROM topics t
+                         LEFT JOIN article_topics at ON at.topic_id=t.topic_id
+                         LEFT JOIN news_articles a ON a.article_id=at.article_id AND a.is_excluded=false
+                         WHERE t.status='active' AND t.topic_type='event'
+                         GROUP BY t.topic_id, t.name, t.description
+                         ORDER BY count(DISTINCT a.article_id) DESC, t.name
+                         LIMIT 300""")
+    entities = fetch_all("""SELECT e.entity_id AS id, e.canonical_name AS name,
+                                  e.entity_type, coalesce(e.description,'') AS description,
+                                  count(DISTINCT a.article_id)::int AS article_count,
+                                  count(DISTINCT a.source_id)::int AS source_count
+                           FROM entities e
+                           LEFT JOIN article_entities ae ON ae.entity_id=e.entity_id
+                           LEFT JOIN news_articles a ON a.article_id=ae.article_id AND a.is_excluded=false
+                           WHERE e.status='active'
+                           GROUP BY e.entity_id, e.canonical_name, e.entity_type, e.description
+                           ORDER BY count(DISTINCT a.article_id) DESC, e.canonical_name
+                           LIMIT 300""")
+    return {'topics': topics, 'entities': entities}
+
+
+@app.get('/api/user/saved-timelines')
+def get_saved_timelines(user: dict = Depends(require_user)):
+    items = fetch_all("""SELECT timeline_kind AS type, id, name, display_order, article_count
+                         FROM (
+                           SELECT 'topic'::text AS timeline_kind, t.topic_id::bigint AS id, t.name,
+                                  ust.display_order,
+                                  (SELECT count(DISTINCT at.article_id)::int FROM article_topics at
+                                   JOIN news_articles a ON a.article_id=at.article_id
+                                   WHERE at.topic_id=t.topic_id AND a.is_excluded=false) AS article_count
+                           FROM user_saved_timelines ust JOIN topics t ON t.topic_id=ust.topic_id
+                           WHERE ust.user_id=%s AND ust.timeline_type='topic' AND t.status='active' AND t.topic_type='event'
+                           UNION ALL
+                           SELECT 'entity'::text AS timeline_kind, e.entity_id::bigint AS id, e.canonical_name AS name,
+                                  ust.display_order,
+                                  (SELECT count(DISTINCT ae.article_id)::int FROM article_entities ae
+                                   JOIN news_articles a ON a.article_id=ae.article_id
+                                   WHERE ae.entity_id=e.entity_id AND a.is_excluded=false) AS article_count
+                           FROM user_saved_timelines ust JOIN entities e ON e.entity_id=ust.entity_id
+                           WHERE ust.user_id=%s AND ust.timeline_type='entity' AND e.status='active'
+                         ) saved ORDER BY display_order, timeline_kind, name""", (user['user_id'], user['user_id']))
+    return {'items': items}
+
+
+@app.put('/api/user/saved-timelines')
+def replace_saved_timelines(body: SaveTimelinesBody, user: dict = Depends(require_user)):
+    # Deduplicate while preserving the user's chosen order.
+    items = []
+    seen = set()
+    for item in body.items:
+        key = (item.type, item.id)
+        if key not in seen:
+            seen.add(key)
+            items.append(item)
+    topic_ids = [item.id for item in items if item.type == 'topic']
+    entity_ids = [item.id for item in items if item.type == 'entity']
+    valid_topics = set()
+    valid_entities = set()
+    if topic_ids:
+        valid_topics = {int(row['topic_id']) for row in fetch_all(
+            "SELECT topic_id FROM topics WHERE topic_id = ANY(%s) AND status='active' AND topic_type='event'", (topic_ids,))}
+    if entity_ids:
+        valid_entities = {int(row['entity_id']) for row in fetch_all(
+            "SELECT entity_id FROM entities WHERE entity_id = ANY(%s) AND status='active'", (entity_ids,))}
+    invalid = [f"{x.type}:{x.id}" for x in items
+               if (x.type == 'topic' and x.id not in valid_topics) or (x.type == 'entity' and x.id not in valid_entities)]
+    if invalid:
+        raise HTTPException(status_code=422, detail='Một số topic/entity không tồn tại hoặc đã lưu trữ: ' + ', '.join(invalid[:8]))
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute('DELETE FROM user_saved_timelines WHERE user_id=%s', (user['user_id'],))
+            for order, item in enumerate(items):
+                if item.type == 'topic':
+                    cur.execute("""INSERT INTO user_saved_timelines(user_id, timeline_type, topic_id, display_order)
+                                   VALUES (%s, 'topic', %s, %s)""", (user['user_id'], item.id, order))
+                else:
+                    cur.execute("""INSERT INTO user_saved_timelines(user_id, timeline_type, entity_id, display_order)
+                                   VALUES (%s, 'entity', %s, %s)""", (user['user_id'], item.id, order))
+    except Exception as exc:
+        log.exception('Could not save personal timeline preferences')
+        raise HTTPException(status_code=503, detail='Không thể lưu lựa chọn timeline. Vui lòng kiểm tra migration cơ sở dữ liệu.') from exc
+    return {'ok': True, 'saved_count': len(items)}
 
 @app.get('/api/dashboard',dependencies=[Depends(require_admin)])
 def dashboard():
@@ -255,6 +441,40 @@ def public_topic_timeline(
                        " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
                        (topic_id, page_size, (page - 1) * page_size))
     return {'topic': topic, 'items': items,
+            'pagination': pagination_meta(page, page_size, total)}
+
+
+
+
+@app.get('/api/public/news/entities/{entity_id}/timeline')
+def public_entity_timeline(
+    entity_id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=50),
+):
+    """Public chronological view of articles associated with one active entity."""
+    entity = fetch_one("""SELECT entity_id, canonical_name, entity_type, description
+                          FROM entities WHERE entity_id=%s AND status='active'""", (entity_id,))
+    if not entity:
+        raise HTTPException(status_code=404, detail='Entity not found')
+    from_sql = " FROM article_entities ae JOIN news_articles a ON a.article_id=ae.article_id JOIN data_sources s ON s.source_id=a.source_id"
+    where_sql = " WHERE ae.entity_id=%s AND a.is_excluded=false"
+    total_row = fetch_one("SELECT count(DISTINCT a.article_id)::int AS total" + from_sql + where_sql, (entity_id,))
+    total = int((total_row or {}).get('total', 0))
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    items = fetch_all("""SELECT a.article_id, a.title, a.url, a.author, a.language,
+                              left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
+                              a.published_at, a.collected_at,
+                              coalesce(a.published_at,a.collected_at) AS timeline_at,
+                              s.name AS source_name,
+                              coalesce((SELECT string_agg(t.name, ', ' ORDER BY t.name)
+                                        FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                                        WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
+                       """ + from_sql + where_sql +
+                       " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
+                       (entity_id, page_size, (page - 1) * page_size))
+    return {'entity': entity, 'items': items,
             'pagination': pagination_meta(page, page_size, total)}
 
 
