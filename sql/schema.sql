@@ -14,7 +14,9 @@ create table if not exists data_sources (
   updated_at timestamptz not null default now(),
   last_run_at timestamptz,
   last_status text,
-  last_error text
+  last_error text,
+  etag text,
+  last_modified text
 );
 
 insert into data_sources(name,feed_url,language,category,license_name,license_url,enabled)
@@ -41,6 +43,8 @@ create table if not exists pipeline_runs (
   entries_seen int not null default 0,
   articles_inserted int not null default 0,
   articles_updated int not null default 0,
+  entries_skipped_existing int not null default 0,
+  feeds_not_modified int not null default 0,
   entities_found int not null default 0,
   entity_candidates int not null default 0,
   topic_candidates int not null default 0,
@@ -80,12 +84,17 @@ create table if not exists news_articles (
   is_excluded boolean not null default false,
   exclude_reason text,
   quality_score numeric(5,2) not null default 100,
+  event_topic_scanned_at timestamptz,
+  ai_classified_at timestamptz,
+  ai_classification jsonb not null default '{}'::jsonb,
+  ai_classification_error text,
   unique(source_id, canonical_url)
 );
 create index if not exists idx_news_articles_published on news_articles(published_at desc nulls last);
 create index if not exists idx_news_articles_collected on news_articles(collected_at desc);
 create index if not exists idx_news_articles_headline_hash on news_articles(headline_hash);
 create index if not exists idx_news_articles_source on news_articles(source_id, collected_at desc);
+create index if not exists idx_news_articles_ai_pending on news_articles (coalesce(published_at, collected_at) desc) where ai_classified_at is null and is_excluded=false;
 
 create table if not exists topics (
   topic_id bigserial primary key,
@@ -94,6 +103,8 @@ create table if not exists topics (
   description text not null default '',
   keywords text[] not null default '{}',
   parent_topic_id bigint references topics(topic_id) on delete set null,
+  topic_type text not null default 'category' check (topic_type in ('category','event')),
+  event_key text unique,
   status text not null default 'active' check (status in ('active','archived')),
   origin text not null default 'manual' check (origin in ('manual','discovered')),
   created_at timestamptz not null default now(),
@@ -167,6 +178,7 @@ create table if not exists topic_candidates (
   cluster_key text not null unique,
   suggested_name text not null,
   keywords text[] not null default '{}',
+  candidate_type text not null default 'event' check (candidate_type in ('category','event')),
   status text not null default 'pending' check (status in ('pending','approved','rejected','merged')),
   first_seen_at timestamptz not null default now(),
   last_seen_at timestamptz not null default now()
@@ -291,10 +303,11 @@ insert into data_model_catalog(table_name,model_type,description,grain) values
  ('entities','dimension','Approved normalized entity catalog','One record per normalized entity + type'),
  ('entity_aliases','operational','Alternative names linked to approved entities','One record per entity + normalized alias'),
  ('article_topics','bridge','Article-to-topic relationship with confidence and method','One record per article + topic'),
- ('article_entities','bridge','Article-to-entity mentions','One record per article + entity + mention text'),
+ ('article_entities','bridge','Article-to-entity mentions, automatically normalized by GenAI','One record per article + entity + mention text'),
+ ('news_articles.ai_classification','operational','GenAI event/topic/entity classification result and processing state','One classification result per article'),
  ('fact_news_article','fact','Article-level analytical metrics','One record per article'),
  ('fact_topic_daily','fact','Daily article counts by topic and source','One record per day + topic + source'),
- ('fact_topic_trending','fact','Topic heat ranking by day, week and month with source coverage and period-over-period change','One record per period type + period start + topic'),
+ ('fact_topic_trending','fact','Specific event-topic heat ranking by day, week and month with source coverage and period-over-period change','One record per period type + period start + event topic'),
  ('fact_entity_daily','fact','Daily article counts by entity and source','One record per day + entity + source'),
  ('fact_source_daily','fact','Daily collection and quality metrics by source','One record per day + source')
 on conflict(table_name) do update set description=excluded.description,grain=excluded.grain;
