@@ -34,6 +34,9 @@ class PipelineSQLTests(unittest.TestCase):
     def test_refresh_topic_trending_sql_placeholder_counts_match(self):
         self._assert_function_placeholders('refresh_topic_trending', min_calls=3)
 
+    def test_run_pipeline_sql_placeholder_counts_match(self):
+        self._assert_function_placeholders('run_pipeline', min_calls=3)
+
 
 if __name__ == '__main__':
     unittest.main()
