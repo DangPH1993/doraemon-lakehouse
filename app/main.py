@@ -14,7 +14,7 @@ from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.4.0',description='Admin portal for RSS ingestion, catalog, data quality and analytics.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.4.2',description='Admin portal for RSS ingestion, catalog, data quality and analytics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -58,10 +58,18 @@ class RuleBody(BaseModel):
     config: dict = Field(default_factory=dict)
     enabled: bool = True
 
+def pagination_meta(page: int, page_size: int, total: int) -> dict:
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    start = 0 if total == 0 else (page - 1) * page_size + 1
+    end = min(total, page * page_size)
+    return {'page': page, 'page_size': page_size, 'total': total,
+            'total_pages': total_pages, 'start': start, 'end': end}
+
+
 @app.get('/')
 def index(): return FileResponse('static/index.html')
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.4.0'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.4.2'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -165,21 +173,35 @@ def test_source(source_id:int):
     except Exception as exc: return {'ok':False,'error':f'{type(exc).__name__}: {str(exc)[:300]}'}
 
 @app.get('/api/articles',dependencies=[Depends(require_admin)])
-def list_articles(q:str|None=None,source_id:int|None=None,excluded:bool|None=None,limit:int=Query(default=100,ge=1,le=500),offset:int=Query(default=0,ge=0)):
+def list_articles(
+    q: str | None = None,
+    source_id: int | None = None,
+    excluded: bool | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+):
+    """Return one page of articles plus total-count metadata."""
     where=[]; vals=[]
     if q:
-        where.append('(a.title ilike %s or a.summary ilike %s or a.url ilike %s)'); term=f'%{q[:150]}%'; vals.extend([term,term,term])
-    if source_id is not None: where.append('a.source_id=%s'); vals.append(source_id)
-    if excluded is not None: where.append('a.is_excluded=%s'); vals.append(excluded)
+        where.append('(a.title ilike %s or a.summary ilike %s or a.url ilike %s)')
+        term=f'%{q[:150]}%'; vals.extend([term,term,term])
+    if source_id is not None:
+        where.append('a.source_id=%s'); vals.append(source_id)
+    if excluded is not None:
+        where.append('a.is_excluded=%s'); vals.append(excluded)
+    from_sql = ' from news_articles a join data_sources s on s.source_id=a.source_id'
+    where_sql = (' where ' + ' and '.join(where)) if where else ''
+    total_row = fetch_one('select count(*)::int as total' + from_sql + where_sql, vals)
+    total = int((total_row or {}).get('total', 0))
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
     sql="""select a.article_id,a.title,a.url,a.canonical_url,a.summary,left(a.content_text,500) as content_preview,a.author,a.language,a.published_at,a.collected_at,a.quality_score,a.is_excluded,a.exclude_reason,s.name as source_name,
            coalesce((select string_agg(t.name,', ' order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id),'') as topics,
            coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id),'') as entities,
            coalesce((select json_agg(t.name order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id),'[]'::json) as topic_names,
-           coalesce((select json_agg(e.canonical_name order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id),'[]'::json) as entity_names
-           from news_articles a join data_sources s on s.source_id=a.source_id"""
-    if where: sql+=' where '+' and '.join(where)
-    sql+=' order by a.collected_at desc limit %s offset %s'; vals.extend([limit,offset])
-    return fetch_all(sql,vals)
+           coalesce((select json_agg(e.canonical_name order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id),'[]'::json) as entity_names""" + from_sql + where_sql + ' order by a.collected_at desc limit %s offset %s'
+    items = fetch_all(sql, vals + [page_size, (page - 1) * page_size])
+    return {'items': items, 'pagination': pagination_meta(page, page_size, total)}
 
 @app.get('/api/articles/{article_id}/classifications', dependencies=[Depends(require_admin)])
 def get_article_classifications(article_id: int):
@@ -309,11 +331,30 @@ def list_raw_items(q:str|None=None,source_id:int|None=None,limit:int=Query(defau
     return fetch_all(sql,vals)
 
 @app.get('/api/topics',dependencies=[Depends(require_admin)])
-def list_topics():
+def list_topics(
+    q: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    all_items: bool = Query(default=False, alias='all'),
+):
+    """Paginated topic catalog. `all=true` is reserved for the timeline picker."""
+    where=[]; vals=[]
+    if q:
+        where.append('(t.name ilike %s or t.slug ilike %s or t.description ilike %s)')
+        term=f'%{q[:150]}%'; vals.extend([term,term,term])
+    where_sql = (' where ' + ' and '.join(where)) if where else ''
+    total_row = fetch_one('select count(*)::int as total from topics t' + where_sql, vals)
+    total = int((total_row or {}).get('total', 0))
+    if all_items:
+        page_size = max(1, min(total or 1, 5000))
+        page = 1
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
     topics=fetch_all("""select t.*, (select count(*) from article_topics at where at.topic_id=t.topic_id) as article_count
-                       from topics t order by t.status, t.name""")
+                       from topics t""" + where_sql + " order by t.status, t.name limit %s offset %s",
+                      vals + [page_size, 0 if all_items else (page - 1) * page_size])
     # Topic discovery is automatic; no manual approval queue is exposed in the admin UI.
-    return {'topics':topics,'candidates':[]}
+    return {'topics':topics,'candidates':[],'pagination':pagination_meta(page, page_size, total)}
 @app.post('/api/topics',dependencies=[Depends(require_admin)])
 def create_topic(body:TopicBody):
     if body.status not in {'active','archived'}: raise HTTPException(status_code=400,detail='status must be active or archived')
@@ -361,12 +402,27 @@ def reject_topic(candidate_id:int):
     return {'rejected':candidate_id}
 
 @app.get('/api/entities',dependencies=[Depends(require_admin)])
-def list_entities():
+def list_entities(
+    q: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+):
+    """Paginated entity catalog, with aliases only loaded for the requested page."""
+    where=[]; vals=[]
+    if q:
+        where.append("(e.canonical_name ilike %s or e.normalized_name ilike %s or e.entity_type ilike %s or exists (select 1 from entity_aliases aq where aq.entity_id=e.entity_id and aq.alias ilike %s))")
+        term=f'%{q[:150]}%'; vals.extend([term,term,term,term])
+    where_sql = (' where ' + ' and '.join(where)) if where else ''
+    total_row=fetch_one('select count(*)::int as total from entities e' + where_sql, vals)
+    total=int((total_row or {}).get('total',0))
+    total_pages=max(1,(total+page_size-1)//page_size)
+    page=min(page,total_pages)
     ents=fetch_all("""select e.*, (select count(*) from article_entities ae where ae.entity_id=e.entity_id) as article_count,
                      coalesce((select array_agg(a.alias order by a.alias) from entity_aliases a where a.entity_id=e.entity_id),'{}') as aliases
-                     from entities e order by e.status,e.canonical_name limit 1000""")
+                     from entities e""" + where_sql + " order by e.status,e.canonical_name limit %s offset %s",
+                   vals + [page_size, (page-1)*page_size])
     # Entities are automatically inserted by GenAI; the admin edits article links as needed.
-    return {'entities':ents,'candidates':[]}
+    return {'entities':ents,'candidates':[],'pagination':pagination_meta(page,page_size,total)}
 @app.post('/api/entities',dependencies=[Depends(require_admin)])
 def create_entity(body:EntityBody):
     row=fetch_one("""insert into entities(canonical_name,normalized_name,entity_type,external_id,description,origin)
