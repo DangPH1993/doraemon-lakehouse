@@ -581,6 +581,41 @@ def refresh_topic_trending():
         """, (settings.timezone, settings.timezone))
 
 
+def purge_raw_feed_items_after_fact_refresh() -> int:
+    """Delete processed RSS payloads only after every article has a base FACT row.
+
+    news_articles is the durable clean layer and retains title/summary/url/classification.
+    raw_feed_items is transient ingestion payload; deleting it sets news_articles.raw_id to NULL.
+    If any article lacks fact_news_article, preserve all raw rows. Also preserve orphan raw rows
+    that have no clean article yet, so a failed/interrupted ingestion can be investigated/retried.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""select count(*)::int as missing
+                       from news_articles a
+                       left join fact_news_article f on f.article_id=a.article_id
+                       where f.article_id is null""")
+        missing = int(cur.fetchone()['missing'])
+        if missing:
+            log.warning('Raw payload cleanup skipped: %s article(s) have no fact_news_article row.', missing)
+            return 0
+        cur.execute("""delete from raw_feed_items r
+                       where exists (
+                         select 1 from news_articles a
+                         join fact_news_article f on f.article_id=a.article_id
+                         where a.raw_id=r.raw_id
+                       )
+                       and not exists (
+                         select 1 from news_articles a
+                         left join fact_news_article f on f.article_id=a.article_id
+                         where a.raw_id=r.raw_id and f.article_id is null
+                       )""")
+        deleted = max(0, cur.rowcount)
+        cur.execute("select count(*)::int as remaining from raw_feed_items")
+        remaining = int(cur.fetchone()['remaining'])
+    log.info('Raw payload cleanup complete: deleted=%s processed row(s); remaining_unlinked_or_pending=%s; clean articles and FACT rows retained.', deleted, remaining)
+    return deleted
+
+
 def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) -> dict:
     started = datetime.now(timezone.utc)
     run_clock = time.monotonic()
@@ -596,7 +631,7 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         active_topics = load_active_topics(conn)
     if source_ids is not None:
         sources=[s for s in sources if s['source_id'] in source_ids]
-    totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'source_errors':[]}
+    totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'raw_rows_purged':0,'source_errors':[]}
     log.info('Pipeline run %s started: sources=%s; active_topics=%s; active_entity_cache=%s; lookback_hours=%s; backfill_batch=%s',
              run_id, len(sources), len(active_topics), len(entity_lookup['known_map']), settings.pipeline_lookback_hours,
              settings.event_topic_backfill_batch_size)
@@ -636,6 +671,9 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         stage_started = time.monotonic()
         refresh_facts()
         log.info('Stage FACT refresh complete; elapsed=%.1fs', time.monotonic()-stage_started)
+        # Raw capture is temporary: after facts are persisted for every clean article,
+        # purge RSS payloads to conserve the Supabase database quota.
+        totals['raw_rows_purged'] = purge_raw_feed_items_after_fact_refresh()
         status='success' if not totals['source_errors'] else ('partial' if totals['articles_inserted']+totals['articles_updated']>0 else 'failed')
         end=datetime.now(timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
