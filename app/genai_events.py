@@ -40,12 +40,13 @@ Phân tích TỪNG bài riêng biệt, trả về CHỈ JSON hợp lệ, không 
 
 Mục tiêu:
 1) Chọn đúng 1 category_topic_id trong danh sách category được cung cấp, hoặc null nếu không phù hợp.
-2) Nhận diện event_topic cụ thể nếu tiêu đề/mô tả nói về sự kiện/hành động/diễn biến có thể theo dõi trên timeline. Tên ngắn, tự nhiên bằng tiếng Việt, nêu chủ thể + hành động + đối tượng/địa điểm khi có thể, ví dụ 'Mỹ không kích Iran', 'NATO tập trận tại Italy', 'Bộ Công an khởi tố vụ án lừa đảo'. Không dùng tên quá rộng kiểu 'Chính trị', 'Quốc phòng', 'Tình hình Iran'. Nếu là tin nền chung, lịch thi đấu, dự báo, bài danh sách hoặc không đủ bằng chứng thì event_topic_name=null.
-3) So sánh với existing_event_topics. Chỉ chọn existing_event_topic_id khi đó THỰC SỰ là cùng sự kiện/diễn biến đang theo dõi (cùng hành động/sự việc chính), không chỉ cùng quốc gia, nhân vật hay chủ đề. Đe dọa tấn công khác với tấn công thật; phủ nhận khác với xác nhận; một cuộc đàm phán khác một cuộc không kích. Nếu cùng sự kiện thì chọn id hiện có và event_topic_name có thể null. Nếu là sự kiện khác, trả event_topic_name mới.
-4) Đọc toàn bộ các bài trong cùng batch để bảo đảm các bài nói về CHÍNH CÙNG một sự kiện mới có cùng event_topic_name chuẩn hóa. Không tạo nhiều tên gần giống cho cùng sự kiện; ngược lại không gộp các diễn biến khác nhau chỉ vì cùng nhân vật/quốc gia.
-5) Trích xuất entity thực sự có trong tiêu đề/mô tả. Tên chuẩn, không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases là danh sách biến thể trực tiếp được thể hiện trong văn bản, nếu có.
-6) confidence là số 0..1. Nếu không chắc sự kiện, để null thay vì đoán.
-7) Không bịa diễn biến, ngày tháng hoặc quan hệ không có trong văn bản. Chỉ dùng title/summary dưới đây.
+2) Với mỗi bài, đặt event_topic_name là tên ngắn, cụ thể cho sự kiện/hành động đang xảy ra, nêu chủ thể + hành động + đối tượng/địa điểm khi có thể. Không dùng tên quá rộng kiểu 'Chính trị', 'Quốc phòng', 'Tình hình Iran'. Với tin nền, danh sách, lịch, dự báo hoặc không đủ bằng chứng thì event_topic_name=null.
+3) existing_event_topic_id chỉ được dùng khi có bằng chứng rõ rằng bài nói về CÙNG VỤ VIỆC CỤ THỂ, cùng hành động/sự việc chính, với topic hiện có. So sánh event name và sample_titles. Cùng danh mục, cùng ngành, cùng loại tội phạm, cùng quốc gia, cùng tổ chức hay cùng cụm từ KHÔNG có nghĩa là cùng sự kiện. Một vụ án về ma túy, vụ lừa đảo ngân hàng và vụ chuyển tiền trái phép ra nước ngoài là ba sự kiện khác nhau kể cả khi cùng xuất hiện trong mục pháp luật.
+4) Khi so khớp, phải so sánh cả hành động chính, đối tượng/mục tiêu, người/tổ chức liên quan, địa điểm và dấu hiệu định danh vụ việc. Nếu hành động chính khác nhau (ví dụ lừa đảo vs tuồn/chuyển tiền, đe dọa tấn công vs tấn công thực tế, đàm phán vs không kích), hoặc là các vụ án/đối tượng/số tiền khác nhau, KHÔNG chọn existing_event_topic_id. Khi không chắc, tạo event_topic_name riêng hoặc null; ưu tiên tách nhầm hơn gộp nhầm.
+5) Luôn trả event_topic_name đề xuất cho bài nếu bài có thể theo dõi như một sự kiện, kể cả khi đề xuất dùng existing_event_topic_id. Nếu chọn sự kiện có sẵn, event_topic_name phải lặp lại chính xác tên chuẩn của sự kiện đó. Điều này giúp hệ thống kiểm chứng kết quả trước khi nối bài.
+6) Đọc các bài trong batch. Chỉ gộp hai bài khi chúng nói về cùng một vụ việc cụ thể, không chỉ có từ khóa/entity trùng nhau. Không gộp hai vụ án riêng biệt, hai động thái chính sách riêng biệt hay hai diễn biến quân sự khác nhau.
+7) Trích xuất entity thực sự có trong tiêu đề/mô tả. Tên chuẩn, không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases là biến thể trực tiếp được thể hiện trong văn bản.
+8) confidence là số 0..1. Nếu không chắc sự kiện, để null thay vì đoán. Không bịa diễn biến, ngày tháng hoặc quan hệ.
 
 Định dạng JSON bắt buộc:
 {{"results":[{{"article_id":123,"category_topic_id":1,"existing_event_topic_id":null,"event_topic_name":"Mỹ không kích Iran","event_confidence":0.91,"entities":[{{"name":"Mỹ","type":"LOCATION","aliases":["Hoa Kỳ"]}}]}}]}}
@@ -177,7 +178,133 @@ def _upsert_entity(conn, name: str, entity_type: str, aliases: list[str] | None 
     return entity_id
 
 
-def _apply_classification(article: dict, result: dict, category_ids: set[int], event_ids: set[int]):
+# High-specificity action families prevent unrelated stories sharing a generic category
+# or a broad entity (for example, several different bank crimes) from being merged.
+_EVENT_ACTION_FAMILIES = {
+    'drug_crime': (r'\bma t[uú]y\b', r'heroin', r'cocaine', r'fentanyl', r'buôn bán chất cấm', r'tàng trữ ma túy'),
+    'fraud': (r'lừa đảo', r'chiếm đoạt', r'gian lận', r'giả mạo', r'fraud', r'scam'),
+    'illegal_money_transfer': (r'tuồn.{0,70}(tiền|tỷ|tỉ|đồng|ra nước ngoài)', r'chuyển.{0,50}(tiền|tỷ|tỉ|đồng).{0,40}ra nước ngoài', r'chuyển.{0,35}tiền.{0,35}trái phép', r'vận chuyển trái phép tiền tệ', r'rửa tiền', r'money laundering'),
+    'embezzlement': (r'tham ô', r'biển thủ', r'chiếm dụng', r'embezzl'),
+    'bribery_corruption': (r'hối lộ', r'tham nhũng', r'nhận tiền chạy án', r'bribery', r'corruption'),
+    'military_attack': (r'không kích', r'oanh tạc', r'tập kích', r'tấn công', r'đánh bom', r'air.?strike', r'bomb(?:ed|ing)?', r'missile strike'),
+    'military_exercise': (r'tập trận', r'diễn tập quân sự', r'military exercise', r'drill'),
+    'threat': (r'đe dọa', r'đe doạ', r'dọa tấn công', r'threaten', r'threatens', r'threatened'),
+    'negotiation': (r'đàm phán', r'thương lượng', r'negotiat', r'peace talks'),
+    'sanctions': (r'trừng phạt', r'cấm vận', r'sanction'),
+    'election': (r'bầu cử', r'ứng cử', r'election', r'vote'),
+    'product_launch': (r'ra mắt', r'tung ra', r'giới thiệu sản phẩm', r'launches', r'unveils'),
+}
+_EVENT_GENERIC_WORDS = set("""
+    và là của có cho với trong trên dưới tại từ đến khi những các một này đó được đang sẽ đã
+    người ngày năm tháng theo về việc không cũng nhưng nếu thì mà để bởi vào ra như hơn nhất
+    vụ án bị cáo cựu nhân viên ngân hàng công ty doanh nghiệp báo tin mới nhất hôm nay
+    hôm qua sáng chiều tối lúc theo nguồn cho biết tuyên bố nói nói rằng
+    the a an and or but for with from after before over under this that those these
+    said says report reports news new latest today yesterday people person group company bank
+    employee former allegedly according to about amid after before as of
+    tỉ tỷ đồng triệu nghìn
+""".split())
+_EVENT_ACTION_WORDS = set("""
+    lừa đảo chiếm đoạt gian lận giả mạo ma túy tuy heroin cocaine fentanyl
+    tuồn chuyển tiền trái phép rửa laundering tham ô biển thủ chiếm dụng hối lộ tham nhũng
+    không kích oanh tạc tập trận diễn tập tấn công đánh bom strike attack bomb
+    đe dọa doạ dọa threaten threatened đàm phán thương lượng negotiation talks
+    trừng phạt cấm vận sanctions sanction bầu cử ứng cử election vote ra mắt tung giới thiệu
+    khởi tố truy tố bắt giữ xét xử tuyên án
+""".split())
+
+
+def _event_families(text: str) -> set[str]:
+    text = normalize_space(text or '').casefold()
+    return {family for family, patterns in _EVENT_ACTION_FAMILIES.items()
+            if any(re.search(pattern, text, flags=re.I) for pattern in patterns)}
+
+
+def _event_tokens(text: str) -> set[str]:
+    text = norm_name(text or '')
+    tokens = set(re.findall(r'[^\W_]+', text, flags=re.UNICODE))
+    return {t for t in tokens if ((len(t) >= 3 and t not in _EVENT_GENERIC_WORDS) or (t.isdigit() and len(t) >= 2))}
+
+
+def _event_titles_compatible(article_title: str, event_title: str) -> bool:
+    """Conservative guard: reject clear action-family conflicts and weak title overlaps."""
+    article_title = normalize_space(article_title)
+    event_title = normalize_space(event_title)
+    if not article_title or not event_title:
+        return False
+    if norm_name(article_title) == norm_name(event_title):
+        return True
+    article_families = _event_families(article_title)
+    event_families = _event_families(event_title)
+    if article_families and event_families and article_families.isdisjoint(event_families):
+        return False
+    a_tokens, e_tokens = _event_tokens(article_title), _event_tokens(event_title)
+    # Keep identifying entities, places, case markers and numbers; don't count generic action
+    # verbs or category words as proof that two stories describe the same incident.
+    a_specific = a_tokens - _EVENT_ACTION_WORDS
+    e_specific = e_tokens - _EVENT_ACTION_WORDS
+    overlap = a_specific & e_specific
+    union = a_specific | e_specific
+    jaccard = len(overlap) / max(1, len(union))
+    shared_action = bool(article_families & event_families)
+    shared_number = any(token.isdigit() for token in overlap)
+    # Same action family still needs at least one identifying detail in common (person,
+    # organization, place, case marker, or amount). Different stories about the same industry
+    # or crime type therefore stay separate.
+    if shared_action and len(overlap) >= 1 and (jaccard >= 0.18 or shared_number):
+        return True
+    # Without matching event-action signatures, require substantially stronger identity overlap.
+    if len(overlap) >= 3 and jaccard >= 0.30:
+        return True
+    if len(overlap) >= 2 and jaccard >= 0.45:
+        return True
+    return False
+
+
+def _clearly_incompatible_assignment(article_title: str, event_title: str) -> bool:
+    """Only auto-repair unmistakable action-family conflicts; uncertainty is not enough."""
+    article_families = _event_families(article_title)
+    event_families = _event_families(event_title)
+    return bool(article_families and event_families and article_families.isdisjoint(event_families))
+
+
+def _fallback_event_name(title: str) -> str:
+    # Preserve a specific factual headline when a model-proposed event ID is rejected.
+    return normalize_space(title)[:180]
+
+
+def repair_obvious_event_mismatches(limit: int = 500) -> int:
+    """Detach machine assignments whose explicit event-action family conflicts with topic.
+
+    Manual admin assignments are not touched. Articles are queued for the classifier during
+    the same pipeline run, so previously incorrect timelines can be repaired automatically.
+    """
+    limit = max(1, min(int(limit), 2000))
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""select a.article_id,a.title,t.topic_id,t.name as event_name
+                       from article_topics at
+                       join news_articles a on a.article_id=at.article_id
+                       join topics t on t.topic_id=at.topic_id
+                       where t.topic_type='event' and t.status='active'
+                         and at.assignment_method='genai' and a.is_excluded=false
+                         and coalesce(a.published_at,a.collected_at)>=now()-interval '30 days'
+                         and coalesce(a.ai_classification->>'manual_override','false') <> 'true'
+                       order by coalesce(a.published_at,a.collected_at) desc
+                       limit %s""", (limit,))
+        rows = cur.fetchall()
+        mismatches = [r for r in rows if _clearly_incompatible_assignment(r['title'], r['event_name'])]
+        for row in mismatches:
+            cur.execute("delete from article_topics where article_id=%s and topic_id=%s and assignment_method='genai'",
+                        (row['article_id'], row['topic_id']))
+            cur.execute("""update news_articles set ai_classified_at=null,event_topic_scanned_at=null,
+                           ai_classification_error='Reprocessing: event action does not match assigned topic'
+                           where article_id=%s""", (row['article_id'],))
+    if mismatches:
+        log.warning('Detached %s obviously mismatched GenAI event assignment(s); queued for reclassification.', len(mismatches))
+    return len(mismatches)
+
+
+def _apply_classification(article: dict, result: dict, category_ids: set[int], event_topics: dict[int, dict]):
     article_id = int(article['article_id'])
     try:
         category_id = result.get('category_topic_id')
@@ -219,9 +346,22 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                                set confidence=greatest(article_topics.confidence,excluded.confidence),assignment_method='genai'""",
                             (article_id, category_id, max(0.55, confidence)))
             event_topic_id = None
-            if existing_event_id in event_ids:
-                event_topic_id = existing_event_id
-            elif event_name and confidence >= 0.55:
+            if existing_event_id in event_topics:
+                candidate = event_topics[existing_event_id]
+                # Use the canonical event name for the deterministic gate. Sample titles are
+                # prompt context only: allowing any sample to authorize a match could perpetuate
+                # an already-corrupted timeline by matching the very wrong article it contains.
+                reference_title = candidate.get('name') or ''
+                matched = _event_titles_compatible(article.get('title') or '', reference_title)
+                if matched:
+                    event_topic_id = existing_event_id
+                else:
+                    canonical_existing = norm_name(candidate.get('name') or '')
+                    if not event_name or norm_name(event_name) == canonical_existing:
+                        event_name = _fallback_event_name(article.get('title') or '')
+                    log.warning('Rejected existing event match: article_id=%s proposed_topic_id=%s topic=%r article=%r',
+                                article_id, existing_event_id, candidate.get('name'), article.get('title'))
+            if event_topic_id is None and event_name and confidence >= 0.55:
                 parent_id = category_id if category_id in category_ids else None
                 event_topic_id = _upsert_event_topic(conn, event_name, confidence, parent_id)
             # Replace machine-generated event assignments so one article is not attached to
@@ -255,6 +395,8 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                         cur.execute("""insert into article_entities(article_id,entity_id,mention_text,confidence)
                                        values(%s,%s,%s,%s) on conflict do nothing""",
                                     (article_id, entity_id, normalize_space(str(entity_name))[:180], max(0.55, confidence)))
+                ai_result['event_topic_name'] = event_name or None
+                ai_result['existing_event_topic_id'] = existing_event_id if event_topic_id == existing_event_id else None
                 cur.execute("""update news_articles set ai_classified_at=now(),ai_classification=%s::jsonb,
                                ai_classification_error=null,event_topic_scanned_at=now(),updated_at=now()
                                where article_id=%s""", (json.dumps(ai_result, ensure_ascii=False), article_id))
@@ -263,11 +405,13 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
 
 def classify_unprocessed_articles(limit: int | None = None) -> dict[str, int]:
     """Classify recent unprocessed articles in batches; unreviewed entities/topics become active automatically."""
-    stats = {'selected': 0, 'classified': 0, 'events_assigned': 0, 'entities_assigned': 0, 'failed': 0, 'disabled': 0}
+    stats = {'selected': 0, 'classified': 0, 'events_assigned': 0, 'entities_assigned': 0, 'failed': 0, 'disabled': 0, 'repaired_mismatches': 0}
     if not settings.openai_api_key:
         stats['disabled'] = 1
         log.warning('OPENAI_API_KEY missing; GenAI event normalization skipped. Configure the key in Render and GitHub Actions.')
         return stats
+    # Repair unmistakable old action-family mismatches before processing unclassified articles.
+    stats['repaired_mismatches'] = repair_obvious_event_mismatches()
     limit = max(1, int(limit or settings.ai_classification_run_limit))
     batch_size = max(1, min(20, int(settings.ai_classification_batch_size)))
     with get_conn() as conn, conn.cursor() as cur:
@@ -296,17 +440,20 @@ def classify_unprocessed_articles(limit: int | None = None) -> dict[str, int]:
         # can be reused by the next batch instead of producing near-duplicate labels.
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""select t.topic_id,t.name,t.description,t.keywords,
-                                  coalesce(x.article_count,0) as article_count
+                                  coalesce(x.article_count,0) as article_count,
+                                  coalesce(x.sample_titles,ARRAY[]::text[]) as sample_titles
                            from topics t left join (
-                             select at.topic_id,count(*)::int as article_count
+                             select at.topic_id,count(*)::int as article_count,
+                                    (array_agg(a.title order by coalesce(a.published_at,a.collected_at) desc))[1:4] as sample_titles
                              from article_topics at join news_articles a on a.article_id=at.article_id
-                             where coalesce(a.published_at,a.collected_at)>=now()-interval '60 days' and a.is_excluded=false
+                             where coalesce(a.published_at,a.collected_at)>=now()-interval '60 days'
+                               and a.is_excluded=false and at.assignment_method <> 'admin'
                              group by at.topic_id
                            ) x on x.topic_id=t.topic_id
                            where t.status='active' and t.topic_type='event'
                            order by x.article_count desc,t.updated_at desc limit 160""")
             batch_existing_events = cur.fetchall()
-        batch_event_ids = {int(r['topic_id']) for r in batch_existing_events}
+        batch_event_topics = {int(r['topic_id']): r for r in batch_existing_events}
         try:
             output = _call_openai(prompt_rows, categories, batch_existing_events)
             by_id = {int(x.get('article_id')): x for x in output if x.get('article_id') is not None}
@@ -319,7 +466,7 @@ def classify_unprocessed_articles(limit: int | None = None) -> dict[str, int]:
                                     ('OpenAI omitted this article from results[]', article['article_id']))
                     continue
                 try:
-                    ok = _apply_classification(article, row, category_ids, batch_event_ids)
+                    ok = _apply_classification(article, row, category_ids, batch_event_topics)
                     if ok:
                         stats['classified'] += 1
                         stats['events_assigned'] += int(bool(row.get('event_topic_name') or row.get('existing_event_topic_id')))
@@ -336,6 +483,6 @@ def classify_unprocessed_articles(limit: int | None = None) -> dict[str, int]:
             with get_conn() as conn, conn.cursor() as cur:
                 cur.executemany('update news_articles set ai_classification_error=%s where article_id=%s',
                                 [(f'{type(exc).__name__}: {str(exc)[:1200]}', r['article_id']) for r in batch_rows])
-    log.info('GenAI event normalization complete: selected=%s classified=%s events=%s entities=%s failed=%s elapsed=%.1fs model=%s',
-             stats['selected'], stats['classified'], stats['events_assigned'], stats['entities_assigned'], stats['failed'], time.monotonic()-started, settings.openai_model)
+    log.info('GenAI event normalization complete: selected=%s classified=%s events=%s entities=%s repaired_mismatches=%s failed=%s elapsed=%.1fs model=%s',
+             stats['selected'], stats['classified'], stats['events_assigned'], stats['entities_assigned'], stats['repaired_mismatches'], stats['failed'], time.monotonic()-started, settings.openai_model)
     return stats
