@@ -24,6 +24,11 @@ class Settings:
     openai_model: str = os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
     ai_classification_batch_size: int = int(os.getenv('AI_CLASSIFICATION_BATCH_SIZE', '12'))
     ai_classification_run_limit: int = int(os.getenv('AI_CLASSIFICATION_RUN_LIMIT', '72'))
+    # Historical backlog processing is opt-in. Scheduled runs classify fresh articles only.
+    ai_classification_backfill_enabled: bool = os.getenv('AI_CLASSIFICATION_BACKFILL_ENABLED', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
+    # Failed articles are retried only after this cooldown unless explicitly queued for repair.
+    ai_classification_retry_cooldown_hours: int = max(1, int(os.getenv('AI_CLASSIFICATION_RETRY_COOLDOWN_HOURS', '6')))
+    ai_classification_max_retries: int = max(1, int(os.getenv('AI_CLASSIFICATION_MAX_RETRIES', '3')))
     ai_request_timeout_seconds: int = int(os.getenv('AI_REQUEST_TIMEOUT_SECONDS', '35'))
     # Telegram notifications: token is needed on both Render (webhook/link) and GitHub Actions (pipeline sender).
     telegram_bot_token: str = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
