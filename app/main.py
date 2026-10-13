@@ -17,7 +17,7 @@ from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.4',description='News Radar with global archive search, topic/entity timelines, personal feed and Telegram notifications.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.7',description='News Radar with global archive search, topic/entity timelines, grouped personal feed and Telegram notifications.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -106,8 +106,11 @@ def index(): return FileResponse('static/index.html')
 @app.get('/news')
 def public_news_page(): return FileResponse('static/news.html')
 
+@app.get('/news/following')
+def public_following_page(): return FileResponse('static/following.html')
+
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.6.4'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.6.7'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -595,52 +598,109 @@ def public_daily_articles(
 
 
 @app.get('/api/user/feed')
-def user_news_feed(
-    limit: int = Query(default=30, ge=1, le=50),
-    user: dict = Depends(require_user),
-):
-    """Latest distinct articles matching a user's followed event topics or entities."""
-    items = fetch_all("""WITH matched AS (
-          SELECT DISTINCT a.article_id, 'topic'::text AS follow_type,
-                 t.topic_id::bigint AS follow_id, t.name AS follow_name
+def user_news_feed(user: dict = Depends(require_user)):
+    """Return followed topic/entity groups with at most five latest articles per group."""
+    rows = fetch_all("""WITH followed AS (
+          SELECT 'topic'::text AS follow_type, t.topic_id::bigint AS follow_id,
+                 t.name AS follow_name, ust.display_order
           FROM user_saved_timelines ust
-          JOIN topics t ON t.topic_id=ust.topic_id AND t.status='active' AND t.topic_type='event'
-          JOIN article_topics at ON at.topic_id=t.topic_id
-          JOIN news_articles a ON a.article_id=at.article_id AND a.is_excluded=false
+          JOIN topics t ON t.topic_id=ust.topic_id
           WHERE ust.user_id=%s AND ust.timeline_type='topic'
+            AND t.status='active' AND t.topic_type='event'
           UNION ALL
-          SELECT DISTINCT a.article_id, 'entity'::text AS follow_type,
-                 e.entity_id::bigint AS follow_id, e.canonical_name AS follow_name
+          SELECT 'entity'::text AS follow_type, e.entity_id::bigint AS follow_id,
+                 e.canonical_name AS follow_name, ust.display_order
           FROM user_saved_timelines ust
-          JOIN entities e ON e.entity_id=ust.entity_id AND e.status='active'
-          JOIN article_entities ae ON ae.entity_id=e.entity_id
+          JOIN entities e ON e.entity_id=ust.entity_id
+          WHERE ust.user_id=%s AND ust.timeline_type='entity' AND e.status='active'
+        ), matched AS (
+          SELECT f.follow_type, f.follow_id, f.follow_name, f.display_order,
+                 a.article_id, a.title, a.url, a.author, a.language,
+                 left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
+                 a.published_at, a.collected_at,
+                 coalesce(a.published_at,a.collected_at) AS timeline_at,
+                 s.name AS source_name
+          FROM followed f
+          JOIN article_topics at ON f.follow_type='topic' AND at.topic_id=f.follow_id
+          JOIN news_articles a ON a.article_id=at.article_id AND a.is_excluded=false
+          JOIN data_sources s ON s.source_id=a.source_id
+          UNION ALL
+          SELECT f.follow_type, f.follow_id, f.follow_name, f.display_order,
+                 a.article_id, a.title, a.url, a.author, a.language,
+                 left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
+                 a.published_at, a.collected_at,
+                 coalesce(a.published_at,a.collected_at) AS timeline_at,
+                 s.name AS source_name
+          FROM followed f
+          JOIN article_entities ae ON f.follow_type='entity' AND ae.entity_id=f.follow_id
           JOIN news_articles a ON a.article_id=ae.article_id AND a.is_excluded=false
-          WHERE ust.user_id=%s AND ust.timeline_type='entity'
-        ), rolled_up AS (
-          SELECT article_id,
-                 jsonb_agg(DISTINCT jsonb_build_object('id', follow_id, 'name', follow_name))
-                   FILTER (WHERE follow_type='topic') AS matched_topics,
-                 jsonb_agg(DISTINCT jsonb_build_object('id', follow_id, 'name', follow_name))
-                   FILTER (WHERE follow_type='entity') AS matched_entities
-          FROM matched GROUP BY article_id
+          JOIN data_sources s ON s.source_id=a.source_id
+        ), ranked AS (
+          SELECT m.*,
+                 count(*) OVER (PARTITION BY follow_type, follow_id)::int AS total_count,
+                 row_number() OVER (PARTITION BY follow_type, follow_id
+                                    ORDER BY timeline_at DESC, article_id DESC) AS row_num
+          FROM matched m
+        ), grouped AS (
+          SELECT follow_type, follow_id, max(total_count)::int AS total_count,
+                 coalesce(jsonb_agg(jsonb_build_object(
+                   'article_id', article_id, 'title', title, 'url', url, 'author', author,
+                   'language', language, 'snippet', snippet, 'published_at', published_at,
+                   'collected_at', collected_at, 'timeline_at', timeline_at,
+                   'source_name', source_name,
+                   'matched_topics', CASE WHEN follow_type='topic'
+                     THEN jsonb_build_array(jsonb_build_object('id', follow_id, 'name', follow_name))
+                     ELSE '[]'::jsonb END,
+                   'matched_entities', CASE WHEN follow_type='entity'
+                     THEN jsonb_build_array(jsonb_build_object('id', follow_id, 'name', follow_name))
+                     ELSE '[]'::jsonb END
+                 ) ORDER BY timeline_at DESC, article_id DESC)
+                   FILTER (WHERE row_num <= 5), '[]'::jsonb) AS items
+          FROM ranked
+          GROUP BY follow_type, follow_id
         )
-        SELECT a.article_id, a.title, a.url, a.author, a.language,
-               left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
-               a.published_at, a.collected_at,
-               coalesce(a.published_at,a.collected_at) AS timeline_at,
-               s.name AS source_name,
-               coalesce(r.matched_topics, '[]'::jsonb) AS matched_topics,
-               coalesce(r.matched_entities, '[]'::jsonb) AS matched_entities,
-               count(*) OVER()::int AS total_count
-        FROM rolled_up r
-        JOIN news_articles a ON a.article_id=r.article_id
-        JOIN data_sources s ON s.source_id=a.source_id
-        ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC
-        LIMIT %s""", (user['user_id'], user['user_id'], limit))
-    total = int(items[0].get('total_count', 0)) if items else 0
-    for item in items:
-        item.pop('total_count', None)
-    return {'items': items, 'count': total, 'limit': limit}
+        SELECT f.follow_type AS type, f.follow_id AS id, f.follow_name AS name,
+               f.display_order, coalesce(g.total_count, 0)::int AS count,
+               coalesce(g.items, '[]'::jsonb) AS items
+        FROM followed f
+        LEFT JOIN grouped g ON g.follow_type=f.follow_type AND g.follow_id=f.follow_id
+        ORDER BY f.display_order, f.follow_type, f.follow_name""",
+        (user['user_id'], user['user_id']))
+
+    groups = []
+    flat_by_id = {}
+    grouped_count = 0
+    for row in rows:
+        group_type = row.get('type')
+        group_id = int(row.get('id'))
+        group_name = row.get('name') or ''
+        group_count = int(row.get('count') or 0)
+        group_items = row.get('items') or []
+        if isinstance(group_items, str):
+            try:
+                group_items = json.loads(group_items)
+            except (TypeError, ValueError):
+                group_items = []
+        if not isinstance(group_items, list):
+            group_items = []
+        group = {'type': group_type, 'id': group_id, 'name': group_name,
+                 'count': group_count, 'items': group_items[:5]}
+        groups.append(group)
+        grouped_count += group_count
+        match = {'id': group_id, 'name': group_name}
+        for item in group['items']:
+            article_id = item.get('article_id')
+            if article_id is None:
+                continue
+            merged = flat_by_id.setdefault(article_id, {**item, 'matched_topics': [], 'matched_entities': []})
+            target = 'matched_topics' if group_type == 'topic' else 'matched_entities'
+            if not any(int(x.get('id', 0)) == group_id for x in merged[target]):
+                merged[target].append(match)
+    flat_items = sorted(flat_by_id.values(),
+                        key=lambda item: (str(item.get('timeline_at') or ''), int(item.get('article_id') or 0)),
+                        reverse=True)
+    return {'groups': groups, 'items': flat_items, 'count': grouped_count,
+            'limit_per_group': 5}
 
 
 @app.get('/api/public/news/topics/{topic_id}/timeline')
