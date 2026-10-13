@@ -155,3 +155,35 @@ body{background:#fff;color:#202124;font-size:14px}
 
 /* v0.6.4 Telegram digest configuration */
 .telegram-settings{margin-top:14px;border:1px solid #dadce0;border-radius:12px;background:#fff;padding:0 13px}.telegram-settings summary{padding:14px 0;color:#3c4043;font-size:12px;font-weight:700;cursor:pointer}.telegram-settings-content{padding:0 0 14px}.telegram-settings-content .section-subtitle{font-size:10px;line-height:1.6;margin:0 0 10px}.telegram-status{font-size:10px;line-height:1.6;color:#5f6368;margin:9px 0}.telegram-button-row{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.telegram-button-row .auth-button{font-size:10px;padding:7px 9px;text-decoration:none}.telegram-button-row .auth-button:disabled{opacity:.45;cursor:not-allowed}.telegram-toggle{display:flex;align-items:flex-start;gap:8px;margin:12px 0;font-size:10px;line-height:1.5;color:#3c4043}.telegram-toggle input{margin-top:2px;accent-color:#1a73e8}.telegram-save-button{font-size:10px;padding:8px 10px}.telegram-help{font-size:9px;line-height:1.65;color:#80868b;margin:9px 0 0}
+
+/* v0.6.7: follow actions, editable followed tags and per-topic/entity feed groups. */
+.follow-toggle{border:1px solid #c9d8d4;border-radius:7px;background:#fff;color:#176b60;padding:6px 9px;font-size:10px;font-weight:750;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s}
+.follow-toggle:hover{background:#edf7f3;border-color:#7eb6a8}
+.follow-toggle.is-following{background:#e7f4ef;border-color:#b5d9cc;color:#226a58}
+.article-action-pair{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:5px;max-width:100%}
+.article-action-pair .timeline-action{max-width:100%}
+.radar-sidebar .article-action-pair{justify-content:flex-start}
+.followed-tag-list{display:flex;flex-wrap:wrap;gap:8px;min-height:35px;padding:12px 0 2px}
+.followed-tag{display:inline-flex;align-items:center;gap:7px;max-width:100%;padding:5px 6px 5px 9px;background:#f1f7f4;border:1px solid #d6e8e1;border-radius:999px;color:#284d46;font-size:11px}
+.followed-tag-type{flex-shrink:0;font-size:8px;letter-spacing:.45px;font-weight:800;color:#587c73;background:#e6f0eb;border-radius:4px;padding:4px 5px}
+.followed-tag-name{overflow-wrap:anywhere;line-height:1.4}
+.followed-tag>button{flex-shrink:0;width:22px;height:22px;border:0;border-radius:50%;background:#fff;color:#7d5650;font-size:17px;line-height:1;cursor:pointer}
+.followed-tag>button:hover{background:#fcecea;color:#a83227}
+.feed-group{padding:12px 0 16px;border-bottom:1px solid #e8eaed}
+.feed-group:last-child{border-bottom:0}
+.feed-group-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:4px}
+.feed-group-heading>div{min-width:0}
+.feed-group-heading h3{font-size:13px;line-height:1.45;color:#202124;margin:6px 0 3px;overflow-wrap:anywhere}
+.feed-group-heading p{font-size:10px;color:#70757a;margin:0}
+.feed-more-link{flex-shrink:0;display:inline-flex;align-items:center;gap:5px;padding:6px 8px;border:1px solid #dadce0;border-radius:18px;color:#1a73e8;text-decoration:none;font-size:10px;font-weight:700;white-space:nowrap}
+.feed-more-link:hover{background:#f8faff;border-color:#aecbfa}
+.feed-group-articles .article-row:first-child{border-top:0}
+.following-page{max-width:1060px;padding-top:34px}
+.following-heading{margin:20px 0 24px;padding:26px;background:#f8faf9;border:1px solid #e4e9e5;border-radius:18px}
+.following-heading h1{font-size:clamp(25px,4vw,38px);line-height:1.2;letter-spacing:-1px;color:#202124;margin:12px 0 10px;overflow-wrap:anywhere}
+.following-back-link{font-size:11px;color:#1a73e8;text-decoration:none}
+.following-related{font-size:10px;line-height:1.6;color:#68787c;margin:9px 0 0}
+.following-page-link,.following-page-disabled{display:inline-flex;align-items:center;padding:8px 12px;border:1px solid #dadce0;border-radius:18px;background:#fff;color:#3c4043;text-decoration:none;font-size:10px;font-weight:750}
+.following-page-link:hover{background:#f8faff;border-color:#aecbfa}
+.following-page-disabled{opacity:.4}
+@media(max-width:640px){.article-action-pair{justify-content:flex-start}.feed-group-heading{gap:7px}.feed-more-link{font-size:9px;padding:6px 7px}.following-heading{padding:20px 15px}.followed-tag{font-size:10px}.following-page .article-row{grid-template-columns:minmax(0,1fr)}}

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#ffffff">
   <meta name="description" content="Tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>News Radar — Doraemon</title>
-  <link rel="stylesheet" href="/static/news.css">
+  <link rel="stylesheet" href="/static/news.css?v=0.6.7">
 </head>
 <body>
   <header class="site-header">
@@ -99,22 +99,18 @@
     </section>
     <section class="content-section personal-section" id="myRadar" hidden>
       <div class="section-heading personal-heading">
-        <div><p class="eyebrow">YOUR PERSONAL FEED</p><h2>Feed của bạn</h2><p class="section-subtitle">Các bài mới liên quan đến topic và entity bạn đang theo dõi, sắp xếp mới nhất trước.</p></div>
-        <button class="auth-button" id="openTimelinePicker" type="button">Quản lý theo dõi</button>
+        <div><p class="eyebrow">YOUR PERSONAL FEED</p><h2>Feed của bạn</h2><p class="section-subtitle">Mỗi topic/entity hiển thị 5 bài mới nhất. Mở danh sách riêng để xem đầy đủ.</p></div>
+        <button class="auth-button" id="openTimelinePicker" type="button">Cấu hình follow</button>
       </div>
       <div class="feed-summary" id="feedSummary">Đang tải feed cá nhân…</div>
       <div id="userFeedContainer" class="radar-list personal-feed-list" aria-live="polite"><div class="loading-card">Đang tải feed của bạn…</div></div>
       <div class="pagination-row"><button class="text-action" id="refreshUserFeed" type="button">Làm mới feed ↻</button></div>
       <details class="timeline-picker" id="timelinePickerDetails">
-        <summary>Chọn topic / entity muốn theo dõi</summary>
+        <summary>Topic/entity đang follow</summary>
         <div class="picker-content">
-          <p class="section-subtitle">Tích chọn tối đa 10 mục. Lựa chọn được lưu theo tài khoản và áp dụng trên các thiết bị bạn đăng nhập.</p>
-          <label class="picker-search" for="timelineOptionSearch"><span aria-hidden="true">⌕</span><input id="timelineOptionSearch" type="search" placeholder="Tìm topic hoặc entity…" maxlength="120"></label>
-          <div class="picker-columns">
-            <section class="picker-group"><h3>Topic sự kiện <span id="topicOptionCount">0</span></h3><div id="topicOptions" class="picker-option-list"><div class="loading-card">Đang tải topic…</div></div></section>
-            <section class="picker-group"><h3>Entity / đối tượng <span id="entityOptionCount">0</span></h3><div id="entityOptions" class="picker-option-list"><div class="loading-card">Đang tải entity…</div></div></section>
-          </div>
-          <div class="picker-footer"><span id="selectionCount">Đã chọn 0/10</span><button class="auth-button" id="saveTimelinesButton" type="button">Lưu lựa chọn</button></div>
+          <p class="section-subtitle">Bấm “+ Theo dõi” ngay dưới mỗi bài tin để thêm mục quan tâm. Bạn có thể xóa tag tại đây rồi lưu các thay đổi. Tối đa 10 topic/entity cho mỗi tài khoản.</p>
+          <div id="savedTimelineTags" class="followed-tag-list"><div class="picker-empty">Đang tải các mục đã theo dõi…</div></div>
+          <div class="picker-footer"><span id="selectionCount">Đang theo dõi 0/10</span><button class="auth-button" id="saveTimelinesButton" type="button" disabled>Lưu thay đổi</button></div>
           <p class="auth-feedback" id="saveTimelineFeedback" role="status" aria-live="polite"></p>
         </div>
       </details>
@@ -145,6 +141,6 @@
       <a href="/" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/news.js" defer></script>
+  <script src="/static/news.js?v=0.6.7" defer></script>
 </body>
 </html>

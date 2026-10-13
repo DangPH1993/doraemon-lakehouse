@@ -5,8 +5,8 @@
   const state = {
     period: 'day', selectedTimeline: null, timelinePage: 1, articlePage: 1, searchPage: 1,
     articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '',
-    user: null, options: {topics: [], entities: []}, savedTimelines: [],
-    picked: new Set(), optionQuery: '', authMode: 'login', telegram: null
+    user: null, savedTimelines: [], picked: new Set(), followMeta: new Map(),
+    pendingFollow: null, followSaving: false, authMode: 'login', telegram: null
   };
   const periodLabels = {day: 'Hôm nay', week: 'Tuần này', month: 'Tháng này'};
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -55,7 +55,7 @@
         <div class="radar-row-main"><div class="radar-row-meta"><span>SỰ KIỆN</span><span>${num(topic.article_count)} bài</span><span>${num(topic.source_count)} nguồn</span>${growth ? `<span class="growth-badge ${growthClass}">${esc(growth)}</span>` : ''}</div>
           <h3>${esc(topic.topic_name)}</h3>${topic.description ? `<p class="radar-row-snippet">${esc(topic.description)}</p>` : ''}
         </div>
-        <div class="radar-row-actions"><button class="timeline-action primary" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.topic_id)}" data-timeline-name="${esc(topic.topic_name)}">Xem timeline <span aria-hidden="true">↗</span></button></div>
+        <div class="radar-row-actions"><button class="timeline-action primary" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.topic_id)}" data-timeline-name="${esc(topic.topic_name)}">Xem timeline <span aria-hidden="true">↗</span></button>${followButtonHTML('topic', {id: topic.topic_id, name: topic.topic_name})}</div>
       </article>`;
     }).join('');
     $('#hotTopicsFootnote').textContent = `Xếp hạng theo dữ liệu ${periodLabels[state.period].toLocaleLowerCase('vi-VN')} đã được thu thập và phân loại.`;
@@ -115,15 +115,24 @@
     }
   }
 
+  function followButtonHTML(type, item) {
+    const id = Number(item.id);
+    if (!Number.isInteger(id) || id < 1) return '';
+    const key = keyFor(type, id);
+    const followed = state.picked.has(key);
+    return `<button class="follow-toggle${followed ? ' is-following' : ''}" type="button" data-toggle-follow="${type}" data-follow-id="${id}" data-follow-name="${esc(item.name)}" aria-pressed="${followed}">${followed ? '✓ Đang follow' : '+ Theo dõi'}</button>`;
+  }
   function articleActionsHTML(item, feedMode = false) {
     const topics = feedMode ? (item.matched_topics || []) : (item.topic_refs || []);
     const entities = feedMode ? (item.matched_entities || []) : (item.entity_refs || []);
-    const topicButtons = topics.slice(0, 2).filter(x => Number(x.id) > 0).map(topic =>
-      `<button class="timeline-action" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.id)}" data-timeline-name="${esc(topic.name)}">Sự kiện: ${esc(topic.name)}</button>`).join('');
-    const entityButtons = entities.slice(0, 2).filter(x => Number(x.id) > 0).map(entity =>
-      `<button class="timeline-action entity-action" type="button" data-open-timeline="entity" data-timeline-id="${Number(entity.id)}" data-timeline-name="${esc(entity.name)}">Đối tượng: ${esc(entity.name)}</button>`).join('');
-    const html = topicButtons + entityButtons;
-    return html ? `<div class="radar-row-actions article-actions">${html}</div>` : '<div class="article-no-timeline">Chưa có topic hoặc đối tượng liên quan được phân loại.</div>';
+    const buttons = [];
+    topics.filter(x => Number(x.id) > 0).forEach(topic => {
+      buttons.push(`<div class="article-action-pair"><button class="timeline-action" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.id)}" data-timeline-name="${esc(topic.name)}">Topic: ${esc(topic.name)}</button>${followButtonHTML('topic', topic)}</div>`);
+    });
+    entities.filter(x => Number(x.id) > 0).forEach(entity => {
+      buttons.push(`<div class="article-action-pair"><button class="timeline-action entity-action" type="button" data-open-timeline="entity" data-timeline-id="${Number(entity.id)}" data-timeline-name="${esc(entity.name)}">Entity: ${esc(entity.name)}</button>${followButtonHTML('entity', entity)}</div>`);
+    });
+    return buttons.length ? `<div class="radar-row-actions article-actions">${buttons.join('')}</div>` : '<div class="article-no-timeline">Chưa có topic hoặc entity liên quan được phân loại.</div>';
   }
   function articleRowHTML(item, feedMode = false) {
     const time = localDateText(item.published_at || item.collected_at, true);
@@ -151,6 +160,7 @@
       renderArticleList('#dailyArticles', data.items || [], false, 'Chưa có bài báo hôm nay', 'Chưa có bài nào được xuất bản hoặc thu thập trong ngày hôm nay.');
       renderPagination('#articlePagination', data.pagination, 'articles');
       $('#articleDateLabel').textContent = `${num(data.pagination.total)} bài được xuất bản hôm nay, theo giờ Việt Nam.`;
+      syncFollowButtons();
     } catch (error) {
       setMessage('#dailyArticles', 'Không tải được bài báo', error.message, true);
     }
@@ -168,6 +178,7 @@
       renderArticleList('#searchResults', data.items || [], false, 'Không tìm thấy tin phù hợp', 'Thử từ khóa khác hoặc kiểm tra chính tả.');
       renderPagination('#searchPagination', data.pagination, 'search');
       $('#searchResultLabel').textContent = `${num(data.pagination.total)} kết quả cho “${query}”.`;
+      syncFollowButtons();
       $('#searchResultsSection').scrollIntoView({behavior:'smooth', block:'start'});
     } catch (error) {
       setMessage('#searchResults', 'Không tìm kiếm được', error.message, true);
@@ -218,40 +229,74 @@
     renderAuthArea();
   }
   function keyFor(type, id) { return `${type}:${Number(id)}`; }
+  function rememberFollow(type, id, name) {
+    const key = keyFor(type, id);
+    if (name) state.followMeta.set(key, {type, id:Number(id), name:String(name)});
+  }
+  function hasUnsavedFollowChanges() {
+    const saved = new Set(state.savedTimelines.map(item => keyFor(item.type, item.id)));
+    if (saved.size !== state.picked.size) return true;
+    for (const key of saved) if (!state.picked.has(key)) return true;
+    return false;
+  }
   function updateSelectionCount() {
-    $('#selectionCount').textContent = `Đã chọn ${state.picked.size}/${MAX_SAVED_TIMELINES}`;
-    $('#saveTimelinesButton').disabled = state.picked.size > MAX_SAVED_TIMELINES;
+    $('#selectionCount').textContent = `Đang theo dõi ${state.picked.size}/${MAX_SAVED_TIMELINES}`;
+    $('#saveTimelinesButton').disabled = state.picked.size > MAX_SAVED_TIMELINES || !hasUnsavedFollowChanges();
   }
-  function renderOptionGroup(target, countTarget, items, type) {
-    const query = state.optionQuery.toLocaleLowerCase('vi-VN');
-    const visible = items.filter(item => !query || `${item.name} ${item.description || ''} ${item.entity_type || ''}`.toLocaleLowerCase('vi-VN').includes(query));
-    $(countTarget).textContent = `${num(visible.length)}/${num(items.length)}`;
-    if (!visible.length) { $(target).innerHTML = `<div class="picker-empty">${items.length ? 'Không có kết quả phù hợp.' : 'Chưa có dữ liệu để chọn.'}</div>`; return; }
-    $(target).innerHTML = visible.map(item => {
-      const key = keyFor(type, item.id); const checked = state.picked.has(key) ? ' checked' : '';
-      const subtitle = `${num(item.article_count)} bài${item.source_count !== undefined ? ` · ${num(item.source_count)} nguồn` : ''}${item.entity_type ? ` · ${esc(item.entity_type)}` : ''}`;
-      return `<label class="picker-option"><input type="checkbox" data-pick-type="${type}" data-pick-id="${Number(item.id)}"${checked}><span class="picker-option-copy"><strong>${esc(item.name)}</strong><small>${subtitle}</small></span></label>`;
-    }).join('');
-  }
-  function renderPicker() {
-    renderOptionGroup('#topicOptions', '#topicOptionCount', state.options.topics, 'topic');
-    renderOptionGroup('#entityOptions', '#entityOptionCount', state.options.entities, 'entity');
+  function renderFollowTags() {
+    const selected = [...state.picked].map(key => {
+      const meta = state.followMeta.get(key) || state.savedTimelines.find(item => keyFor(item.type, item.id) === key);
+      if (!meta) return null;
+      return {...meta, id:Number(meta.id)};
+    }).filter(Boolean).sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name, 'vi'));
+    if (!selected.length) {
+      $('#savedTimelineTags').innerHTML = '<div class="picker-empty">Bạn chưa follow topic/entity nào. Hãy bấm “+ Theo dõi” ngay trên một bài tin.</div>';
+    } else {
+      $('#savedTimelineTags').innerHTML = selected.map(item => `<span class="followed-tag"><span class="followed-tag-type">${item.type === 'topic' ? 'TOPIC' : 'ENTITY'}</span><span class="followed-tag-name">${esc(item.name)}</span><button type="button" data-remove-follow="${item.type}" data-follow-id="${item.id}" aria-label="Xóa follow ${esc(item.name)}" title="Xóa tag">×</button></span>`).join('');
+    }
     updateSelectionCount();
+  }
+  function syncFollowButtons() {
+    document.querySelectorAll('[data-toggle-follow][data-follow-id]').forEach(button => {
+      const type = button.dataset.toggleFollow;
+      const id = Number(button.dataset.followId);
+      const followed = state.picked.has(keyFor(type, id));
+      button.classList.toggle('is-following', followed);
+      button.setAttribute('aria-pressed', String(followed));
+      button.textContent = followed ? '✓ Đang follow' : '+ Theo dõi';
+      button.disabled = state.followSaving;
+    });
+    document.querySelectorAll('[data-remove-follow]').forEach(button => { button.disabled = state.followSaving; });
   }
   async function renderUserFeed() {
     if (!state.user) return;
     $('#userFeedContainer').innerHTML = '<div class="loading-card">Đang tải feed cá nhân…</div>';
     try {
-      const data = await getJSON('/api/user/feed?limit=30');
+      const data = await getJSON('/api/user/feed');
+      const groups = data.groups || [];
       const followedCount = state.savedTimelines.length;
       $('#feedSummary').textContent = followedCount
-        ? `Đang theo dõi ${num(followedCount)}/${MAX_SAVED_TIMELINES} topic/entity · ${num(data.count || 0)} bài phù hợp trong feed.`
-        : 'Bạn chưa theo dõi topic hoặc entity nào. Hãy chọn mục quan tâm để cá nhân hóa feed.';
+        ? `Đang follow ${num(followedCount)}/${MAX_SAVED_TIMELINES} topic/entity · mỗi mục hiển thị tối đa 5 bài mới nhất.`
+        : 'Bạn chưa follow topic/entity nào. Bấm “+ Theo dõi” ngay trên các bài tin để cá nhân hóa feed.';
       if (!followedCount) {
-        setMessage('#userFeedContainer', 'Bắt đầu tạo feed của bạn', 'Chọn topic sự kiện hoặc entity trong “Quản lý theo dõi” để các bài liên quan xuất hiện tại đây.');
+        setMessage('#userFeedContainer', 'Bắt đầu tạo feed của bạn', 'Hãy mở một bài tin và bấm “+ Theo dõi” bên cạnh topic hoặc entity liên quan.');
         return;
       }
-      renderArticleList('#userFeedContainer', data.items || [], true, 'Chưa có bài mới trong feed', 'Chưa có bài báo được liên kết với những topic/entity bạn theo dõi. Feed sẽ cập nhật khi có dữ liệu mới.');
+      if (!groups.length) {
+        setMessage('#userFeedContainer', 'Chưa có bài trong feed', 'Chưa tìm thấy bài báo khớp với các topic/entity đã theo dõi. Feed sẽ xuất hiện khi có bài được phân loại.');
+        return;
+      }
+      $('#userFeedContainer').innerHTML = groups.map(group => {
+        const typeLabel = group.type === 'topic' ? 'TOPIC' : 'ENTITY';
+        const articleHTML = (group.items || []).length
+          ? group.items.map(item => articleRowHTML(item, true)).join('')
+          : '<div class="message-card"><strong>Chưa có bài</strong>Chưa có bài báo liên quan đến mục này.</div>';
+        const more = Number(group.count) > 5
+          ? `<a class="feed-more-link" href="/news/following?type=${encodeURIComponent(group.type)}&id=${Number(group.id)}">Xem thêm (${num(group.count)}) <span aria-hidden="true">→</span></a>`
+          : '';
+        return `<section class="feed-group"><div class="feed-group-heading"><div><span class="followed-tag-type">${typeLabel}</span><h3>${esc(group.name)}</h3><p>${num(group.count)} bài phù hợp</p></div>${more}</div><div class="feed-group-articles">${articleHTML}</div></section>`;
+      }).join('');
+      syncFollowButtons();
     } catch (error) {
       setMessage('#userFeedContainer', 'Không tải được feed cá nhân', error.message, true);
     }
@@ -322,39 +367,77 @@
     renderAuthArea();
     $('#userFeedContainer').innerHTML = '<div class="loading-card">Đang tải feed của bạn…</div>';
     try {
-      const [optionData, savedData] = await Promise.all([
-        getJSON('/api/user/timeline-options'), getJSON('/api/user/saved-timelines')
-      ]);
-      state.options = {topics: optionData.topics || [], entities: optionData.entities || []};
+      const savedData = await getJSON('/api/user/saved-timelines');
       state.savedTimelines = savedData.items || [];
-      state.picked = new Set(state.savedTimelines.map(item => keyFor(item.type, item.id)));
-      renderPicker();
+      state.picked = new Set(state.savedTimelines.map(item => {
+        rememberFollow(item.type, item.id, item.name);
+        return keyFor(item.type, item.id);
+      }));
+      renderFollowTags(); syncFollowButtons();
       await Promise.all([renderUserFeed(), loadTelegramSettings()]);
     } catch (error) {
       setMessage('#userFeedContainer', 'Không tải được feed cá nhân', error.message, true);
     }
   }
-  async function saveTimelines() {
-    if (!state.user) { openAuthModal('login'); return; }
-    if (state.picked.size > MAX_SAVED_TIMELINES) { setFeedback('#saveTimelineFeedback', `Chỉ được lưu tối đa ${MAX_SAVED_TIMELINES} mục.`); return; }
+  async function saveTimelines({silent = false} = {}) {
+    if (!state.user) { openAuthModal('login'); return false; }
+    if (state.picked.size > MAX_SAVED_TIMELINES) {
+      setFeedback('#saveTimelineFeedback', `Chỉ được lưu tối đa ${MAX_SAVED_TIMELINES} mục.`); return false;
+    }
     const items = [...state.picked].map(key => { const [type, id] = key.split(':'); return {type, id:Number(id)}; });
-    $('#saveTimelinesButton').disabled = true;
-    setFeedback('#saveTimelineFeedback', 'Đang lưu lựa chọn…');
+    const button = $('#saveTimelinesButton');
+    state.followSaving = true;
+    button.disabled = true; syncFollowButtons();
+    if (!silent) setFeedback('#saveTimelineFeedback', 'Đang lưu các mục follow…');
     try {
       const result = await sendJSON('/api/user/saved-timelines', 'PUT', {items});
       const saved = await getJSON('/api/user/saved-timelines');
       state.savedTimelines = saved.items || [];
-      state.picked = new Set(state.savedTimelines.map(item => keyFor(item.type, item.id)));
-      renderPicker(); await renderUserFeed();
-      setFeedback('#saveTimelineFeedback', `Đã lưu ${num(result.saved_count)} mục theo dõi. Feed đã được cập nhật.`, true);
-    } catch (error) { setFeedback('#saveTimelineFeedback', error.message); }
-    finally { $('#saveTimelinesButton').disabled = state.picked.size > MAX_SAVED_TIMELINES; }
+      state.picked = new Set(state.savedTimelines.map(item => {
+        rememberFollow(item.type, item.id, item.name);
+        return keyFor(item.type, item.id);
+      }));
+      renderFollowTags(); syncFollowButtons(); await renderUserFeed();
+      setFeedback('#saveTimelineFeedback', silent ? 'Đã cập nhật follow từ bài tin.' : `Đã lưu ${num(result.saved_count)} mục follow.`, true);
+      return true;
+    } catch (error) {
+      setFeedback('#saveTimelineFeedback', error.message);
+      renderFollowTags(); syncFollowButtons();
+      return false;
+    } finally {
+      state.followSaving = false; syncFollowButtons(); updateSelectionCount();
+    }
+  }
+  async function toggleFollow(type, id, name) {
+    id = Number(id);
+    if (!Number.isInteger(id) || id < 1) return;
+    rememberFollow(type, id, name);
+    if (!state.user) {
+      state.pendingFollow = {type, id, name};
+      openAuthModal('login');
+      setFeedback('#authFeedback', 'Đăng nhập để lưu mục follow này. Sau khi đăng nhập, lựa chọn sẽ được áp dụng tự động.');
+      return;
+    }
+    const key = keyFor(type, id);
+    if (state.picked.has(key)) {
+      state.picked.delete(key);
+    } else {
+      if (state.picked.size >= MAX_SAVED_TIMELINES) {
+        setFeedback('#saveTimelineFeedback', `Bạn đã follow đủ ${MAX_SAVED_TIMELINES} mục. Xóa một tag trong cấu hình trước khi thêm mục mới.`);
+        $('#timelinePickerDetails').open = true;
+        $('#timelinePickerDetails').scrollIntoView({behavior:'smooth', block:'center'});
+        return;
+      }
+      state.picked.add(key);
+    }
+    renderFollowTags(); syncFollowButtons();
+    await saveTimelines({silent:true});
   }
   async function logout() {
     try { await sendJSON('/api/user-auth/logout', 'POST', {}); } catch (error) { console.warn('Logout request failed:', error.message); }
-    state.user = null; state.savedTimelines = []; state.picked.clear(); state.options = {topics: [], entities: []};
+    state.user = null; state.savedTimelines = []; state.picked.clear(); state.followMeta.clear(); state.pendingFollow = null;
     state.telegram = null; $('#openTelegramLink').hidden = true; $('#telegramEnabled').checked = false; $('#telegramEnabled').disabled = true;
-    renderAuthArea(); $('#userFeedContainer').innerHTML = ''; $('#telegramStatus').textContent = 'Đăng nhập để cấu hình Telegram.';
+    renderAuthArea(); $('#userFeedContainer').innerHTML = ''; $('#savedTimelineTags').innerHTML = ''; $('#telegramStatus').textContent = 'Đăng nhập để cấu hình Telegram.'; syncFollowButtons(); updateSelectionCount();
   }
 
   document.addEventListener('click', async event => {
@@ -364,10 +447,17 @@
     if (event.target.closest('#logoutButton')) { await logout(); return; }
     if (event.target.closest('#openTimelinePicker')) {
       $('#timelinePickerDetails').open = true;
-      $('#timelinePickerDetails').scrollIntoView({behavior:'smooth', block:'center'});
-      $('#timelineOptionSearch').focus({preventScroll:true}); return;
+      $('#timelinePickerDetails').scrollIntoView({behavior:'smooth', block:'center'}); return;
     }
     if (event.target.closest('#saveTimelinesButton')) { await saveTimelines(); return; }
+    const toggle = event.target.closest('[data-toggle-follow]');
+    if (toggle) { await toggleFollow(toggle.dataset.toggleFollow, toggle.dataset.followId, toggle.dataset.followName); return; }
+    const remove = event.target.closest('[data-remove-follow]');
+    if (remove) {
+      const key = keyFor(remove.dataset.removeFollow, remove.dataset.followId);
+      state.picked.delete(key); renderFollowTags(); syncFollowButtons();
+      setFeedback('#saveTimelineFeedback', 'Tag đã được gỡ khỏi danh sách tạm. Bấm “Lưu thay đổi” để áp dụng.'); return;
+    }
     if (event.target.closest('#createTelegramLink')) { await createTelegramLink(); return; }
     if (event.target.closest('#saveTelegramSettings')) { await saveTelegramSettings(); return; }
     if (event.target.closest('#refreshTelegramStatus')) { await loadTelegramSettings(); setFeedback('#telegramSettingsFeedback', 'Đã kiểm tra trạng thái kết nối.', true); return; }
@@ -394,16 +484,6 @@
       else if (pager.dataset.pager === 'timeline' && state.selectedTimeline) await loadTimeline(state.selectedTimeline.type, state.selectedTimeline.id, Math.max(1, state.timelinePage + dir));
     }
   });
-  document.addEventListener('change', event => {
-    const input = event.target.closest('[data-pick-type]'); if (!input) return;
-    const key = keyFor(input.dataset.pickType, input.dataset.pickId);
-    if (input.checked) {
-      if (state.picked.size >= MAX_SAVED_TIMELINES) { input.checked = false; setFeedback('#saveTimelineFeedback', `Bạn đã chọn đủ ${MAX_SAVED_TIMELINES} mục. Bỏ chọn một mục trước khi thêm mục mới.`); return; }
-      state.picked.add(key);
-    } else state.picked.delete(key);
-    updateSelectionCount(); setFeedback('#saveTimelineFeedback', '');
-  });
-  $('#timelineOptionSearch').addEventListener('input', event => { state.optionQuery = event.target.value.trim(); renderPicker(); });
   $('#radarSearchForm').addEventListener('submit', async event => {
     event.preventDefault(); state.searchQuery = $('#radarSearch').value.trim();
     if (!state.searchQuery) { $('#searchResultsSection').hidden = true; return; }
@@ -419,6 +499,7 @@
     try {
       const data = await sendJSON(registering ? '/api/user-auth/register' : '/api/user-auth/login', 'POST', body);
       state.user = data.user; closeAuthModal(); renderAuthArea(); await loadUserRadar();
+      if (state.pendingFollow) { const pending = state.pendingFollow; state.pendingFollow = null; if (!state.picked.has(keyFor(pending.type, pending.id))) await toggleFollow(pending.type, pending.id, pending.name); }
     } catch (error) { setFeedback('#authFeedback', error.message); }
     finally { $('#authSubmit').disabled = false; }
   });

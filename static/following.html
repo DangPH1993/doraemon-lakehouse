@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="description" content="Danh sách bài báo theo một topic hoặc entity trên News Radar.">
+  <title>Bài viết theo dõi — News Radar</title>
+  <link rel="stylesheet" href="/static/news.css?v=0.6.7">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/news" aria-label="News Radar trang chủ">
+      <span class="brand-mark">N<span>.</span></span>
+      <span class="brand-copy"><strong>NEWS RADAR</strong><small>by Doraemon</small></span>
+    </a>
+    <nav class="header-nav" aria-label="Điều hướng chính"><a href="/news">Radar chính</a></nav>
+    <div class="header-actions"><a class="auth-button auth-button-secondary" href="/news">← Quay lại Radar</a><a class="admin-link" href="/">Quản trị ↗</a></div>
+  </header>
+  <main class="page-shell following-page">
+    <section class="content-section following-heading">
+      <p class="eyebrow">FOLLOWING ARCHIVE</p>
+      <a class="following-back-link" href="/news">← Feed của bạn</a>
+      <h1 id="followingTitle">Đang tải danh sách bài viết…</h1>
+      <p class="section-subtitle" id="followingSubtitle">Tất cả bài báo liên quan, mới nhất trước.</p>
+    </section>
+    <section class="content-section">
+      <div id="followingArticles" class="radar-list" aria-live="polite"><div class="loading-card">Đang tải bài báo…</div></div>
+      <div id="followingPagination" class="pagination-row"></div>
+    </section>
+    <footer class="site-footer">
+      <div class="footer-brand"><span class="brand-mark small">N<span>.</span></span><div><strong>NEWS RADAR</strong><small>by Doraemon</small></div></div>
+      <p>News Radar hiển thị tiêu đề, đoạn trích ngắn, nguồn và liên kết đến bài gốc. Nội dung thuộc quyền của nhà xuất bản tương ứng.</p>
+      <a href="/news" class="footer-admin">Về Radar ↗</a>
+    </footer>
+  </main>
+  <script src="/static/following.js?v=0.6.7" defer></script>
+</body>
+</html>
