@@ -17,7 +17,7 @@ from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.0',description='News Radar with user accounts, saved topic/entity timelines, RSS ingestion and analytics.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.1',description='News Radar with Google-style search, topic/entity timelines and personalized feed.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -104,7 +104,7 @@ def index(): return FileResponse('static/index.html')
 def public_news_page(): return FileResponse('static/news.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.6.0'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.6.1'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -380,18 +380,37 @@ def public_daily_articles(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
 ):
-    """Public today's article list: headlines, short RSS snippets and source links only."""
+    """Public daily article list, or an all-date headline/topic/entity search when q is set."""
     local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
     today = (local or {}).get('today')
     if today is None:
         raise HTTPException(status_code=503, detail='Could not resolve local date')
-    where = ["a.is_excluded=false",
-             "(coalesce(a.published_at,a.collected_at) at time zone %s)::date=%s"]
-    vals: list = [settings.timezone, today]
-    if q and q.strip():
-        term = f"%{q.strip()[:150]}%"
-        where.append("(a.title ILIKE %s OR a.summary ILIKE %s OR s.name ILIKE %s)")
-        vals.extend([term, term, term])
+
+    query = (q or '').strip()[:150]
+    where = ["a.is_excluded=false"]
+    vals: list = []
+    if query:
+        term = f"%{query}%"
+        where.append("""(
+            a.title ILIKE %s OR a.summary ILIKE %s OR s.name ILIKE %s
+            OR EXISTS (
+                SELECT 1 FROM article_topics search_at
+                JOIN topics search_t ON search_t.topic_id=search_at.topic_id
+                WHERE search_at.article_id=a.article_id
+                  AND search_t.status='active' AND search_t.name ILIKE %s
+            )
+            OR EXISTS (
+                SELECT 1 FROM article_entities search_ae
+                JOIN entities search_e ON search_e.entity_id=search_ae.entity_id
+                WHERE search_ae.article_id=a.article_id
+                  AND search_e.status='active' AND search_e.canonical_name ILIKE %s
+            )
+        )""")
+        vals.extend([term, term, term, term, term])
+    else:
+        where.append("(coalesce(a.published_at,a.collected_at) at time zone %s)::date=%s")
+        vals.extend([settings.timezone, today])
+
     from_sql = " FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id"
     where_sql = " WHERE " + " AND ".join(where)
     total_row = fetch_one("SELECT count(*)::int AS total" + from_sql + where_sql, vals)
@@ -405,11 +424,67 @@ def public_daily_articles(
                               s.name AS source_name,
                               coalesce((SELECT json_agg(t.name ORDER BY t.name)
                                         FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                                        WHERE at.article_id=a.article_id AND t.status='active'), '[]'::json) AS topics
+                                        WHERE at.article_id=a.article_id AND t.status='active'), '[]'::json) AS topics,
+                              coalesce((SELECT json_agg(json_build_object('id', t.topic_id, 'name', t.name) ORDER BY t.name)
+                                        FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                                        WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topic_refs,
+                              coalesce((SELECT json_agg(json_build_object('id', e.entity_id, 'name', e.canonical_name) ORDER BY e.canonical_name)
+                                        FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                                        WHERE ae.article_id=a.article_id AND e.status='active'), '[]'::json) AS entity_refs
                        """ + from_sql + where_sql +
                        " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
                        vals + [page_size, (page - 1) * page_size])
-    return {'date': today, 'items': items, 'pagination': pagination_meta(page, page_size, total)}
+    return {'date': today, 'query': query or None, 'items': items,
+            'pagination': pagination_meta(page, page_size, total)}
+
+
+@app.get('/api/user/feed')
+def user_news_feed(
+    limit: int = Query(default=30, ge=1, le=50),
+    user: dict = Depends(require_user),
+):
+    """Latest distinct articles matching a user's followed event topics or entities."""
+    items = fetch_all("""WITH matched AS (
+          SELECT DISTINCT a.article_id, 'topic'::text AS follow_type,
+                 t.topic_id::bigint AS follow_id, t.name AS follow_name
+          FROM user_saved_timelines ust
+          JOIN topics t ON t.topic_id=ust.topic_id AND t.status='active' AND t.topic_type='event'
+          JOIN article_topics at ON at.topic_id=t.topic_id
+          JOIN news_articles a ON a.article_id=at.article_id AND a.is_excluded=false
+          WHERE ust.user_id=%s AND ust.timeline_type='topic'
+          UNION ALL
+          SELECT DISTINCT a.article_id, 'entity'::text AS follow_type,
+                 e.entity_id::bigint AS follow_id, e.canonical_name AS follow_name
+          FROM user_saved_timelines ust
+          JOIN entities e ON e.entity_id=ust.entity_id AND e.status='active'
+          JOIN article_entities ae ON ae.entity_id=e.entity_id
+          JOIN news_articles a ON a.article_id=ae.article_id AND a.is_excluded=false
+          WHERE ust.user_id=%s AND ust.timeline_type='entity'
+        ), rolled_up AS (
+          SELECT article_id,
+                 jsonb_agg(DISTINCT jsonb_build_object('id', follow_id, 'name', follow_name))
+                   FILTER (WHERE follow_type='topic') AS matched_topics,
+                 jsonb_agg(DISTINCT jsonb_build_object('id', follow_id, 'name', follow_name))
+                   FILTER (WHERE follow_type='entity') AS matched_entities
+          FROM matched GROUP BY article_id
+        )
+        SELECT a.article_id, a.title, a.url, a.author, a.language,
+               left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
+               a.published_at, a.collected_at,
+               coalesce(a.published_at,a.collected_at) AS timeline_at,
+               s.name AS source_name,
+               coalesce(r.matched_topics, '[]'::jsonb) AS matched_topics,
+               coalesce(r.matched_entities, '[]'::jsonb) AS matched_entities,
+               count(*) OVER()::int AS total_count
+        FROM rolled_up r
+        JOIN news_articles a ON a.article_id=r.article_id
+        JOIN data_sources s ON s.source_id=a.source_id
+        ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC
+        LIMIT %s""", (user['user_id'], user['user_id'], limit))
+    total = int(items[0].get('total_count', 0)) if items else 0
+    for item in items:
+        item.pop('total_count', None)
+    return {'items': items, 'count': total, 'limit': limit}
 
 
 @app.get('/api/public/news/topics/{topic_id}/timeline')
