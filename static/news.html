@@ -61,12 +61,30 @@
       <p class="search-hint">Ví dụ: kinh tế Việt Nam, Nvidia, bầu cử Mỹ, biến đổi khí hậu</p>
     </section>
 
+    <div class="radar-layout" id="radarLayout">
+      <div class="radar-main-column">
     <section class="content-section search-results-section" id="searchResultsSection" hidden>
       <div class="section-heading"><div><p class="eyebrow">SEARCH RESULTS</p><h2>Kết quả tìm kiếm</h2><p class="section-subtitle" id="searchResultLabel"></p></div><button class="text-action" id="clearSearch" type="button">Xóa tìm kiếm ×</button></div>
       <div id="searchResults" class="radar-list" aria-live="polite"></div>
       <div id="searchPagination" class="pagination-row"></div>
     </section>
-
+    <section class="content-section articles-section" id="articles">
+      <div class="section-heading articles-heading">
+        <div><p class="eyebrow">LATEST HEADLINES</p><h2>Tin tức trong ngày</h2><p class="section-subtitle" id="articleDateLabel">Các bài mới được xuất bản hôm nay, theo giờ Việt Nam.</p></div>
+      </div>
+      <div id="dailyArticles" class="radar-list" aria-live="polite"><div class="loading-card">Đang tải bài báo…</div></div>
+      <div id="articlePagination" class="pagination-row"></div>
+    </section>
+    <section class="content-section timeline-section" id="timeline">
+      <div class="section-heading">
+        <div><p class="eyebrow">FOLLOW THE STORY</p><h2>Timeline chi tiết</h2><p class="section-subtitle">Mở timeline từ tin nổi bật hoặc tin trong ngày để xem toàn bộ diễn biến.</p></div>
+        <div class="timeline-selected" id="timelineSelectionLabel">Chưa chọn sự kiện hoặc đối tượng</div>
+      </div>
+      <div id="timelineContainer" class="timeline-container"><div class="empty-state"><span class="empty-icon">◎</span><strong>Chọn “Xem timeline” trên một tin</strong><p>Các bài báo liên quan sẽ hiển thị tại đây theo trình tự thời gian.</p></div></div>
+      <div id="timelinePagination" class="pagination-row"></div>
+    </section>
+      </div>
+      <aside class="radar-sidebar" aria-label="Tin nổi bật và feed cá nhân">
     <section class="content-section" id="trending">
       <div class="section-heading">
         <div><p class="eyebrow">WHAT MATTERS NOW</p><h2>Tin tức nổi bật</h2><p class="section-subtitle">Những sự kiện đang được đưa tin nhiều, gom theo cùng một chủ đề.</p></div>
@@ -79,15 +97,6 @@
       <div id="hotTopics" class="radar-list" aria-live="polite"><div class="loading-card">Đang tải tin nổi bật…</div></div>
       <div class="section-footnote" id="hotTopicsFootnote">Xếp hạng theo dữ liệu đã thu thập và phân loại.</div>
     </section>
-
-    <section class="content-section articles-section" id="articles">
-      <div class="section-heading articles-heading">
-        <div><p class="eyebrow">LATEST HEADLINES</p><h2>Tin tức trong ngày</h2><p class="section-subtitle" id="articleDateLabel">Các bài mới được xuất bản hôm nay, theo giờ Việt Nam.</p></div>
-      </div>
-      <div id="dailyArticles" class="radar-list" aria-live="polite"><div class="loading-card">Đang tải bài báo…</div></div>
-      <div id="articlePagination" class="pagination-row"></div>
-    </section>
-
     <section class="content-section personal-section" id="myRadar" hidden>
       <div class="section-heading personal-heading">
         <div><p class="eyebrow">YOUR PERSONAL FEED</p><h2>Feed của bạn</h2><p class="section-subtitle">Các bài mới liên quan đến topic và entity bạn đang theo dõi, sắp xếp mới nhất trước.</p></div>
@@ -110,15 +119,8 @@
         </div>
       </details>
     </section>
-
-    <section class="content-section timeline-section" id="timeline">
-      <div class="section-heading">
-        <div><p class="eyebrow">FOLLOW THE STORY</p><h2>Timeline chi tiết</h2><p class="section-subtitle">Mở timeline từ tin nổi bật hoặc tin trong ngày để xem toàn bộ diễn biến.</p></div>
-        <div class="timeline-selected" id="timelineSelectionLabel">Chưa chọn sự kiện hoặc đối tượng</div>
-      </div>
-      <div id="timelineContainer" class="timeline-container"><div class="empty-state"><span class="empty-icon">◎</span><strong>Chọn “Xem timeline” trên một tin</strong><p>Các bài báo liên quan sẽ hiển thị tại đây theo trình tự thời gian.</p></div></div>
-      <div id="timelinePagination" class="pagination-row"></div>
-    </section>
+      </aside>
+    </div>
 
     <footer class="site-footer">
       <div class="footer-brand"><span class="brand-mark small">N<span>.</span></span><div><strong>NEWS RADAR</strong><small>by Doraemon</small></div></div>
