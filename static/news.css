@@ -152,3 +152,6 @@ body{background:#fff;color:#202124;font-size:14px}
   .radar-sidebar .featured-row{grid-template-columns:25px minmax(0,1fr);gap:8px}
   .radar-sidebar .article-row{grid-template-columns:minmax(0,1fr)}
 }
+
+/* v0.6.4 Telegram digest configuration */
+.telegram-settings{margin-top:14px;border:1px solid #dadce0;border-radius:12px;background:#fff;padding:0 13px}.telegram-settings summary{padding:14px 0;color:#3c4043;font-size:12px;font-weight:700;cursor:pointer}.telegram-settings-content{padding:0 0 14px}.telegram-settings-content .section-subtitle{font-size:10px;line-height:1.6;margin:0 0 10px}.telegram-status{font-size:10px;line-height:1.6;color:#5f6368;margin:9px 0}.telegram-button-row{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}.telegram-button-row .auth-button{font-size:10px;padding:7px 9px;text-decoration:none}.telegram-button-row .auth-button:disabled{opacity:.45;cursor:not-allowed}.telegram-toggle{display:flex;align-items:flex-start;gap:8px;margin:12px 0;font-size:10px;line-height:1.5;color:#3c4043}.telegram-toggle input{margin-top:2px;accent-color:#1a73e8}.telegram-save-button{font-size:10px;padding:8px 10px}.telegram-help{font-size:9px;line-height:1.65;color:#80868b;margin:9px 0 0}
