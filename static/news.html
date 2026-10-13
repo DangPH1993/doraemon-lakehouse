@@ -118,6 +118,23 @@
           <p class="auth-feedback" id="saveTimelineFeedback" role="status" aria-live="polite"></p>
         </div>
       </details>
+      <details class="telegram-settings" id="telegramSettingsDetails">
+        <summary>Thông báo bài mới qua Telegram</summary>
+        <div class="telegram-settings-content">
+          <p class="section-subtitle">Nhận một bản tin tổng hợp sau mỗi lần pipeline thu thập và phân loại xong bài mới khớp với các topic/entity bạn đang theo dõi.</p>
+          <p class="telegram-status" id="telegramStatus" role="status" aria-live="polite">Đang kiểm tra cấu hình Telegram…</p>
+          <div class="telegram-button-row">
+            <button class="auth-button" id="createTelegramLink" type="button">Tạo liên kết Telegram</button>
+            <a class="auth-button telegram-open-link" id="openTelegramLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Mở Telegram để kết nối ↗</a>
+            <button class="auth-button auth-button-secondary" id="refreshTelegramStatus" type="button">Kiểm tra kết nối</button>
+            <button class="auth-button auth-button-secondary" id="unlinkTelegramButton" type="button" hidden>Ngắt kết nối</button>
+          </div>
+          <label class="telegram-toggle" for="telegramEnabled"><input id="telegramEnabled" type="checkbox" disabled> Nhận thông báo cho các topic/entity đã theo dõi</label>
+          <button class="auth-button telegram-save-button" id="saveTelegramSettings" type="button">Lưu cấu hình thông báo</button>
+          <p class="auth-feedback" id="telegramSettingsFeedback" role="status" aria-live="polite"></p>
+          <p class="telegram-help">Cách kết nối: tạo liên kết, mở bot Telegram và bấm Start. Sau đó quay lại đây, kiểm tra kết nối, bật thông báo và lưu cấu hình. Liên kết hết hạn sau 15 phút.</p>
+        </div>
+      </details>
     </section>
       </aside>
     </div>
