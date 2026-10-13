@@ -1,11 +1,11 @@
 from __future__ import annotations
-import json, logging, threading
+import json, logging, threading, secrets, hmac, re
 from datetime import date, timedelta
 from typing import Literal
 import re
 from urllib.parse import urlparse
 import requests
-from fastapi import FastAPI, Depends, HTTPException, Query, Body, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, Query, Body, Request, Response, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,8 +17,8 @@ from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.3',description='News Radar with global archive search, topic/entity timelines and personalized feed.')
-app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.4',description='News Radar with global archive search, topic/entity timelines, personal feed and Telegram notifications.')
+app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
 
@@ -54,6 +54,9 @@ class SavedTimelineRef(BaseModel):
 
 class SaveTimelinesBody(BaseModel):
     items: list[SavedTimelineRef] = Field(default_factory=list, max_length=10)
+
+class TelegramSettingsBody(BaseModel):
+    enabled: bool
 class SourceBody(BaseModel):
     name: str = Field(min_length=2,max_length=180)
     feed_url: str = Field(min_length=8,max_length=2000)
@@ -104,7 +107,7 @@ def index(): return FileResponse('static/index.html')
 def public_news_page(): return FileResponse('static/news.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.6.1'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.6.4'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -277,6 +280,138 @@ def replace_saved_timelines(body: SaveTimelinesBody, user: dict = Depends(requir
         log.exception('Could not save personal timeline preferences')
         raise HTTPException(status_code=503, detail='Không thể lưu lựa chọn timeline. Vui lòng kiểm tra migration cơ sở dữ liệu.') from exc
     return {'ok': True, 'saved_count': len(items)}
+
+# Telegram settings are per user. The bot token stays in server/workflow environment variables.
+@app.get('/api/user/telegram/settings')
+def get_user_telegram_settings(user: dict = Depends(require_user)):
+    try:
+        row = fetch_one(
+            "SELECT telegram_enabled, telegram_chat_id, telegram_linked_at FROM app_users WHERE user_id=%s AND is_active=true",
+            (user['user_id'],)
+        )
+    except Exception as exc:
+        log.exception('Telegram settings could not be read')
+        raise HTTPException(status_code=503, detail='Chưa sẵn sàng cấu hình Telegram. Vui lòng chạy migration SQL 008.') from exc
+    if not row:
+        raise HTTPException(status_code=404, detail='Không tìm thấy tài khoản người dùng.')
+    configured = bool(settings.telegram_bot_token and re.fullmatch(r'[A-Za-z0-9_]{5,32}', settings.telegram_bot_username or '') and settings.telegram_webhook_secret)
+    return {
+        'enabled': bool(row.get('telegram_enabled')),
+        'connected': bool(row.get('telegram_chat_id')),
+        'linked_at': row.get('telegram_linked_at'),
+        'bot_username': settings.telegram_bot_username or None,
+        'bot_available': configured,
+    }
+
+
+@app.post('/api/user/telegram/link')
+def create_user_telegram_link(user: dict = Depends(require_user)):
+    if not (settings.telegram_bot_token and re.fullmatch(r'[A-Za-z0-9_]{5,32}', settings.telegram_bot_username or '') and settings.telegram_webhook_secret):
+        raise HTTPException(status_code=503, detail='Máy chủ chưa cấu hình Telegram. Quản trị viên cần đặt TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME và TELEGRAM_WEBHOOK_SECRET.')
+    code = secrets.token_urlsafe(24)
+    try:
+        row = fetch_one(
+            "UPDATE app_users SET telegram_link_code=%s, telegram_link_expires_at=now()+interval '15 minutes' "
+            "WHERE user_id=%s AND is_active=true RETURNING telegram_link_expires_at",
+            (code, user['user_id'])
+        )
+    except Exception as exc:
+        log.exception('Could not create Telegram link code')
+        raise HTTPException(status_code=503, detail='Không thể tạo liên kết Telegram. Vui lòng kiểm tra migration SQL 008.') from exc
+    if not row:
+        raise HTTPException(status_code=404, detail='Không tìm thấy tài khoản người dùng.')
+    return {
+        'link_url': f"https://t.me/{settings.telegram_bot_username}?start={code}",
+        'expires_at': row['telegram_link_expires_at'],
+        'expires_in_seconds': 900,
+    }
+
+
+@app.put('/api/user/telegram/settings')
+def update_user_telegram_settings(body: TelegramSettingsBody, user: dict = Depends(require_user)):
+    try:
+        current = fetch_one('SELECT telegram_chat_id, telegram_enabled FROM app_users WHERE user_id=%s AND is_active=true', (user['user_id'],))
+        if not current:
+            raise HTTPException(status_code=404, detail='Không tìm thấy tài khoản người dùng.')
+        if body.enabled and not current.get('telegram_chat_id'):
+            raise HTTPException(status_code=409, detail='Hãy kết nối Telegram trước khi bật thông báo.')
+        if body.enabled and not settings.telegram_bot_token:
+            raise HTTPException(status_code=503, detail='Máy chủ chưa cấu hình TELEGRAM_BOT_TOKEN để gửi thông báo.')
+        row = fetch_one(
+            "UPDATE app_users SET telegram_enabled=%s, "
+            "telegram_notifications_since=CASE WHEN %s AND NOT telegram_enabled THEN now() ELSE telegram_notifications_since END "
+            "WHERE user_id=%s RETURNING telegram_enabled, telegram_notifications_since",
+            (body.enabled, body.enabled, user['user_id'])
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception('Telegram settings update failed')
+        raise HTTPException(status_code=503, detail='Không thể lưu cấu hình Telegram. Vui lòng kiểm tra migration SQL 008.') from exc
+    return {'ok': True, 'enabled': bool(row['telegram_enabled']), 'notifications_since': row['telegram_notifications_since']}
+
+
+@app.delete('/api/user/telegram/link')
+def unlink_user_telegram(user: dict = Depends(require_user)):
+    try:
+        row = fetch_one(
+            "UPDATE app_users SET telegram_chat_id=NULL, telegram_enabled=false, telegram_notifications_since=NULL, "
+            "telegram_link_code=NULL, telegram_link_expires_at=NULL, telegram_linked_at=NULL "
+            "WHERE user_id=%s RETURNING user_id",
+            (user['user_id'],)
+        )
+    except Exception as exc:
+        log.exception('Telegram unlink failed')
+        raise HTTPException(status_code=503, detail='Không thể ngắt kết nối Telegram. Vui lòng kiểm tra migration SQL 008.') from exc
+    if not row:
+        raise HTTPException(status_code=404, detail='Không tìm thấy tài khoản người dùng.')
+    return {'ok': True}
+
+
+@app.post('/api/telegram/webhook')
+def telegram_webhook(
+    update: dict = Body(...),
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+):
+    expected = settings.telegram_webhook_secret
+    if not expected:
+        raise HTTPException(status_code=404, detail='Telegram webhook is not configured.')
+    if not x_telegram_bot_api_secret_token or not hmac.compare_digest(x_telegram_bot_api_secret_token, expected):
+        raise HTTPException(status_code=403, detail='Invalid webhook secret.')
+    message = update.get('message') or update.get('edited_message') or {}
+    chat = message.get('chat') or {}
+    chat_id = chat.get('id')
+    text = str(message.get('text') or '').strip()
+    # Only link private chats; never link group chats to an account.
+    if not chat_id or chat.get('type') != 'private' or not text.startswith('/start'):
+        return {'ok': True}
+    match = re.match(r'^/start(?:@[A-Za-z0-9_]+)?\s+([A-Za-z0-9_-]{20,64})\s*$', text)
+    from .telegram_notifications import send_telegram_text
+    try:
+        if not match:
+            send_telegram_text(str(chat_id), 'Để liên kết, hãy tạo nút kết nối Telegram trong phần cài đặt News Radar rồi mở liên kết đó.')
+            return {'ok': True}
+        code = match.group(1)
+        try:
+            linked = fetch_one(
+                "UPDATE app_users SET telegram_chat_id=%s, telegram_linked_at=now(), telegram_link_code=NULL, telegram_link_expires_at=NULL "
+                "WHERE telegram_link_code=%s AND telegram_link_expires_at > now() AND is_active=true "
+                "RETURNING username",
+                (str(chat_id), code)
+            )
+        except Exception:
+            log.warning('Telegram link could not be saved; chat identifier is not logged.')
+            send_telegram_text(str(chat_id), 'Không thể liên kết tài khoản lúc này. Vui lòng quay lại News Radar và thử tạo liên kết mới.')
+            return {'ok': True}
+        if not linked:
+            send_telegram_text(str(chat_id), 'Mã liên kết không hợp lệ hoặc đã hết hạn. Hãy tạo liên kết mới trong News Radar.')
+            return {'ok': True}
+        send_telegram_text(str(chat_id), 'Đã liên kết Telegram với News Radar thành công. Quay lại trang News Radar để bật thông báo bài mới.')
+    except Exception:
+        # Keep webhook responses successful so Telegram does not keep retrying a user-facing reply.
+        log.exception('Telegram webhook reply failed')
+    return {'ok': True}
+
 
 @app.get('/api/dashboard',dependencies=[Depends(require_admin)])
 def dashboard():
