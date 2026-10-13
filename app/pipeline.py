@@ -653,7 +653,7 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         stage_started = time.monotonic()
         if settings.openai_api_key:
             from .genai_events import classify_unprocessed_articles
-            ai_stats = classify_unprocessed_articles(limit=settings.ai_classification_run_limit)
+            ai_stats = classify_unprocessed_articles(limit=settings.ai_classification_run_limit, since=started)
             totals['ai_articles_classified'] = ai_stats['classified']
             totals['ai_articles_failed'] = ai_stats['failed']
             totals['event_topics_assigned'] += ai_stats['events_assigned']
