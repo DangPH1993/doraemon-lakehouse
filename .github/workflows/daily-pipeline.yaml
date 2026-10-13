@@ -3,7 +3,7 @@ name: Mini Lakehouse Daily Pipeline
 
 on:
   schedule:
-    - cron: "30 * * * *"
+    - cron: "35 * * * *"
   workflow_dispatch:
 
 permissions:
