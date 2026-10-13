@@ -324,7 +324,13 @@ CREATE TABLE IF NOT EXISTS app_users (
     password_hash TEXT NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_login_at TIMESTAMPTZ
+    last_login_at TIMESTAMPTZ,
+    telegram_chat_id TEXT,
+    telegram_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    telegram_notifications_since TIMESTAMPTZ,
+    telegram_link_code TEXT,
+    telegram_link_expires_at TIMESTAMPTZ,
+    telegram_linked_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS user_saved_timelines (
@@ -349,3 +355,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_user_saved_entity
 CREATE INDEX IF NOT EXISTS idx_user_saved_timelines_user_order
     ON user_saved_timelines(user_id, display_order, saved_timeline_id);
 
+-- Telegram notifications and per-user delivery deduplication (v0.6.4).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_app_users_telegram_chat
+    ON app_users(telegram_chat_id) WHERE telegram_chat_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_app_users_telegram_link_code
+    ON app_users(telegram_link_code) WHERE telegram_link_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_app_users_telegram_active
+    ON app_users(user_id) WHERE telegram_enabled = TRUE AND telegram_chat_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS user_telegram_deliveries (
+    user_id BIGINT NOT NULL REFERENCES app_users(user_id) ON DELETE CASCADE,
+    article_id BIGINT NOT NULL REFERENCES news_articles(article_id) ON DELETE CASCADE,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, article_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_telegram_deliveries_sent_at
+    ON user_telegram_deliveries(sent_at);
