@@ -6,7 +6,7 @@
     period: 'day', selectedTimeline: null, timelinePage: 1, articlePage: 1, searchPage: 1,
     articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '',
     user: null, options: {topics: [], entities: []}, savedTimelines: [],
-    picked: new Set(), optionQuery: '', authMode: 'login'
+    picked: new Set(), optionQuery: '', authMode: 'login', telegram: null
   };
   const periodLabels = {day: 'Hôm nay', week: 'Tuần này', month: 'Tháng này'};
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -256,6 +256,67 @@
       setMessage('#userFeedContainer', 'Không tải được feed cá nhân', error.message, true);
     }
   }
+  function renderTelegramSettings(data) {
+    state.telegram = data;
+    $('#telegramEnabled').checked = Boolean(data.enabled);
+    $('#telegramEnabled').disabled = !data.connected;
+    $('#createTelegramLink').disabled = !data.bot_available;
+    $('#createTelegramLink').textContent = data.connected ? 'Tạo liên kết mới' : 'Tạo liên kết Telegram';
+    $('#unlinkTelegramButton').hidden = !data.connected;
+    if (data.connected) $('#openTelegramLink').hidden = true;
+    if (!data.bot_available) {
+      $('#telegramStatus').textContent = 'Máy chủ chưa cấu hình đầy đủ Telegram. Quản trị viên cần đặt TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME và TELEGRAM_WEBHOOK_SECRET.';
+    } else if (data.connected) {
+      $('#telegramStatus').textContent = `Telegram đã kết nối${data.enabled ? ' · thông báo đang bật' : ' · thông báo đang tắt'}.`;
+    } else {
+      $('#telegramStatus').textContent = `Chưa kết nối Telegram. Mở bot @${data.bot_username} để liên kết tài khoản.`;
+    }
+  }
+  async function loadTelegramSettings() {
+    if (!state.user) return;
+    try {
+      const data = await getJSON('/api/user/telegram/settings');
+      renderTelegramSettings(data);
+    } catch (error) {
+      $('#telegramStatus').textContent = error.message || 'Không tải được cấu hình Telegram.';
+      $('#telegramEnabled').disabled = true;
+      $('#createTelegramLink').disabled = true;
+    }
+  }
+  async function createTelegramLink() {
+    $('#createTelegramLink').disabled = true;
+    setFeedback('#telegramSettingsFeedback', 'Đang tạo liên kết an toàn…');
+    try {
+      const data = await sendJSON('/api/user/telegram/link', 'POST', {});
+      const link = $('#openTelegramLink');
+      if (!String(data.link_url || '').startsWith('https://t.me/')) throw new Error('Liên kết Telegram máy chủ trả về không hợp lệ.');
+      link.href = data.link_url; link.hidden = false;
+      setFeedback('#telegramSettingsFeedback', 'Liên kết có hiệu lực trong 15 phút. Mở Telegram và bấm Start, sau đó quay lại kiểm tra kết nối.', true);
+    } catch (error) { setFeedback('#telegramSettingsFeedback', error.message); }
+    finally { if (state.telegram) $('#createTelegramLink').disabled = !state.telegram.bot_available; }
+  }
+  async function saveTelegramSettings() {
+    const button = $('#saveTelegramSettings'); button.disabled = true;
+    setFeedback('#telegramSettingsFeedback', 'Đang lưu cấu hình…');
+    try {
+      const result = await sendJSON('/api/user/telegram/settings', 'PUT', {enabled: $('#telegramEnabled').checked});
+      setFeedback('#telegramSettingsFeedback', result.enabled ? 'Đã bật thông báo Telegram. Bản tin sẽ được gửi sau khi pipeline xử lý bài mới.' : 'Đã lưu cấu hình. Thông báo Telegram đang tắt.', true);
+      await loadTelegramSettings();
+    } catch (error) { setFeedback('#telegramSettingsFeedback', error.message); await loadTelegramSettings(); }
+    finally { button.disabled = false; }
+  }
+  async function unlinkTelegram() {
+    if (!window.confirm('Ngắt kết nối Telegram? Bạn sẽ không còn nhận thông báo qua tài khoản Telegram hiện tại.')) return;
+    $('#unlinkTelegramButton').disabled = true;
+    try {
+      await getJSON('/api/user/telegram/link', {method:'DELETE'});
+      $('#openTelegramLink').hidden = true; $('#openTelegramLink').removeAttribute('href');
+      setFeedback('#telegramSettingsFeedback', 'Đã ngắt kết nối Telegram.', true);
+      await loadTelegramSettings();
+    } catch (error) { setFeedback('#telegramSettingsFeedback', error.message); }
+    finally { $('#unlinkTelegramButton').disabled = false; }
+  }
+
   async function loadUserRadar() {
     if (!state.user) { renderAuthArea(); return; }
     renderAuthArea();
@@ -268,7 +329,7 @@
       state.savedTimelines = savedData.items || [];
       state.picked = new Set(state.savedTimelines.map(item => keyFor(item.type, item.id)));
       renderPicker();
-      await renderUserFeed();
+      await Promise.all([renderUserFeed(), loadTelegramSettings()]);
     } catch (error) {
       setMessage('#userFeedContainer', 'Không tải được feed cá nhân', error.message, true);
     }
@@ -292,7 +353,8 @@
   async function logout() {
     try { await sendJSON('/api/user-auth/logout', 'POST', {}); } catch (error) { console.warn('Logout request failed:', error.message); }
     state.user = null; state.savedTimelines = []; state.picked.clear(); state.options = {topics: [], entities: []};
-    renderAuthArea(); $('#userFeedContainer').innerHTML = '';
+    state.telegram = null; $('#openTelegramLink').hidden = true; $('#telegramEnabled').checked = false; $('#telegramEnabled').disabled = true;
+    renderAuthArea(); $('#userFeedContainer').innerHTML = ''; $('#telegramStatus').textContent = 'Đăng nhập để cấu hình Telegram.';
   }
 
   document.addEventListener('click', async event => {
@@ -306,6 +368,10 @@
       $('#timelineOptionSearch').focus({preventScroll:true}); return;
     }
     if (event.target.closest('#saveTimelinesButton')) { await saveTimelines(); return; }
+    if (event.target.closest('#createTelegramLink')) { await createTelegramLink(); return; }
+    if (event.target.closest('#saveTelegramSettings')) { await saveTelegramSettings(); return; }
+    if (event.target.closest('#refreshTelegramStatus')) { await loadTelegramSettings(); setFeedback('#telegramSettingsFeedback', 'Đã kiểm tra trạng thái kết nối.', true); return; }
+    if (event.target.closest('#unlinkTelegramButton')) { await unlinkTelegram(); return; }
     if (event.target.closest('#refreshUserFeed')) { await renderUserFeed(); return; }
     if (event.target.closest('#clearSearch')) {
       state.searchQuery = ''; $('#radarSearch').value = ''; $('#searchResultsSection').hidden = true; $('#radarSearch').focus(); return;
