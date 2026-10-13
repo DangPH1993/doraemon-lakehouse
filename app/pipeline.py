@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar, hashlib, json, logging, re, time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import feedparser
 import requests
 from dateutil import parser as date_parser
@@ -16,19 +17,35 @@ log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
 
 def parse_date(entry: dict):
-    for key in ('published_parsed','updated_parsed','created_parsed'):
-        val = entry.get(key)
-        if val:
-            try: return datetime.fromtimestamp(calendar.timegm(val), tz=timezone.utc)
-            except (TypeError, ValueError, OverflowError): pass
-    for key in ('published','updated','created','date'):
+    # Parse the original date text before feedparser's struct_time fields. Some feeds
+    # (including Vietnamese publishers) use values such as "10/13/2026 12:00:00 PM"
+    # without an offset. feedparser may leave published_parsed empty for these values,
+    # and interpreting the naive text as UTC shifts the displayed time by +7 hours.
+    # For naive text, assume the configured local timezone; explicit offsets still win.
+    for key in ('published', 'updated', 'created', 'date'):
         val = entry.get(key)
         if val:
             try:
                 dt = date_parser.parse(str(val))
-                if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+                if dt.tzinfo is None:
+                    try:
+                        naive_tz = ZoneInfo(settings.timezone)
+                    except (ZoneInfoNotFoundError, ValueError):
+                        log.warning('Invalid TIMEZONE=%r; naive RSS timestamps will be treated as UTC', settings.timezone)
+                        naive_tz = timezone.utc
+                    dt = dt.replace(tzinfo=naive_tz)
                 return dt.astimezone(timezone.utc)
-            except Exception: pass
+            except Exception:
+                pass
+    # Fall back to feedparser's normalized tuple only when no source date string
+    # could be parsed. RSS parsed tuples do not preserve whether the source omitted TZ.
+    for key in ('published_parsed', 'updated_parsed', 'created_parsed'):
+        val = entry.get(key)
+        if val:
+            try:
+                return datetime.fromtimestamp(calendar.timegm(val), tz=timezone.utc)
+            except (TypeError, ValueError, OverflowError):
+                pass
     return None
 
 def extract_feed_content(entry: dict) -> tuple[str,str]:
