@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#102b3f">
-  <meta name="description" content="Theo dõi sự kiện nổi bật, dòng thời gian và tin tức mới trong ngày từ nhiều nguồn báo chí.">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="description" content="Tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>News Radar — Doraemon</title>
   <link rel="stylesheet" href="/static/news.css">
 </head>
@@ -15,9 +15,9 @@
       <span class="brand-copy"><strong>NEWS RADAR</strong><small>by Doraemon</small></span>
     </a>
     <nav class="header-nav" aria-label="Điều hướng chính">
-      <a href="#trending">Sự kiện nổi bật</a>
-      <a href="#timeline">Timeline</a>
+      <a href="#trending">Tin nổi bật</a>
       <a href="#articles">Tin trong ngày</a>
+      <a href="#myRadar" id="myRadarNav" hidden>Feed của bạn</a>
     </nav>
     <div class="header-actions">
       <div class="auth-area" id="authArea" aria-live="polite">
@@ -48,43 +48,62 @@
   </div>
 
   <main class="page-shell">
-    <section class="hero">
-      <div class="hero-copy">
-        <p class="eyebrow"><span class="live-dot"></span> TIN TỨC ĐƯỢC KẾT NỐI THEO SỰ KIỆN</p>
-        <h1>Nắm bắt <em>diễn biến</em>,<br>không chỉ đọc tiêu đề.</h1>
-        <p class="hero-description">Xem sự kiện nào đang được quan tâm, lần theo dòng thời gian và khám phá những tin mới từ các nguồn báo.</p>
-        <div class="hero-meta"><span class="date-badge" id="currentDate">Hôm nay</span><span class="meta-separator">·</span><span>Cập nhật từ kho tin Doraemon</span></div>
-      </div>
-      <div class="hero-visual" aria-hidden="true">
-        <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div>
-        <div class="planet planet-main"><span>NEWS<br>RADAR</span></div>
-        <div class="planet planet-small planet-a">↗</div><div class="planet planet-small planet-b">●</div><div class="planet planet-small planet-c">✦</div>
-        <div class="visual-caption">FROM HEADLINES<br>TO THE BIG PICTURE</div>
-      </div>
+    <section class="search-home" id="searchHome" aria-labelledby="searchTitle">
+      <p class="search-eyebrow"><span class="live-dot"></span> NEWS RADAR · THE BIG PICTURE</p>
+      <h1 id="searchTitle">Bạn muốn theo dõi <span>điều gì?</span></h1>
+      <p class="search-intro">Tìm tin tức, sự kiện, nhân vật hoặc tổ chức — rồi theo dõi toàn bộ diễn biến theo thời gian.</p>
+      <form id="radarSearchForm" class="radar-search" role="search">
+        <span class="radar-search-icon" aria-hidden="true">⌕</span>
+        <label class="sr-only" for="radarSearch">Tìm tin tức, sự kiện, nhân vật hoặc tổ chức</label>
+        <input id="radarSearch" type="search" placeholder="Tìm một sự kiện, nhân vật, doanh nghiệp…" maxlength="150" autocomplete="off">
+        <button type="submit">Tìm kiếm</button>
+      </form>
+      <p class="search-hint">Ví dụ: kinh tế Việt Nam, Nvidia, bầu cử Mỹ, biến đổi khí hậu</p>
     </section>
 
-    <section class="stats-strip" aria-label="Tổng quan tin tức">
-      <div class="stat-item"><span class="stat-label">Bài báo hôm nay</span><strong id="statArticles">—</strong><span class="stat-note">Đang có trong kho tin</span></div>
-      <div class="stat-item"><span class="stat-label">Nguồn tin đang bật</span><strong id="statSources">—</strong><span class="stat-note">Nguồn dữ liệu</span></div>
-      <div class="stat-item"><span class="stat-label">Topic sự kiện</span><strong id="statEvents">—</strong><span class="stat-note">Được theo dõi</span></div>
-      <div class="stat-item stat-highlight"><span class="stat-label">Góc nhìn</span><strong>Topic → Timeline</strong><span class="stat-note">Xâu chuỗi tin theo sự kiện</span></div>
+    <section class="content-section search-results-section" id="searchResultsSection" hidden>
+      <div class="section-heading"><div><p class="eyebrow">SEARCH RESULTS</p><h2>Kết quả tìm kiếm</h2><p class="section-subtitle" id="searchResultLabel"></p></div><button class="text-action" id="clearSearch" type="button">Xóa tìm kiếm ×</button></div>
+      <div id="searchResults" class="radar-list" aria-live="polite"></div>
+      <div id="searchPagination" class="pagination-row"></div>
+    </section>
+
+    <section class="content-section" id="trending">
+      <div class="section-heading">
+        <div><p class="eyebrow">WHAT MATTERS NOW</p><h2>Tin tức nổi bật</h2><p class="section-subtitle">Những sự kiện đang được đưa tin nhiều, gom theo cùng một chủ đề.</p></div>
+        <div class="period-switch" role="tablist" aria-label="Khoảng thời gian nổi bật">
+          <button class="period-btn active" data-period="day" role="tab" aria-selected="true">Hôm nay</button>
+          <button class="period-btn" data-period="week" role="tab" aria-selected="false">Tuần này</button>
+          <button class="period-btn" data-period="month" role="tab" aria-selected="false">Tháng này</button>
+        </div>
+      </div>
+      <div id="hotTopics" class="radar-list" aria-live="polite"><div class="loading-card">Đang tải tin nổi bật…</div></div>
+      <div class="section-footnote" id="hotTopicsFootnote">Xếp hạng theo dữ liệu đã thu thập và phân loại.</div>
+    </section>
+
+    <section class="content-section articles-section" id="articles">
+      <div class="section-heading articles-heading">
+        <div><p class="eyebrow">LATEST HEADLINES</p><h2>Tin tức trong ngày</h2><p class="section-subtitle" id="articleDateLabel">Các bài mới được xuất bản hôm nay, theo giờ Việt Nam.</p></div>
+      </div>
+      <div id="dailyArticles" class="radar-list" aria-live="polite"><div class="loading-card">Đang tải bài báo…</div></div>
+      <div id="articlePagination" class="pagination-row"></div>
     </section>
 
     <section class="content-section personal-section" id="myRadar" hidden>
       <div class="section-heading personal-heading">
-        <div><p class="eyebrow">YOUR PERSONAL RADAR</p><h2>Radar của bạn</h2><p class="section-subtitle">Các timeline đã lưu sẽ tự động xuất hiện ở đây mỗi lần bạn quay lại.</p></div>
-        <button class="auth-button" id="openTimelinePicker" type="button">+ Chọn topic / entity</button>
+        <div><p class="eyebrow">YOUR PERSONAL FEED</p><h2>Feed của bạn</h2><p class="section-subtitle">Các bài mới liên quan đến topic và entity bạn đang theo dõi, sắp xếp mới nhất trước.</p></div>
+        <button class="auth-button" id="openTimelinePicker" type="button">Quản lý theo dõi</button>
       </div>
-      <div class="saved-summary" id="savedSummary">Đang tải lựa chọn của bạn…</div>
-      <div id="savedTimelinesContainer" class="saved-timelines" aria-live="polite"><div class="loading-card">Đang tải timeline cá nhân…</div></div>
+      <div class="feed-summary" id="feedSummary">Đang tải feed cá nhân…</div>
+      <div id="userFeedContainer" class="radar-list personal-feed-list" aria-live="polite"><div class="loading-card">Đang tải feed của bạn…</div></div>
+      <div class="pagination-row"><button class="text-action" id="refreshUserFeed" type="button">Làm mới feed ↻</button></div>
       <details class="timeline-picker" id="timelinePickerDetails">
-        <summary>Quản lý topic và entity đang theo dõi</summary>
+        <summary>Chọn topic / entity muốn theo dõi</summary>
         <div class="picker-content">
-          <p class="section-subtitle">Tích chọn tối đa 10 mục. Lựa chọn được lưu theo tài khoản và đồng bộ khi đăng nhập trên thiết bị khác.</p>
+          <p class="section-subtitle">Tích chọn tối đa 10 mục. Lựa chọn được lưu theo tài khoản và áp dụng trên các thiết bị bạn đăng nhập.</p>
           <label class="picker-search" for="timelineOptionSearch"><span aria-hidden="true">⌕</span><input id="timelineOptionSearch" type="search" placeholder="Tìm topic hoặc entity…" maxlength="120"></label>
           <div class="picker-columns">
             <section class="picker-group"><h3>Topic sự kiện <span id="topicOptionCount">0</span></h3><div id="topicOptions" class="picker-option-list"><div class="loading-card">Đang tải topic…</div></div></section>
-            <section class="picker-group"><h3>Entity / thực thể <span id="entityOptionCount">0</span></h3><div id="entityOptions" class="picker-option-list"><div class="loading-card">Đang tải entity…</div></div></section>
+            <section class="picker-group"><h3>Entity / đối tượng <span id="entityOptionCount">0</span></h3><div id="entityOptions" class="picker-option-list"><div class="loading-card">Đang tải entity…</div></div></section>
           </div>
           <div class="picker-footer"><span id="selectionCount">Đã chọn 0/10</span><button class="auth-button" id="saveTimelinesButton" type="button">Lưu lựa chọn</button></div>
           <p class="auth-feedback" id="saveTimelineFeedback" role="status" aria-live="polite"></p>
@@ -92,40 +111,13 @@
       </details>
     </section>
 
-    <section class="content-section" id="trending">
-      <div class="section-heading">
-        <div><p class="eyebrow">WHAT MATTERS NOW</p><h2>Sự kiện nổi bật</h2><p class="section-subtitle">Xếp hạng theo lượng bài, độ phủ nguồn và mức tăng so với kỳ trước.</p></div>
-        <div class="period-switch" role="tablist" aria-label="Khoảng thời gian nổi bật">
-          <button class="period-btn active" data-period="day" role="tab" aria-selected="true">Hôm nay</button>
-          <button class="period-btn" data-period="week" role="tab" aria-selected="false">Tuần này</button>
-          <button class="period-btn" data-period="month" role="tab" aria-selected="false">Tháng này</button>
-        </div>
-      </div>
-      <div id="hotTopics" class="hot-topic-grid" aria-live="polite"><div class="loading-card">Đang tải sự kiện nổi bật…</div></div>
-      <div class="section-footnote" id="hotTopicsFootnote">Số liệu phụ thuộc dữ liệu đã được thu thập và phân loại.</div>
-    </section>
-
     <section class="content-section timeline-section" id="timeline">
       <div class="section-heading">
-        <div><p class="eyebrow">FOLLOW THE STORY</p><h2>Timeline sự kiện</h2><p class="section-subtitle">Chọn một topic để xem các bài báo theo trình tự mới nhất.</p></div>
-        <div class="timeline-selected" id="timelineSelectionLabel">Chưa chọn sự kiện</div>
+        <div><p class="eyebrow">FOLLOW THE STORY</p><h2>Timeline chi tiết</h2><p class="section-subtitle">Mở timeline từ tin nổi bật hoặc tin trong ngày để xem toàn bộ diễn biến.</p></div>
+        <div class="timeline-selected" id="timelineSelectionLabel">Chưa chọn sự kiện hoặc đối tượng</div>
       </div>
-      <div id="timelineContainer" class="timeline-container"><div class="empty-state"><span class="empty-icon">◎</span><strong>Chọn một sự kiện nổi bật</strong><p>Dòng thời gian và những bài báo liên quan sẽ hiển thị tại đây.</p></div></div>
+      <div id="timelineContainer" class="timeline-container"><div class="empty-state"><span class="empty-icon">◎</span><strong>Chọn “Xem timeline” trên một tin</strong><p>Các bài báo liên quan sẽ hiển thị tại đây theo trình tự thời gian.</p></div></div>
       <div id="timelinePagination" class="pagination-row"></div>
-    </section>
-
-    <section class="content-section articles-section" id="articles">
-      <div class="section-heading articles-heading">
-        <div><p class="eyebrow">LATEST HEADLINES</p><h2>Tin tức trong ngày</h2><p class="section-subtitle" id="articleDateLabel">Các bài được xuất bản hôm nay, theo giờ Việt Nam.</p></div>
-        <form id="articleSearchForm" class="search-form" role="search">
-          <label class="sr-only" for="articleSearch">Tìm bài báo</label>
-          <span class="search-icon" aria-hidden="true">⌕</span>
-          <input id="articleSearch" type="search" placeholder="Tìm tiêu đề, nguồn báo…" maxlength="150">
-          <button type="submit">Tìm</button>
-        </form>
-      </div>
-      <div id="dailyArticles" class="article-list" aria-live="polite"><div class="loading-card">Đang tải bài báo…</div></div>
-      <div id="articlePagination" class="pagination-row"></div>
     </section>
 
     <footer class="site-footer">
