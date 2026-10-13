@@ -21,6 +21,19 @@ log = logging.getLogger('mini-lakehouse.openai')
 OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions'
 ALLOWED_ENTITY_TYPES = {'PERSON', 'ORG', 'LOCATION', 'PRODUCT', 'EVENT', 'GROUP', 'UNKNOWN'}
 
+_RECORD_CLASSIFICATION_FAILURE_SQL = """update news_articles
+    set ai_classification_error=%s,
+        ai_classification=jsonb_set(
+            coalesce(ai_classification, '{}'::jsonb),
+            '{ai_retry_count}',
+            to_jsonb(case
+                when coalesce(ai_classification->>'ai_retry_count','') ~ '^[0-9]+$'
+                    then (ai_classification->>'ai_retry_count')::int + 1
+                else 1
+            end), true),
+        updated_at=now()
+    where article_id=%s"""
+
 
 def _extract_json(text: str) -> dict[str, Any]:
     text = (text or '').strip()
@@ -289,6 +302,7 @@ def repair_obvious_event_mismatches(limit: int = 500) -> int:
                          and at.assignment_method='genai' and a.is_excluded=false
                          and coalesce(a.published_at,a.collected_at)>=now()-interval '30 days'
                          and coalesce(a.ai_classification->>'manual_override','false') <> 'true'
+                         and coalesce(a.ai_classification->>'mismatch_repair_attempted','false') <> 'true'
                        order by coalesce(a.published_at,a.collected_at) desc
                        limit %s""", (limit,))
         rows = cur.fetchall()
@@ -296,8 +310,13 @@ def repair_obvious_event_mismatches(limit: int = 500) -> int:
         for row in mismatches:
             cur.execute("delete from article_topics where article_id=%s and topic_id=%s and assignment_method='genai'",
                         (row['article_id'], row['topic_id']))
-            cur.execute("""update news_articles set ai_classified_at=null,event_topic_scanned_at=null,
-                           ai_classification_error='Reprocessing: event action does not match assigned topic'
+            cur.execute("""update news_articles
+                           set ai_classified_at=null,
+                               event_topic_scanned_at=null,
+                               ai_classification = coalesce(ai_classification, '{}'::jsonb)
+                                   || jsonb_build_object('mismatch_repair_attempted', true),
+                               ai_classification_error='Reprocessing: event action does not match assigned topic',
+                               updated_at=now()
                            where article_id=%s""", (row['article_id'],))
     if mismatches:
         log.warning('Detached %s obviously mismatched GenAI event assignment(s); queued for reclassification.', len(mismatches))
@@ -377,9 +396,16 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                                 (article_id, event_topic_id, max(0.55, confidence)))
                 # GenAI is the canonical entity extractor; clear old machine-generated NER links
                 # before writing its normalized list. Manual overrides are preserved by their marker.
-                cur.execute("""select coalesce(ai_classification->>'manual_override','false') as manual_override
+                cur.execute("""select
+                                   coalesce(ai_classification->>'manual_override','false') as manual_override,
+                                   coalesce(ai_classification->>'mismatch_repair_attempted','false') as mismatch_repair_attempted
                                from news_articles where article_id=%s""", (article_id,))
-                manual = cur.fetchone()['manual_override'] == 'true'
+                classification_flags = cur.fetchone()
+                manual = classification_flags['manual_override'] == 'true'
+                if manual:
+                    ai_result['manual_override'] = True
+                if classification_flags['mismatch_repair_attempted'] == 'true':
+                    ai_result['mismatch_repair_attempted'] = True
                 if not manual:
                     cur.execute('delete from article_entities where article_id=%s', (article_id,))
                 for entity in entities[:10]:
@@ -403,8 +429,13 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
     return True
 
 
-def classify_unprocessed_articles(limit: int | None = None) -> dict[str, int]:
-    """Classify recent unprocessed articles in batches; unreviewed entities/topics become active automatically."""
+def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[str, int]:
+    """Classify recent unprocessed articles and due retries; older backlog is opt-in.
+
+    The rolling 24-hour collection window lets an hourly run finish fresh articles that
+    exceeded the per-run limit, without repeatedly draining 30 days of historical backlog.
+    Set AI_CLASSIFICATION_BACKFILL_ENABLED=true temporarily for a deliberate backfill.
+    """
     stats = {'selected': 0, 'classified': 0, 'events_assigned': 0, 'entities_assigned': 0, 'failed': 0, 'disabled': 0, 'repaired_mismatches': 0}
     if not settings.openai_api_key:
         stats['disabled'] = 1
@@ -415,20 +446,45 @@ def classify_unprocessed_articles(limit: int | None = None) -> dict[str, int]:
     limit = max(1, int(limit or settings.ai_classification_run_limit))
     batch_size = max(1, min(20, int(settings.ai_classification_batch_size)))
     with get_conn() as conn, conn.cursor() as cur:
+        # Only work on recent unclassified rows in the normal hourly schedule; the separate
+        # backfill flag is required to process older backlog intentionally. The five-minute
+        # ordering preference prioritizes items from this run, while the 24-hour window allows
+        # the next hourly run to drain any fresh rows that exceeded this run's per-run limit.
+        # Failed rows have a cooldown and retry cap; mismatch repairs are allowed through once and carry a
+        # JSON marker to prevent repeated repair loops.
+        if since is None:
+            from datetime import datetime, timezone
+            since = datetime.now(timezone.utc)
         cur.execute("""select article_id,title,coalesce(summary,'') as summary,language,published_at,collected_at
                        from news_articles
                        where ai_classified_at is null and is_excluded=false
                          and coalesce(published_at,collected_at) >= now()-interval '30 days'
-                       order by (coalesce(published_at,collected_at) >= now()-interval '24 hours') desc,
+                         and (
+                           (ai_classification_error is null
+                             and collected_at >= now()-interval '24 hours')
+                           or ai_classification_error like 'Reprocessing:%%'
+                           or (ai_classification_error is not null
+                               and updated_at <= now() - (%s * interval '1 hour')
+                               and (case
+                                      when coalesce(ai_classification->>'ai_retry_count','') ~ '^[0-9]+$'
+                                        then (ai_classification->>'ai_retry_count')::int
+                                      else 0
+                                    end) < %s)
+                           or (%s = true and ai_classification_error is null)
+                         )
+                       order by (collected_at >= %s::timestamptz - interval '5 minutes') desc,
                                 coalesce(published_at,collected_at) desc
-                       limit %s""", (limit,))
+                       limit %s""",
+                    (settings.ai_classification_retry_cooldown_hours,
+                     settings.ai_classification_max_retries,
+                     settings.ai_classification_backfill_enabled, since, limit))
         articles = cur.fetchall()
         cur.execute("""select topic_id,name,description,keywords from topics
                        where status='active' and topic_type='category' order by name limit 80""")
         categories = cur.fetchall()
     stats['selected'] = len(articles)
     if not articles:
-        log.info('GenAI event normalization: no unclassified articles in the 30-day window.')
+        log.info('GenAI skipped: no recent unclassified articles in the rolling 24-hour window, no retry-ready failures, and no enabled historical backfill; no OpenAI request sent.')
         return stats
     category_ids = {int(r['topic_id']) for r in categories}
     started = time.monotonic()
@@ -462,7 +518,7 @@ def classify_unprocessed_articles(limit: int | None = None) -> dict[str, int]:
                 if row is None:
                     stats['failed'] += 1
                     with get_conn() as conn, conn.cursor() as cur:
-                        cur.execute("update news_articles set ai_classification_error=%s where article_id=%s",
+                        cur.execute(_RECORD_CLASSIFICATION_FAILURE_SQL,
                                     ('OpenAI omitted this article from results[]', article['article_id']))
                     continue
                 try:
@@ -475,13 +531,13 @@ def classify_unprocessed_articles(limit: int | None = None) -> dict[str, int]:
                     stats['failed'] += 1
                     log.exception('GenAI assignment failed for article_id=%s', article['article_id'])
                     with get_conn() as conn, conn.cursor() as cur:
-                        cur.execute('update news_articles set ai_classification_error=%s where article_id=%s',
+                        cur.execute(_RECORD_CLASSIFICATION_FAILURE_SQL,
                                     (f'{type(exc).__name__}: {str(exc)[:1200]}', article['article_id']))
         except Exception as exc:
             stats['failed'] += len(batch_rows)
             log.exception('GenAI batch failed for article ids %s-%s: %s', batch_rows[0]['article_id'], batch_rows[-1]['article_id'], exc)
             with get_conn() as conn, conn.cursor() as cur:
-                cur.executemany('update news_articles set ai_classification_error=%s where article_id=%s',
+                cur.executemany(_RECORD_CLASSIFICATION_FAILURE_SQL,
                                 [(f'{type(exc).__name__}: {str(exc)[:1200]}', r['article_id']) for r in batch_rows])
     log.info('GenAI event normalization complete: selected=%s classified=%s events=%s entities=%s repaired_mismatches=%s failed=%s elapsed=%.1fs model=%s',
              stats['selected'], stats['classified'], stats['events_assigned'], stats['entities_assigned'], stats['repaired_mismatches'], stats['failed'], time.monotonic()-started, settings.openai_model)
