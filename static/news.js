@@ -3,8 +3,8 @@
   const $ = (selector) => document.querySelector(selector);
   const MAX_SAVED_TIMELINES = 10;
   const state = {
-    period: 'day', selectedTimeline: null, timelinePage: 1, articlePage: 1,
-    articleQuery: '', articlePageSize: 20, timelinePageSize: 20,
+    period: 'day', selectedTimeline: null, timelinePage: 1, articlePage: 1, searchPage: 1,
+    articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '',
     user: null, options: {topics: [], entities: []}, savedTimelines: [],
     picked: new Set(), optionQuery: '', authMode: 'login'
   };
@@ -41,44 +41,35 @@
     node.textContent = message || '';
     node.classList.toggle('success', Boolean(success));
   }
-  async function loadOverview() {
-    try {
-      const data = await getJSON('/api/public/news/overview');
-      $('#statArticles').textContent = num(data.articles_today);
-      $('#statSources').textContent = num(data.enabled_sources);
-      $('#statEvents').textContent = num(data.active_event_topics);
-    } catch (error) {
-      ['#statArticles','#statSources','#statEvents'].forEach(id => $(id).textContent = '—');
-      console.warn('Overview could not be loaded:', error);
-    }
-  }
+
   function renderTopics(items) {
     if (!items.length) {
-      setMessage('#hotTopics', 'Chưa có topic sự kiện nổi bật', 'Pipeline chưa tạo FACT cho kỳ này hoặc chưa có đủ bài báo được gắn topic sự kiện.');
+      setMessage('#hotTopics', 'Chưa có tin nổi bật', 'Chưa có sự kiện được xếp hạng trong kỳ này. Tin nổi bật sẽ xuất hiện khi bài báo được phân loại theo topic.');
       return;
     }
     $('#hotTopics').innerHTML = items.map((topic, index) => {
       const growth = topic.growth_pct === null || topic.growth_pct === undefined ? '' : `${Number(topic.growth_pct) > 0 ? '+' : ''}${Number(topic.growth_pct).toLocaleString('vi-VN')}%`;
       const growthClass = Number(topic.growth_pct) < 0 ? 'down' : '';
-      const selected = state.selectedTimeline && state.selectedTimeline.type === 'topic' && Number(state.selectedTimeline.id) === Number(topic.topic_id) ? ' selected' : '';
-      return `<button class="topic-card${selected}" type="button" data-topic-id="${Number(topic.topic_id)}" data-topic-name="${esc(topic.topic_name)}" aria-label="Xem timeline sự kiện ${esc(topic.topic_name)}">
-        <div class="topic-card-top"><span class="rank-chip">${index + 1}</span><span class="topic-category">SỰ KIỆN NỔI BẬT</span></div>
-        <h3>${esc(topic.topic_name)}</h3>
-        <div class="topic-card-bottom"><span class="topic-metric">▤ ${num(topic.article_count)} bài · ${num(topic.source_count)} nguồn</span><span class="topic-open">Timeline ↗</span></div>
-        ${growth ? `<div class="topic-metric"><span class="growth-badge ${growthClass}">${esc(growth)}</span><span>so với kỳ trước</span></div>` : ''}
-      </button>`;
+      return `<article class="radar-row featured-row">
+        <span class="row-rank">${index + 1}</span>
+        <div class="radar-row-main"><div class="radar-row-meta"><span>SỰ KIỆN</span><span>${num(topic.article_count)} bài</span><span>${num(topic.source_count)} nguồn</span>${growth ? `<span class="growth-badge ${growthClass}">${esc(growth)}</span>` : ''}</div>
+          <h3>${esc(topic.topic_name)}</h3>${topic.description ? `<p class="radar-row-snippet">${esc(topic.description)}</p>` : ''}
+        </div>
+        <div class="radar-row-actions"><button class="timeline-action primary" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.topic_id)}" data-timeline-name="${esc(topic.topic_name)}">Xem timeline <span aria-hidden="true">↗</span></button></div>
+      </article>`;
     }).join('');
-    $('#hotTopicsFootnote').textContent = `Kỳ thống kê: ${periodLabels[state.period]}. Chọn một topic để xem dòng thời gian và các nguồn bài báo.`;
+    $('#hotTopicsFootnote').textContent = `Xếp hạng theo dữ liệu ${periodLabels[state.period].toLocaleLowerCase('vi-VN')} đã được thu thập và phân loại.`;
   }
   async function loadHotTopics() {
-    $('#hotTopics').innerHTML = '<div class="loading-card">Đang tải sự kiện nổi bật…</div>';
+    $('#hotTopics').innerHTML = '<div class="loading-card">Đang tải tin nổi bật…</div>';
     try {
-      const data = await getJSON(`/api/public/news/hot-topics?period=${encodeURIComponent(state.period)}&limit=9`);
+      const data = await getJSON(`/api/public/news/hot-topics?period=${encodeURIComponent(state.period)}&limit=10`);
       renderTopics(data.items || []);
     } catch (error) {
-      setMessage('#hotTopics', 'Không tải được danh sách sự kiện', error.message, true);
+      setMessage('#hotTopics', 'Không tải được tin nổi bật', error.message, true);
     }
   }
+
   function renderPagination(target, pagination, type) {
     if (!pagination || !pagination.total) { $(target).innerHTML = ''; return; }
     const start = pagination.start ?? ((pagination.page - 1) * pagination.page_size + 1);
@@ -89,7 +80,7 @@
     if (!items.length) return '<div class="message-card"><strong>Chưa có bài báo được liên kết</strong>Những bài mới sẽ xuất hiện khi được phân loại vào timeline này.</div>';
     return items.map(item => {
       const related = entityMode ? item.topics : item.entities;
-      const relatedLabel = entityMode ? 'Topic liên quan: ' : 'Thực thể liên quan: ';
+      const relatedLabel = entityMode ? 'Topic liên quan: ' : 'Đối tượng liên quan: ';
       return `<article class="timeline-entry">
         <div class="timeline-time">${esc(localDateText(item.timeline_at || item.published_at || item.collected_at, true))}</div>
         <div class="timeline-rail"><span class="timeline-dot"></span><span class="timeline-line"></span></div>
@@ -103,16 +94,13 @@
     const id = data.topic ? data.topic.topic_id : data.entity.entity_id;
     const name = data.topic ? data.topic.name : data.entity.canonical_name;
     state.selectedTimeline = {type, id: Number(id), name};
-    $('#timelineSelectionLabel').textContent = `${type === 'topic' ? 'Topic' : 'Entity'} · ${name}`;
+    $('#timelineSelectionLabel').textContent = `${type === 'topic' ? 'Sự kiện' : 'Đối tượng'} · ${name}`;
     $('#timelineContainer').innerHTML = timelineItemsHTML(data.items || [], type === 'entity');
     renderPagination('#timelinePagination', data.pagination, 'timeline');
   }
-  async function fetchTimelineData(type, id, page = 1, pageSize = 8) {
-    if (type === 'entity') {
-      return getJSON(`/api/public/news/entities/${encodeURIComponent(id)}/timeline?page=${page}&page_size=${pageSize}`);
-    }
-    const topicId = id;
-    return getJSON(`/api/public/news/topics/${encodeURIComponent(topicId)}/timeline?page=${page}&page_size=${pageSize}`);
+  async function fetchTimelineData(type, id, page = 1, pageSize = 20) {
+    if (type === 'entity') return getJSON(`/api/public/news/entities/${encodeURIComponent(id)}/timeline?page=${page}&page_size=${pageSize}`);
+    return getJSON(`/api/public/news/topics/${encodeURIComponent(id)}/timeline?page=${page}&page_size=${pageSize}`);
   }
   async function loadTimeline(type, id, page = 1, shouldScroll = true) {
     state.timelinePage = page;
@@ -126,54 +114,86 @@
       setMessage('#timelineContainer', 'Không tải được timeline', error.message, true);
     }
   }
-  function renderArticles(data) {
-    const items = data.items || [];
-    if (!items.length) {
-      setMessage('#dailyArticles', 'Chưa có bài báo phù hợp', state.articleQuery ? 'Thử từ khóa khác hoặc xóa bộ lọc tìm kiếm.' : 'Chưa có bài nào được thu thập cho ngày hôm nay.');
-      $('#articlePagination').innerHTML = '';
-      return;
-    }
-    $('#dailyArticles').innerHTML = items.map(item => {
-      const tags = (item.topics || []).slice(0, 3).map(topic => `<span class="article-tag">${esc(topic)}</span>`).join('');
-      const time = localDateText(item.published_at || item.collected_at, true);
-      return `<article class="article-card"><div class="article-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span></div><h3 class="article-title"><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>${item.snippet ? `<p class="article-snippet">${esc(item.snippet)}</p>` : ''}<div class="article-tags">${tags}</div><div class="article-card-footer"><span class="article-author">${item.author ? `Tác giả: ${esc(item.author)}` : 'Đọc tại nguồn gốc'}</span><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a></div></article>`;
-    }).join('');
-    renderPagination('#articlePagination', data.pagination, 'articles');
-    $('#articleDateLabel').textContent = `${num(data.pagination.total)} bài được xuất bản hôm nay, theo giờ Việt Nam.`;
+
+  function articleActionsHTML(item, feedMode = false) {
+    const topics = feedMode ? (item.matched_topics || []) : (item.topic_refs || []);
+    const entities = feedMode ? (item.matched_entities || []) : (item.entity_refs || []);
+    const topicButtons = topics.slice(0, 2).filter(x => Number(x.id) > 0).map(topic =>
+      `<button class="timeline-action" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.id)}" data-timeline-name="${esc(topic.name)}">Sự kiện: ${esc(topic.name)}</button>`).join('');
+    const entityButtons = entities.slice(0, 2).filter(x => Number(x.id) > 0).map(entity =>
+      `<button class="timeline-action entity-action" type="button" data-open-timeline="entity" data-timeline-id="${Number(entity.id)}" data-timeline-name="${esc(entity.name)}">Đối tượng: ${esc(entity.name)}</button>`).join('');
+    const html = topicButtons + entityButtons;
+    return html ? `<div class="radar-row-actions article-actions">${html}</div>` : '<div class="article-no-timeline">Chưa có topic hoặc đối tượng liên quan được phân loại.</div>';
+  }
+  function articleRowHTML(item, feedMode = false) {
+    const time = localDateText(item.published_at || item.collected_at, true);
+    const tags = (feedMode ? [...(item.matched_topics || []), ...(item.matched_entities || [])] : [...(item.topics || []).map(name => ({name})), ...(item.entity_refs || [])])
+      .slice(0, 4).map(tag => `<span class="article-tag">${esc(tag.name)}</span>`).join('');
+    return `<article class="radar-row article-row${feedMode ? ' feed-row' : ''}">
+      <div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span>${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
+        <h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>
+        ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}<div class="article-tags">${tags}</div>
+      </div>
+      <div class="radar-row-end"><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a>${articleActionsHTML(item, feedMode)}</div>
+    </article>`;
+  }
+  function renderArticleList(target, items, feedMode = false, emptyTitle = 'Chưa có bài báo phù hợp', emptyDescription = 'Hãy thử tìm bằng từ khóa khác.') {
+    if (!items.length) { setMessage(target, emptyTitle, emptyDescription); return; }
+    $(target).innerHTML = items.map(item => articleRowHTML(item, feedMode)).join('');
   }
   async function loadArticles(page = 1) {
     state.articlePage = page;
     $('#dailyArticles').innerHTML = '<div class="loading-card">Đang tải bài báo…</div>';
     $('#articlePagination').innerHTML = '';
     const params = new URLSearchParams({page:String(page), page_size:String(state.articlePageSize)});
-    if (state.articleQuery) params.set('q', state.articleQuery);
     try {
       const data = await getJSON(`/api/public/news/articles?${params.toString()}`);
-      renderArticles(data);
+      renderArticleList('#dailyArticles', data.items || [], false, 'Chưa có bài báo hôm nay', 'Chưa có bài nào được xuất bản hoặc thu thập trong ngày hôm nay.');
+      renderPagination('#articlePagination', data.pagination, 'articles');
+      $('#articleDateLabel').textContent = `${num(data.pagination.total)} bài được xuất bản hôm nay, theo giờ Việt Nam.`;
     } catch (error) {
       setMessage('#dailyArticles', 'Không tải được bài báo', error.message, true);
     }
   }
+  async function loadSearchResults(page = 1) {
+    state.searchPage = page;
+    const query = state.searchQuery.trim();
+    if (!query) { $('#searchResultsSection').hidden = true; return; }
+    $('#searchResultsSection').hidden = false;
+    $('#searchResults').innerHTML = '<div class="loading-card">Đang tìm trên kho tin…</div>';
+    $('#searchPagination').innerHTML = '';
+    const params = new URLSearchParams({q:query, page:String(page), page_size:String(state.searchPageSize)});
+    try {
+      const data = await getJSON(`/api/public/news/articles?${params.toString()}`);
+      renderArticleList('#searchResults', data.items || [], false, 'Không tìm thấy tin phù hợp', 'Thử từ khóa khác hoặc kiểm tra chính tả.');
+      renderPagination('#searchPagination', data.pagination, 'search');
+      $('#searchResultLabel').textContent = `${num(data.pagination.total)} kết quả cho “${query}”.`;
+      $('#searchResultsSection').scrollIntoView({behavior:'smooth', block:'start'});
+    } catch (error) {
+      setMessage('#searchResults', 'Không tìm kiếm được', error.message, true);
+    }
+  }
 
-  // User account and preference controls.
+  // Account and personalized news feed.
   function renderAuthArea() {
-    if (!state.user) {
+    const signedIn = Boolean(state.user);
+    $('#myRadar').hidden = !signedIn;
+    $('#myRadarNav').hidden = !signedIn;
+    if (!signedIn) {
       $('#authArea').innerHTML = '<button class="auth-button auth-button-secondary" type="button" data-auth-open="login">Đăng nhập</button><button class="auth-button" type="button" data-auth-open="register">Đăng ký</button>';
-      $('#myRadar').hidden = true;
       return;
     }
     $('#authArea').innerHTML = `<div class="auth-user"><span class="auth-user-name" title="${esc(state.user.username)}">Xin chào, ${esc(state.user.username)}</span><button class="auth-logout" type="button" id="logoutButton">Đăng xuất</button></div>`;
-    $('#myRadar').hidden = false;
   }
   function setAuthMode(mode) {
     state.authMode = mode === 'register' ? 'register' : 'login';
     const registering = state.authMode === 'register';
     $('#authTitle').textContent = registering ? 'Tạo tài khoản' : 'Đăng nhập';
     $('#authDescription').textContent = registering
-      ? 'Tạo tài khoản để lưu timeline topic và entity theo dõi riêng của bạn.'
-      : 'Đăng nhập để tiếp tục xem những timeline bạn đã lưu.';
+      ? 'Tạo tài khoản để lưu chủ đề và đối tượng muốn theo dõi.'
+      : 'Đăng nhập để xem feed cá nhân và các mục đang theo dõi.';
     $('#authIdentifierLabel').textContent = registering ? 'Tên đăng nhập' : 'Tên đăng nhập hoặc email';
-    $('#authIdentifier').autocomplete = registering ? 'username' : 'username';
+    $('#authIdentifier').autocomplete = 'username';
     $('#authIdentifier').maxLength = registering ? 32 : 254;
     $('#authEmailField').hidden = !registering;
     $('#authEmail').required = registering;
@@ -188,21 +208,13 @@
     setFeedback('#authFeedback', '');
   }
   function openAuthModal(mode = 'login') {
-    setAuthMode(mode);
-    $('#authForm').reset();
-    setAuthMode(mode);
-    $('#authModal').hidden = false;
-    window.setTimeout(() => $('#authIdentifier').focus(), 0);
+    setAuthMode(mode); $('#authForm').reset(); setAuthMode(mode);
+    $('#authModal').hidden = false; window.setTimeout(() => $('#authIdentifier').focus(), 0);
   }
   function closeAuthModal() { $('#authModal').hidden = true; }
   async function restoreUser() {
-    try {
-      const data = await getJSON('/api/user-auth/me');
-      state.user = data.user;
-    } catch (error) {
-      state.user = null;
-      if (error.status !== 401) console.warn('Could not restore News Radar session:', error.message);
-    }
+    try { const data = await getJSON('/api/user-auth/me'); state.user = data.user; }
+    catch (error) { state.user = null; if (error.status !== 401) console.warn('Could not restore News Radar session:', error.message); }
     renderAuthArea();
   }
   function keyFor(type, id) { return `${type}:${Number(id)}`; }
@@ -214,13 +226,9 @@
     const query = state.optionQuery.toLocaleLowerCase('vi-VN');
     const visible = items.filter(item => !query || `${item.name} ${item.description || ''} ${item.entity_type || ''}`.toLocaleLowerCase('vi-VN').includes(query));
     $(countTarget).textContent = `${num(visible.length)}/${num(items.length)}`;
-    if (!visible.length) {
-      $(target).innerHTML = `<div class="picker-empty">${items.length ? 'Không có kết quả phù hợp.' : 'Chưa có dữ liệu để chọn.'}</div>`;
-      return;
-    }
+    if (!visible.length) { $(target).innerHTML = `<div class="picker-empty">${items.length ? 'Không có kết quả phù hợp.' : 'Chưa có dữ liệu để chọn.'}</div>`; return; }
     $(target).innerHTML = visible.map(item => {
-      const key = keyFor(type, item.id);
-      const checked = state.picked.has(key) ? ' checked' : '';
+      const key = keyFor(type, item.id); const checked = state.picked.has(key) ? ' checked' : '';
       const subtitle = `${num(item.article_count)} bài${item.source_count !== undefined ? ` · ${num(item.source_count)} nguồn` : ''}${item.entity_type ? ` · ${esc(item.entity_type)}` : ''}`;
       return `<label class="picker-option"><input type="checkbox" data-pick-type="${type}" data-pick-id="${Number(item.id)}"${checked}><span class="picker-option-copy"><strong>${esc(item.name)}</strong><small>${subtitle}</small></span></label>`;
     }).join('');
@@ -230,64 +238,45 @@
     renderOptionGroup('#entityOptions', '#entityOptionCount', state.options.entities, 'entity');
     updateSelectionCount();
   }
-  function renderSavedTimelineCard(ref, data) {
-    const meta = data.topic || data.entity;
-    const entityMode = ref.type === 'entity';
-    const title = entityMode ? meta.canonical_name : meta.name;
-    const allCount = data.pagination ? data.pagination.total : Number(ref.article_count || 0);
-    const items = data.items || [];
-    const articleHTML = items.length ? items.map(item => `<article class="saved-article"><div class="saved-article-meta"><span>${esc(item.source_name)}</span><span>${esc(localDateText(item.timeline_at || item.published_at || item.collected_at, true))}</span></div><h4><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h4>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}</article>`).join('') : '<div class="picker-empty">Chưa có bài báo gắn với mục này.</div>';
-    return `<section class="saved-timeline-card"><div class="saved-timeline-head"><div class="saved-timeline-title"><span class="timeline-type-chip${entityMode ? ' entity' : ''}">${entityMode ? 'ENTITY' : 'TOPIC'}</span><h3>${esc(title)}</h3><span class="saved-timeline-count">${num(allCount)} bài</span></div><button class="remove-follow" type="button" data-remove-saved="${esc(keyFor(ref.type, ref.id))}">Bỏ theo dõi</button></div><div class="saved-timeline-list">${articleHTML}</div><div class="saved-timeline-foot"><span>Hiển thị tối đa 8 bài mới nhất</span><button type="button" data-open-full="${esc(keyFor(ref.type, ref.id))}">Mở timeline đầy đủ ↗</button></div></section>`;
-  }
-  async function renderSavedTimelines() {
-    $('#savedSummary').textContent = state.savedTimelines.length
-      ? `Bạn đang theo dõi ${num(state.savedTimelines.length)}/${MAX_SAVED_TIMELINES} timeline. Lựa chọn này đã được lưu vào tài khoản.`
-      : 'Bạn chưa lưu timeline nào. Mở mục “Quản lý topic và entity” để bắt đầu theo dõi.';
-    if (!state.savedTimelines.length) {
-      $('#savedTimelinesContainer').innerHTML = '<div class="empty-state"><span class="empty-icon">◎</span><strong>Radar cá nhân chưa có timeline</strong><p>Chọn các topic sự kiện hoặc entity bạn quan tâm; những timeline đã lưu sẽ xuất hiện ở đây khi đăng nhập lần sau.</p></div>';
-      return;
-    }
-    $('#savedTimelinesContainer').innerHTML = state.savedTimelines.map(ref => `<div class="loading-card" data-saved-placeholder="${esc(keyFor(ref.type, ref.id))}">Đang tải timeline: ${esc(ref.name)}…</div>`).join('');
-    await Promise.all(state.savedTimelines.map(async ref => {
-      try {
-        const data = await fetchTimelineData(ref.type, ref.id, 1, 8);
-        const placeholder = document.querySelector(`[data-saved-placeholder="${CSS.escape(keyFor(ref.type, ref.id))}"]`);
-        if (placeholder) placeholder.outerHTML = renderSavedTimelineCard(ref, data);
-      } catch (error) {
-        const placeholder = document.querySelector(`[data-saved-placeholder="${CSS.escape(keyFor(ref.type, ref.id))}"]`);
-        if (placeholder) placeholder.outerHTML = `<div class="message-card"><strong>${esc(ref.name)}</strong>Không tải được timeline: ${esc(error.message)}</div>`;
+  async function renderUserFeed() {
+    if (!state.user) return;
+    $('#userFeedContainer').innerHTML = '<div class="loading-card">Đang tải feed cá nhân…</div>';
+    try {
+      const data = await getJSON('/api/user/feed?limit=30');
+      const followedCount = state.savedTimelines.length;
+      $('#feedSummary').textContent = followedCount
+        ? `Đang theo dõi ${num(followedCount)}/${MAX_SAVED_TIMELINES} topic/entity · ${num(data.count || 0)} bài phù hợp trong feed.`
+        : 'Bạn chưa theo dõi topic hoặc entity nào. Hãy chọn mục quan tâm để cá nhân hóa feed.';
+      if (!followedCount) {
+        setMessage('#userFeedContainer', 'Bắt đầu tạo feed của bạn', 'Chọn topic sự kiện hoặc entity trong “Quản lý theo dõi” để các bài liên quan xuất hiện tại đây.');
+        return;
       }
-    }));
+      renderArticleList('#userFeedContainer', data.items || [], true, 'Chưa có bài mới trong feed', 'Chưa có bài báo được liên kết với những topic/entity bạn theo dõi. Feed sẽ cập nhật khi có dữ liệu mới.');
+    } catch (error) {
+      setMessage('#userFeedContainer', 'Không tải được feed cá nhân', error.message, true);
+    }
   }
   async function loadUserRadar() {
     if (!state.user) { renderAuthArea(); return; }
     renderAuthArea();
-    $('#savedTimelinesContainer').innerHTML = '<div class="loading-card">Đang tải timeline cá nhân…</div>';
+    $('#userFeedContainer').innerHTML = '<div class="loading-card">Đang tải feed của bạn…</div>';
     try {
       const [optionData, savedData] = await Promise.all([
-        getJSON('/api/user/timeline-options'),
-        getJSON('/api/user/saved-timelines')
+        getJSON('/api/user/timeline-options'), getJSON('/api/user/saved-timelines')
       ]);
       state.options = {topics: optionData.topics || [], entities: optionData.entities || []};
       state.savedTimelines = savedData.items || [];
       state.picked = new Set(state.savedTimelines.map(item => keyFor(item.type, item.id)));
       renderPicker();
-      await renderSavedTimelines();
+      await renderUserFeed();
     } catch (error) {
-      setMessage('#savedTimelinesContainer', 'Không tải được radar cá nhân', error.message, true);
-      setFeedback('#saveTimelineFeedback', error.message);
+      setMessage('#userFeedContainer', 'Không tải được feed cá nhân', error.message, true);
     }
   }
   async function saveTimelines() {
     if (!state.user) { openAuthModal('login'); return; }
-    if (state.picked.size > MAX_SAVED_TIMELINES) {
-      setFeedback('#saveTimelineFeedback', `Chỉ được lưu tối đa ${MAX_SAVED_TIMELINES} timeline.`);
-      return;
-    }
-    const items = [...state.picked].map(key => {
-      const [type, id] = key.split(':');
-      return {type, id:Number(id)};
-    });
+    if (state.picked.size > MAX_SAVED_TIMELINES) { setFeedback('#saveTimelineFeedback', `Chỉ được lưu tối đa ${MAX_SAVED_TIMELINES} mục.`); return; }
+    const items = [...state.picked].map(key => { const [type, id] = key.split(':'); return {type, id:Number(id)}; });
     $('#saveTimelinesButton').disabled = true;
     setFeedback('#saveTimelineFeedback', 'Đang lưu lựa chọn…');
     try {
@@ -295,130 +284,86 @@
       const saved = await getJSON('/api/user/saved-timelines');
       state.savedTimelines = saved.items || [];
       state.picked = new Set(state.savedTimelines.map(item => keyFor(item.type, item.id)));
-      renderPicker();
-      $('#saveTimelinesButton').disabled = true;
-      await renderSavedTimelines();
-      setFeedback('#saveTimelineFeedback', `Đã lưu ${num(result.saved_count)} timeline. Lần sau đăng nhập, radar cá nhân sẽ tự tải các mục này.`, true);
-    } catch (error) {
-      setFeedback('#saveTimelineFeedback', error.message);
-    } finally {
-      $('#saveTimelinesButton').disabled = state.picked.size > MAX_SAVED_TIMELINES;
-    }
+      renderPicker(); await renderUserFeed();
+      setFeedback('#saveTimelineFeedback', `Đã lưu ${num(result.saved_count)} mục theo dõi. Feed đã được cập nhật.`, true);
+    } catch (error) { setFeedback('#saveTimelineFeedback', error.message); }
+    finally { $('#saveTimelinesButton').disabled = state.picked.size > MAX_SAVED_TIMELINES; }
   }
   async function logout() {
     try { await sendJSON('/api/user-auth/logout', 'POST', {}); } catch (error) { console.warn('Logout request failed:', error.message); }
-    state.user = null;
-    state.savedTimelines = [];
-    state.picked.clear();
-    state.options = {topics: [], entities: []};
-    renderAuthArea();
-    $('#savedTimelinesContainer').innerHTML = '';
+    state.user = null; state.savedTimelines = []; state.picked.clear(); state.options = {topics: [], entities: []};
+    renderAuthArea(); $('#userFeedContainer').innerHTML = '';
   }
 
   document.addEventListener('click', async event => {
-    const authOpen = event.target.closest('[data-auth-open]');
-    if (authOpen) { openAuthModal(authOpen.dataset.authOpen); return; }
-    const authClose = event.target.closest('[data-auth-close]');
-    if (authClose) { closeAuthModal(); return; }
-    const authSwitch = event.target.closest('[data-switch-auth]');
-    if (authSwitch) { openAuthModal(authSwitch.dataset.switchAuth); return; }
+    const authOpen = event.target.closest('[data-auth-open]'); if (authOpen) { openAuthModal(authOpen.dataset.authOpen); return; }
+    const authClose = event.target.closest('[data-auth-close]'); if (authClose) { closeAuthModal(); return; }
+    const authSwitch = event.target.closest('[data-switch-auth]'); if (authSwitch) { openAuthModal(authSwitch.dataset.switchAuth); return; }
     if (event.target.closest('#logoutButton')) { await logout(); return; }
     if (event.target.closest('#openTimelinePicker')) {
       $('#timelinePickerDetails').open = true;
       $('#timelinePickerDetails').scrollIntoView({behavior:'smooth', block:'center'});
-      $('#timelineOptionSearch').focus({preventScroll:true});
-      return;
+      $('#timelineOptionSearch').focus({preventScroll:true}); return;
     }
     if (event.target.closest('#saveTimelinesButton')) { await saveTimelines(); return; }
+    if (event.target.closest('#refreshUserFeed')) { await renderUserFeed(); return; }
+    if (event.target.closest('#clearSearch')) {
+      state.searchQuery = ''; $('#radarSearch').value = ''; $('#searchResultsSection').hidden = true; $('#radarSearch').focus(); return;
+    }
     const period = event.target.closest('[data-period]');
     if (period) {
       state.period = period.dataset.period;
-      document.querySelectorAll('.period-btn').forEach(btn => {
-        const active = btn.dataset.period === state.period;
-        btn.classList.toggle('active', active); btn.setAttribute('aria-selected', String(active));
-      });
+      document.querySelectorAll('.period-btn').forEach(btn => { const active = btn.dataset.period === state.period; btn.classList.toggle('active', active); btn.setAttribute('aria-selected', String(active)); });
       await loadHotTopics(); return;
     }
-    const topic = event.target.closest('[data-topic-id]');
-    if (topic) {
-      document.querySelectorAll('.topic-card').forEach(card => card.classList.toggle('selected', card === topic));
-      await loadTimeline('topic', Number(topic.dataset.topicId), 1); return;
-    }
-    const remove = event.target.closest('[data-remove-saved]');
-    if (remove) {
-      state.picked.delete(remove.dataset.removeSaved);
-      renderPicker();
-      await saveTimelines(); return;
-    }
-    const full = event.target.closest('[data-open-full]');
-    if (full) {
-      const [type, id] = full.dataset.openFull.split(':');
-      await loadTimeline(type, Number(id), 1); return;
+    const timelineAction = event.target.closest('[data-open-timeline]');
+    if (timelineAction) {
+      await loadTimeline(timelineAction.dataset.openTimeline, Number(timelineAction.dataset.timelineId), 1); return;
     }
     const pager = event.target.closest('[data-pager]');
     if (pager && !pager.disabled) {
       const dir = pager.dataset.dir === 'next' ? 1 : -1;
       if (pager.dataset.pager === 'articles') await loadArticles(Math.max(1, state.articlePage + dir));
+      else if (pager.dataset.pager === 'search') await loadSearchResults(Math.max(1, state.searchPage + dir));
       else if (pager.dataset.pager === 'timeline' && state.selectedTimeline) await loadTimeline(state.selectedTimeline.type, state.selectedTimeline.id, Math.max(1, state.timelinePage + dir));
     }
   });
   document.addEventListener('change', event => {
-    const input = event.target.closest('[data-pick-type]');
-    if (!input) return;
+    const input = event.target.closest('[data-pick-type]'); if (!input) return;
     const key = keyFor(input.dataset.pickType, input.dataset.pickId);
     if (input.checked) {
-      if (state.picked.size >= MAX_SAVED_TIMELINES) {
-        input.checked = false;
-        setFeedback('#saveTimelineFeedback', `Bạn đã chọn đủ ${MAX_SAVED_TIMELINES} mục. Bỏ chọn một mục trước khi thêm mục mới.`);
-        return;
-      }
+      if (state.picked.size >= MAX_SAVED_TIMELINES) { input.checked = false; setFeedback('#saveTimelineFeedback', `Bạn đã chọn đủ ${MAX_SAVED_TIMELINES} mục. Bỏ chọn một mục trước khi thêm mục mới.`); return; }
       state.picked.add(key);
-    } else {
-      state.picked.delete(key);
-    }
-    updateSelectionCount();
-    setFeedback('#saveTimelineFeedback', '');
+    } else state.picked.delete(key);
+    updateSelectionCount(); setFeedback('#saveTimelineFeedback', '');
   });
-  $('#timelineOptionSearch').addEventListener('input', event => {
-    state.optionQuery = event.target.value.trim();
-    renderPicker();
-  });
-  $('#articleSearchForm').addEventListener('submit', event => {
-    event.preventDefault(); state.articleQuery = $('#articleSearch').value.trim(); loadArticles(1);
+  $('#timelineOptionSearch').addEventListener('input', event => { state.optionQuery = event.target.value.trim(); renderPicker(); });
+  $('#radarSearchForm').addEventListener('submit', async event => {
+    event.preventDefault(); state.searchQuery = $('#radarSearch').value.trim();
+    if (!state.searchQuery) { $('#searchResultsSection').hidden = true; return; }
+    await loadSearchResults(1);
   });
   $('#authForm').addEventListener('submit', async event => {
     event.preventDefault();
     const registering = state.authMode === 'register';
-    const usernameOrIdentifier = $('#authIdentifier').value.trim();
-    const password = $('#authPassword').value;
-    if (registering && password !== $('#authPasswordConfirm').value) {
-      setFeedback('#authFeedback', 'Hai lần nhập mật khẩu chưa khớp.'); return;
-    }
-    const body = registering
-      ? {username: usernameOrIdentifier, email: $('#authEmail').value.trim(), password}
-      : {identifier: usernameOrIdentifier, password};
-    $('#authSubmit').disabled = true;
-    setFeedback('#authFeedback', registering ? 'Đang tạo tài khoản…' : 'Đang đăng nhập…');
+    const usernameOrIdentifier = $('#authIdentifier').value.trim(); const password = $('#authPassword').value;
+    if (registering && password !== $('#authPasswordConfirm').value) { setFeedback('#authFeedback', 'Hai lần nhập mật khẩu chưa khớp.'); return; }
+    const body = registering ? {username: usernameOrIdentifier, email: $('#authEmail').value.trim(), password} : {identifier: usernameOrIdentifier, password};
+    $('#authSubmit').disabled = true; setFeedback('#authFeedback', registering ? 'Đang tạo tài khoản…' : 'Đang đăng nhập…');
     try {
       const data = await sendJSON(registering ? '/api/user-auth/register' : '/api/user-auth/login', 'POST', body);
-      state.user = data.user;
-      closeAuthModal();
-      renderAuthArea();
-      await loadUserRadar();
-    } catch (error) {
-      setFeedback('#authFeedback', error.message);
-    } finally {
-      $('#authSubmit').disabled = false;
-    }
+      state.user = data.user; closeAuthModal(); renderAuthArea(); await loadUserRadar();
+    } catch (error) { setFeedback('#authFeedback', error.message); }
+    finally { $('#authSubmit').disabled = false; }
   });
   $('#authModal').addEventListener('click', event => { if (event.target.id === 'authModal') closeAuthModal(); });
   document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#authModal').hidden) closeAuthModal(); });
-  const today = new Intl.DateTimeFormat('vi-VN', {timeZone:'Asia/Ho_Chi_Minh', weekday:'long', day:'numeric', month:'long', year:'numeric'}).format(new Date());
-  $('#currentDate').textContent = today.charAt(0).toUpperCase() + today.slice(1);
+
   async function initialize() {
     await restoreUser();
-    if (state.user) await loadUserRadar();
-    await Promise.all([loadOverview(), loadHotTopics(), loadArticles(1)]);
+    const jobs = [loadHotTopics(), loadArticles(1)];
+    if (state.user) jobs.push(loadUserRadar());
+    await Promise.all(jobs);
   }
   initialize();
 })();
