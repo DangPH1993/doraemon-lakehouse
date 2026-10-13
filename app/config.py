@@ -25,5 +25,10 @@ class Settings:
     ai_classification_batch_size: int = int(os.getenv('AI_CLASSIFICATION_BATCH_SIZE', '12'))
     ai_classification_run_limit: int = int(os.getenv('AI_CLASSIFICATION_RUN_LIMIT', '72'))
     ai_request_timeout_seconds: int = int(os.getenv('AI_REQUEST_TIMEOUT_SECONDS', '35'))
+    # Telegram notifications: token is needed on both Render (webhook/link) and GitHub Actions (pipeline sender).
+    telegram_bot_token: str = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+    telegram_bot_username: str = os.getenv('TELEGRAM_BOT_USERNAME', '').strip().lstrip('@')
+    telegram_webhook_secret: str = os.getenv('TELEGRAM_WEBHOOK_SECRET', '').strip()
+    telegram_digest_max_articles: int = int(os.getenv('TELEGRAM_DIGEST_MAX_ARTICLES', '12'))
 
 settings = Settings()
