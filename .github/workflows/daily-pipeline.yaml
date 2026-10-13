@@ -26,10 +26,12 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run ingestion, cleaning, catalog discovery and FACT refresh
+      - name: Run ingestion, cleaning, FACT refresh and optional Telegram digest
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_DIGEST_MAX_ARTICLES: "12"
           OPENAI_MODEL: gpt-4.1-mini
           AI_CLASSIFICATION_BATCH_SIZE: "12"
           AI_CLASSIFICATION_RUN_LIMIT: "72"
