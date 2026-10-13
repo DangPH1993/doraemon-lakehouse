@@ -671,6 +671,21 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         stage_started = time.monotonic()
         refresh_facts()
         log.info('Stage FACT refresh complete; elapsed=%.1fs', time.monotonic()-stage_started)
+        # Send a compact Telegram digest from the same pipeline run. This is optional and
+        # must never make successful ingestion fail if Telegram is not configured/unavailable.
+        stage_started = time.monotonic()
+        try:
+            from .telegram_notifications import send_telegram_digests, cleanup_old_delivery_markers
+            totals['telegram_notifications'] = send_telegram_digests()
+            if totals['telegram_notifications'].get('status') != 'skipped_missing_token':
+                try:
+                    totals['telegram_delivery_markers_purged'] = cleanup_old_delivery_markers()
+                except Exception:
+                    log.exception('Telegram delivery-marker cleanup failed; continuing pipeline.')
+            log.info('Stage Telegram digest complete: %s; elapsed=%.1fs', totals['telegram_notifications'], time.monotonic()-stage_started)
+        except Exception as exc:
+            totals['telegram_notifications'] = {'status': 'failed_non_blocking', 'error': f'{type(exc).__name__}: {str(exc)[:240]}'}
+            log.exception('Telegram notification stage failed; ingestion will continue.')
         # Raw capture is temporary: after facts are persisted for every clean article,
         # purge RSS payloads to conserve the Supabase database quota.
         totals['raw_rows_purged'] = purge_raw_feed_items_after_fact_refresh()
