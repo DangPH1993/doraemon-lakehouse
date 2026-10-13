@@ -2,7 +2,7 @@ name: Mini Lakehouse Daily Pipeline
 
 on:
   schedule:
-    - cron: "17 * * * *" # Every hour at minute 17 (same minute in Vietnam time)
+    - cron: "30 * * * *" # Every hour at minute 17 (same minute in Vietnam time)
   workflow_dispatch:
 
 permissions:
