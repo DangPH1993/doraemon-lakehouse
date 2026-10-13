@@ -37,7 +37,7 @@ class V042RawCleanupPaginationTests(unittest.TestCase):
     def test_raw_layer_ui_explains_transient_cleanup(self):
         html = (ROOT / 'static' / 'index.html').read_text(encoding='utf-8')
         self.assertIn('Raw RSS chỉ lưu tạm', html)
-        self.assertIn('Doraemon Mini Lakehouse <span>·</span> MVP 0.6.0', html)
+        self.assertIn('Doraemon Mini Lakehouse <span>·</span> MVP 0.6.1', html)
 
 if __name__ == '__main__':
     unittest.main()
