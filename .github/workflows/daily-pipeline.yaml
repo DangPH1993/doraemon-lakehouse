@@ -2,7 +2,8 @@ name: Mini Lakehouse Daily Pipeline
 
 on:
   schedule:
-    - cron: "10 1,13 * * *" # 08:10 and 20:10 Asia/Ho_Chi_Minh (UTC+7)
+     - cron: "17 * * * *"
+      timezone: "Asia/Ho_Chi_Minh"
   workflow_dispatch:
 
 permissions:
