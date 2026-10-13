@@ -17,7 +17,7 @@ from .processing import canonicalize_url, hash_text, norm_name, slugify
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.1',description='News Radar with Google-style search, topic/entity timelines and personalized feed.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.3',description='News Radar with global archive search, topic/entity timelines and personalized feed.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -380,7 +380,7 @@ def public_daily_articles(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
 ):
-    """Public daily article list, or an all-date headline/topic/entity search when q is set."""
+    """Public daily article list, or a global search across all non-excluded stored articles when q is set."""
     local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
     today = (local or {}).get('today')
     if today is None:
@@ -391,22 +391,43 @@ def public_daily_articles(
     vals: list = []
     if query:
         term = f"%{query}%"
+        # A search query intentionally has no publication-date predicate: search the
+        # entire stored article archive, not just today's list or followed items.
+        # Excluded/low-quality records remain hidden from public results.
         where.append("""(
-            a.title ILIKE %s OR a.summary ILIKE %s OR s.name ILIKE %s
+            a.title ILIKE %s
+            OR a.summary ILIKE %s
+            OR a.content_text ILIKE %s
+            OR coalesce(a.author, '') ILIKE %s
+            OR s.name ILIKE %s
             OR EXISTS (
                 SELECT 1 FROM article_topics search_at
                 JOIN topics search_t ON search_t.topic_id=search_at.topic_id
                 WHERE search_at.article_id=a.article_id
-                  AND search_t.status='active' AND search_t.name ILIKE %s
+                  AND search_t.status='active'
+                  AND (
+                      search_t.name ILIKE %s
+                      OR search_t.description ILIKE %s
+                      OR array_to_string(search_t.keywords, ' ') ILIKE %s
+                  )
             )
             OR EXISTS (
                 SELECT 1 FROM article_entities search_ae
                 JOIN entities search_e ON search_e.entity_id=search_ae.entity_id
                 WHERE search_ae.article_id=a.article_id
-                  AND search_e.status='active' AND search_e.canonical_name ILIKE %s
+                  AND search_e.status='active'
+                  AND (
+                      search_e.canonical_name ILIKE %s
+                      OR search_ae.mention_text ILIKE %s
+                      OR EXISTS (
+                          SELECT 1 FROM entity_aliases search_alias
+                          WHERE search_alias.entity_id=search_e.entity_id
+                            AND search_alias.alias ILIKE %s
+                      )
+                  )
             )
         )""")
-        vals.extend([term, term, term, term, term])
+        vals.extend([term] * 11)
     else:
         where.append("(coalesce(a.published_at,a.collected_at) at time zone %s)::date=%s")
         vals.extend([settings.timezone, today])
