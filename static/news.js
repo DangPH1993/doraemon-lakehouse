@@ -115,22 +115,25 @@
     }
   }
 
-  function followButtonHTML(type, item) {
+  function followButtonHTML(type, item, compact = false) {
     const id = Number(item.id);
     if (!Number.isInteger(id) || id < 1) return '';
     const key = keyFor(type, id);
     const followed = state.picked.has(key);
-    return `<button class="follow-toggle${followed ? ' is-following' : ''}" type="button" data-toggle-follow="${type}" data-follow-id="${id}" data-follow-name="${esc(item.name)}" aria-pressed="${followed}">${followed ? '✓ Đang follow' : '+ Theo dõi'}</button>`;
+    const label = compact ? (followed ? '✓ following' : 'follow') : (followed ? '✓ Đang follow' : '+ Theo dõi');
+    const itemName = String(item.name || (type === 'topic' ? 'topic' : 'entity'));
+    const accessibleLabel = followed ? `Bỏ follow ${type} ${itemName}` : `Follow ${type} ${itemName}`;
+    return `<button class="follow-toggle${followed ? ' is-following' : ''}${compact ? ' follow-toggle-compact' : ''}" type="button" data-toggle-follow="${type}" data-follow-id="${id}" data-follow-name="${esc(item.name)}" data-follow-compact="${compact ? 'true' : 'false'}" aria-label="${esc(accessibleLabel)}" title="${esc(accessibleLabel)}" aria-pressed="${followed}">${label}</button>`;
   }
   function articleActionsHTML(item, feedMode = false) {
     const topics = feedMode ? (item.matched_topics || []) : (item.topic_refs || []);
     const entities = feedMode ? (item.matched_entities || []) : (item.entity_refs || []);
     const buttons = [];
     topics.filter(x => Number(x.id) > 0).forEach(topic => {
-      buttons.push(`<div class="article-action-pair"><button class="timeline-action" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.id)}" data-timeline-name="${esc(topic.name)}">Topic: ${esc(topic.name)}</button>${followButtonHTML('topic', topic)}</div>`);
+      buttons.push(`<div class="article-action-pair article-action-pair-compact"><button class="timeline-action article-topic-label" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.id)}" data-timeline-name="${esc(topic.name)}">Topic: ${esc(topic.name)}</button>${followButtonHTML('topic', topic, true)}</div>`);
     });
     entities.filter(x => Number(x.id) > 0).forEach(entity => {
-      buttons.push(`<div class="article-action-pair"><button class="timeline-action entity-action" type="button" data-open-timeline="entity" data-timeline-id="${Number(entity.id)}" data-timeline-name="${esc(entity.name)}">Entity: ${esc(entity.name)}</button>${followButtonHTML('entity', entity)}</div>`);
+      buttons.push(`<div class="article-action-pair article-action-pair-compact"><button class="timeline-action entity-action article-topic-label" type="button" data-open-timeline="entity" data-timeline-id="${Number(entity.id)}" data-timeline-name="${esc(entity.name)}">Entity: ${esc(entity.name)}</button>${followButtonHTML('entity', entity, true)}</div>`);
     });
     return buttons.length ? `<div class="radar-row-actions article-actions">${buttons.join('')}</div>` : '<div class="article-no-timeline">Chưa có topic hoặc entity liên quan được phân loại.</div>';
   }
@@ -263,7 +266,12 @@
       const followed = state.picked.has(keyFor(type, id));
       button.classList.toggle('is-following', followed);
       button.setAttribute('aria-pressed', String(followed));
-      button.textContent = followed ? '✓ Đang follow' : '+ Theo dõi';
+      const compact = button.dataset.followCompact === 'true';
+      button.textContent = compact ? (followed ? '✓ following' : 'follow') : (followed ? '✓ Đang follow' : '+ Theo dõi');
+      const itemName = button.dataset.followName || (type === 'topic' ? 'topic' : 'entity');
+      const accessibleLabel = followed ? `Bỏ follow ${type} ${itemName}` : `Follow ${type} ${itemName}`;
+      button.setAttribute('aria-label', accessibleLabel);
+      button.title = accessibleLabel;
       button.disabled = state.followSaving;
     });
     document.querySelectorAll('[data-remove-follow]').forEach(button => { button.disabled = state.followSaving; });
