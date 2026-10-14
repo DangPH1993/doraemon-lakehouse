@@ -55,7 +55,7 @@
         <div class="radar-row-main"><div class="radar-row-meta"><span>SỰ KIỆN</span><span>${num(topic.article_count)} bài</span><span>${num(topic.source_count)} nguồn</span>${growth ? `<span class="growth-badge ${growthClass}">${esc(growth)}</span>` : ''}</div>
           <h3>${esc(topic.topic_name)}</h3>${topic.description ? `<p class="radar-row-snippet">${esc(topic.description)}</p>` : ''}
         </div>
-        <div class="radar-row-actions"><button class="timeline-action primary" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.topic_id)}" data-timeline-name="${esc(topic.topic_name)}">Xem timeline <span aria-hidden="true">↗</span></button>${followButtonHTML('topic', {id: topic.topic_id, name: topic.topic_name})}</div>
+        <div class="radar-row-actions"><button class="timeline-action primary" type="button" data-open-article-timeline="${Number(topic.anchor_article_id || 0)}" ${Number(topic.anchor_article_id || 0) < 1 ? 'disabled' : ''}>Xem timeline <span aria-hidden="true">↗</span></button>${followButtonHTML('topic', {id: topic.topic_id, name: topic.topic_name})}</div>
       </article>`;
     }).join('');
     $('#hotTopicsFootnote').textContent = `Xếp hạng theo dữ liệu ${periodLabels[state.period].toLocaleLowerCase('vi-VN')} đã được thu thập và phân loại.`;
@@ -76,29 +76,31 @@
     const end = pagination.end ?? Math.min(pagination.total, pagination.page * pagination.page_size);
     $(target).innerHTML = `<span>Hiển thị ${num(start)}–${num(end)} trong ${num(pagination.total)} bài</span><div class="pagination-actions"><button type="button" data-pager="${type}" data-dir="prev" ${pagination.page <= 1 ? 'disabled' : ''}>← Trước</button><button type="button" data-pager="${type}" data-dir="next" ${pagination.page >= pagination.total_pages ? 'disabled' : ''}>Sau →</button></div>`;
   }
-  function timelineItemsHTML(items, entityMode = false) {
-    if (!items.length) return '<div class="message-card"><strong>Chưa có bài báo được liên kết</strong>Những bài mới sẽ xuất hiện khi được phân loại vào timeline này.</div>';
+  function timelineItemsHTML(items, mode = 'entity_48h') {
+    if (!items.length) return '<div class="message-card"><strong>Chưa có bài báo được liên kết</strong>Những bài mới sẽ xuất hiện khi có entity chuẩn trùng khớp.</div>';
     return items.map(item => {
-      const related = entityMode ? item.topics : item.entities;
-      const relatedLabel = entityMode ? 'Topic liên quan: ' : 'Đối tượng liên quan: ';
+      const related = [item.entities ? `Entity: ${item.entities}` : '', item.topics ? `Nhãn: ${item.topics}` : ''].filter(Boolean).join(' · ');
       return `<article class="timeline-entry">
         <div class="timeline-time">${esc(localDateText(item.timeline_at || item.published_at || item.collected_at, true))}</div>
         <div class="timeline-rail"><span class="timeline-dot"></span><span class="timeline-line"></span></div>
-        <div class="timeline-card"><div class="timeline-meta"><span>${esc(item.source_name)}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${relatedLabel}${esc(related)}</div>` : ''}</div>
+        <div class="timeline-card"><div class="timeline-meta"><span>${esc(item.source_name)}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}</div>
       </article>`;
     }).join('');
   }
   function renderTimeline(data) {
-    const meta = data.topic || data.entity;
-    const type = data.topic ? 'topic' : 'entity';
-    const id = data.topic ? data.topic.topic_id : data.entity.entity_id;
-    const name = data.topic ? data.topic.name : data.entity.canonical_name;
-    state.selectedTimeline = {type, id: Number(id), name};
-    $('#timelineSelectionLabel').textContent = `${type === 'topic' ? 'Sự kiện' : 'Đối tượng'} · ${name}`;
-    $('#timelineContainer').innerHTML = timelineItemsHTML(data.items || [], type === 'entity');
+    const anchor = data.anchor || data.topic || data.entity || {};
+    const articleMode = Boolean(data.anchor);
+    const type = articleMode ? 'article' : (data.topic ? 'topic' : 'entity');
+    const id = articleMode ? Number(anchor.article_id) : (data.topic ? Number(data.topic.topic_id) : Number(data.entity.entity_id));
+    const name = data.timeline_name || (data.topic ? data.topic.name : data.entity ? data.entity.canonical_name : anchor.title) || 'Timeline';
+    state.selectedTimeline = {type, id, name};
+    const modeText = data.mode === 'event_entity' ? 'Entity sự kiện' : 'Entity liên kết trong 48 giờ';
+    $('#timelineSelectionLabel').textContent = `${articleMode ? modeText : (type === 'topic' ? 'Sự kiện' : 'Đối tượng')} · ${name}`;
+    $('#timelineContainer').innerHTML = timelineItemsHTML(data.items || [], data.mode || type);
     renderPagination('#timelinePagination', data.pagination, 'timeline');
   }
   async function fetchTimelineData(type, id, page = 1, pageSize = 20) {
+    if (type === 'article') return getJSON(`/api/public/news/articles/${encodeURIComponent(id)}/timeline?page=${page}&page_size=${pageSize}`);
     if (type === 'entity') return getJSON(`/api/public/news/entities/${encodeURIComponent(id)}/timeline?page=${page}&page_size=${pageSize}`);
     return getJSON(`/api/public/news/topics/${encodeURIComponent(id)}/timeline?page=${page}&page_size=${pageSize}`);
   }
@@ -129,26 +131,33 @@
     const topics = feedMode ? (item.matched_topics || []) : (item.topic_refs || []);
     const entities = feedMode ? (item.matched_entities || []) : (item.entity_refs || []);
     const buttons = [];
+    const articleId = Number(item.article_id || 0);
     topics.filter(x => Number(x.id) > 0).forEach(topic => {
-      buttons.push(`<div class="article-action-pair article-action-pair-compact"><button class="timeline-action article-topic-label" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.id)}" data-timeline-name="${esc(topic.name)}">Topic: ${esc(topic.name)}</button>${followButtonHTML('topic', topic, true)}</div>`);
+      buttons.push(`<span class="article-action-pair article-action-pair-compact"><button class="timeline-action article-topic-label" type="button" data-open-article-timeline="${articleId}" data-timeline-name="${esc(topic.name)}">Topic: ${esc(topic.name)}</button>${followButtonHTML('topic', topic, true)}</span>`);
     });
     entities.filter(x => Number(x.id) > 0).forEach(entity => {
-      buttons.push(`<div class="article-action-pair article-action-pair-compact"><button class="timeline-action entity-action article-topic-label" type="button" data-open-timeline="entity" data-timeline-id="${Number(entity.id)}" data-timeline-name="${esc(entity.name)}">Entity: ${esc(entity.name)}</button>${followButtonHTML('entity', entity, true)}</div>`);
+      const isEvent = String(entity.type || '').toUpperCase() === 'EVENT';
+      const label = isEvent ? 'Sự kiện' : 'Entity';
+      buttons.push(`<span class="article-action-pair article-action-pair-compact"><button class="timeline-action ${isEvent ? 'event-action' : 'entity-action'} article-topic-label" type="button" data-open-article-timeline="${articleId}" data-timeline-name="${esc(entity.name)}">${label}: ${esc(entity.name)}</button>${followButtonHTML('entity', entity, true)}</span>`);
     });
-    return buttons.length ? `<div class="radar-row-actions article-actions">${buttons.join('')}</div>` : '<div class="article-no-timeline">Chưa có topic hoặc entity liên quan được phân loại.</div>';
+    return buttons.length ? `<div class="article-follow-tags">${buttons.join('')}</div>` : '<div class="article-no-timeline">Chưa có tag topic/entity được phân loại.</div>';
   }
   function articleRowHTML(item, feedMode = false) {
     const time = localDateText(item.published_at || item.collected_at, true);
-    const tags = (feedMode ? [...(item.matched_topics || []), ...(item.matched_entities || [])] : [...(item.topics || []).map(name => ({name})), ...(item.entity_refs || [])])
-      .slice(0, 4).map(tag => `<span class="article-tag">${esc(tag.name)}</span>`).join('');
+    const followableTopicNames = new Set((feedMode ? (item.matched_topics || []) : (item.topic_refs || [])).map(tag => String(tag.name || '').toLocaleLowerCase('vi')));
+    const tags = (feedMode ? [] : (item.topics || []).filter(name => !followableTopicNames.has(String(name || '').toLocaleLowerCase('vi'))).map(name => ({name})))
+      .slice(0, 6).map(tag => `<span class="article-tag">${esc(tag.name)}</span>`).join('');
     return `<article class="radar-row article-row${feedMode ? ' feed-row' : ''}">
       <div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span>${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
         <h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>
-        ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}<div class="article-tags">${tags}</div>
+        ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}
+        ${tags ? `<div class="article-tags">${tags}</div>` : ''}
+        ${articleActionsHTML(item, feedMode)}
+        <div class="article-card-footer"><span></span><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a></div>
       </div>
-      <div class="radar-row-end"><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a>${articleActionsHTML(item, feedMode)}</div>
     </article>`;
   }
+
   function renderArticleList(target, items, feedMode = false, emptyTitle = 'Chưa có bài báo phù hợp', emptyDescription = 'Hãy thử tìm bằng từ khóa khác.') {
     if (!items.length) { setMessage(target, emptyTitle, emptyDescription); return; }
     $(target).innerHTML = items.map(item => articleRowHTML(item, feedMode)).join('');
@@ -479,6 +488,12 @@
       state.period = period.dataset.period;
       document.querySelectorAll('.period-btn').forEach(btn => { const active = btn.dataset.period === state.period; btn.classList.toggle('active', active); btn.setAttribute('aria-selected', String(active)); });
       await loadHotTopics(); return;
+    }
+    const articleTimelineAction = event.target.closest('[data-open-article-timeline]');
+    if (articleTimelineAction) {
+      const articleId = Number(articleTimelineAction.dataset.openArticleTimeline);
+      if (articleId > 0) await loadTimeline('article', articleId, 1);
+      return;
     }
     const timelineAction = event.target.closest('[data-open-timeline]');
     if (timelineAction) {

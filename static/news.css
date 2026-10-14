@@ -196,3 +196,17 @@ body{background:#fff;color:#202124;font-size:14px}
 .following-page-link:hover{background:#f8faff;border-color:#aecbfa}
 .following-page-disabled{opacity:.4}
 @media(max-width:640px){.article-action-pair{justify-content:flex-start}.article-action-pair-compact{max-width:100%}.article-action-pair-compact .article-topic-label{max-width:calc(100% - 48px)}.feed-group-heading{gap:7px}.feed-more-link{font-size:9px;padding:6px 7px}.following-heading{padding:20px 15px}.followed-tag{font-size:10px}.following-page .article-row{grid-template-columns:minmax(0,1fr)}}
+
+/* v0.7.0: entity-based timelines; followable tags live below each article, not in a side column. */
+.article-row{grid-template-columns:minmax(0,1fr)!important;gap:8px;padding:16px 0}
+.article-row .radar-row-main{min-width:0}
+.article-row .radar-row-end{display:none!important}
+.article-follow-tags{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-start;gap:5px;margin-top:8px;max-width:100%}
+.article-follow-tags .article-action-pair-compact{max-width:100%;justify-content:flex-start}
+.article-follow-tags .article-topic-label{cursor:pointer}
+.article-follow-tags .follow-toggle-compact{cursor:pointer}
+.article-row .article-card-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding-top:6px;border-top:1px solid #f0f1f2}
+.article-row .article-card-footer>span{min-width:0}
+.article-row .article-card-footer .article-source-link{white-space:nowrap;flex-shrink:0}
+.article-no-timeline{max-width:none;text-align:left;margin-top:7px}
+@media(max-width:640px){.article-row{grid-template-columns:minmax(0,1fr)!important}.article-follow-tags{gap:4px}.article-follow-tags .article-action-pair-compact{max-width:100%}.article-row .article-card-footer{margin-top:5px}}
