@@ -17,6 +17,7 @@ from .config import settings
 from .db import get_conn
 from .processing import hash_text, norm_name, normalize_space, slugify
 from .entity_rules import should_track_entity
+from .entity_resolution import entity_name_variants, resolve_entity_in_database
 
 log = logging.getLogger('mini-lakehouse.openai')
 OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions'
@@ -153,49 +154,65 @@ def _upsert_event_topic(conn, name: str, confidence: float, category_topic_id: i
 
 
 def _upsert_entity(conn, name: str, entity_type: str, aliases: list[str] | None = None) -> int | None:
-    """Resolve canonical names and known aliases before creating an entity."""
+    """Resolve canonical names, titles and unambiguous aliases before creating an entity."""
     name = normalize_space(name)[:180]
-    normalized = norm_name(name)
-    if len(normalized) < 2 or len(normalized) > 180:
-        return None
     entity_type = str(entity_type or 'UNKNOWN').upper().strip()
     if entity_type not in ALLOWED_ENTITY_TYPES:
         entity_type = 'UNKNOWN'
-    if not should_track_entity(name, entity_type):
+    canonical_name = strip_title_for_entity(name, entity_type)
+    normalized = norm_name(canonical_name)
+    if len(normalized) < 2 or len(normalized) > 180:
+        return None
+    if not should_track_entity(canonical_name, entity_type):
         log.debug('Skipping non-followable entity name=%r type=%s', name, entity_type)
         return None
-    aliases = aliases or []
-    entity_id = None
+
+    supplied_aliases = [normalize_space(str(x))[:180] for x in (aliases or []) if normalize_space(str(x))]
+    resolved_row, ambiguous = resolve_entity_in_database(conn, name, entity_type, supplied_aliases)
+    if ambiguous:
+        log.warning('Ambiguous entity alias; not auto-merging or creating duplicate name=%r type=%s', name, entity_type)
+        return None
+    entity_id = int(resolved_row['entity_id']) if resolved_row else None
+    if entity_id is not None and entity_type == 'PERSON' and resolved_row:
+        current_norm = norm_name(str(resolved_row.get('normalized_name') or resolved_row.get('canonical_name') or ''))
+        preferred = canonical_name
+        preferred_norm = norm_name(preferred)
+        # If a short-form-only row was created first (e.g. "Trump"), upgrade its display
+        # name when a full person name is later seen, preserving entity_id and follows.
+        if ' ' not in current_norm and ' ' in preferred_norm:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT 1 FROM entities WHERE status='active' AND normalized_name=%s
+                               AND entity_id<>%s AND entity_type IN ('PERSON','UNKNOWN') LIMIT 1""",
+                            (preferred_norm, entity_id))
+                if not cur.fetchone():
+                    cur.execute("UPDATE entities SET canonical_name=%s,normalized_name=%s,updated_at=now() WHERE entity_id=%s",
+                                (preferred, preferred_norm, entity_id))
+
     with conn.cursor() as cur:
-        cur.execute("""select entity_id from entities
-                       where normalized_name=%s
-                       order by case when status='active' then 0 else 1 end, entity_id limit 1""", (normalized,))
-        row = cur.fetchone()
-        if row:
-            entity_id = row['entity_id']
-        else:
-            cur.execute("""select e.entity_id from entity_aliases a
-                           join entities e on e.entity_id=a.entity_id
-                           where a.normalized_alias=%s
-                           order by case when e.status='active' then 0 else 1 end, e.entity_id limit 1""", (normalized,))
-            row = cur.fetchone()
-            if row:
-                entity_id = row['entity_id']
         if entity_id is None:
+            # If no candidate was found, create a new canonical entity.
             cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,description,origin)
                            values(%s,%s,%s,'Tự động trích xuất và chuẩn hóa từ tin tức bằng GenAI.','discovered')
                            on conflict(normalized_name,entity_type) do update set updated_at=now()
-                           returning entity_id""", (name, normalized, entity_type))
-            entity_id = cur.fetchone()['entity_id']
-        all_aliases = [name] + aliases
-        for alias in all_aliases[:12]:
-            alias = normalize_space(str(alias))[:180]
+                           returning entity_id""", (canonical_name, normalized, entity_type))
+            entity_id = int(cur.fetchone()['entity_id'])
+
+        all_aliases = entity_name_variants(name, entity_type, supplied_aliases)
+        for alias in all_aliases[:30]:
             alias_norm = norm_name(alias)
             if not alias_norm:
                 continue
             cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
                            values(%s,%s,%s) on conflict do nothing""", (entity_id, alias, alias_norm))
     return entity_id
+
+
+def strip_title_for_entity(name: str, entity_type: str) -> str:
+    # Keep the shared helper import in one place while avoiding title stripping for orgs/places.
+    if str(entity_type or '').upper().strip() == 'PERSON':
+        from .entity_resolution import strip_person_title
+        return strip_person_title(name)
+    return normalize_space(name)
 
 
 # High-specificity action families prevent unrelated stories sharing a generic category

@@ -15,10 +15,12 @@ from .db import get_conn, fetch_all, fetch_one
 from .security import (issue_token, require_admin, hash_password, verify_password, issue_user_token, require_user)
 from .processing import canonicalize_url, hash_text, norm_name, slugify
 from .entity_rules import should_track_entity
+from .entity_resolution import (build_entity_lookup, entity_name_variants,
+                                resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.8',description='News Radar with global archive search, topic/entity timelines, grouped personal feed and Telegram notifications.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.9',description='News Radar with global archive search, topic/entity timelines, grouped personal feed and Telegram notifications.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -890,31 +892,41 @@ def patch_article_classifications(article_id: int, body: ArticleClassificationBo
                 all_topics.append(topic); by_topic_norm[norm_name(topic['name'])] = topic; by_slug[topic['slug']] = topic
             if topic['topic_id'] not in topic_ids:
                 topic_ids.append(topic['topic_id'])
-        cur.execute("select entity_id,canonical_name,normalized_name,entity_type from entities where status='active'")
+        cur.execute("select entity_id,canonical_name,normalized_name,entity_type,status from entities where status='active'")
         all_entities = cur.fetchall()
-        by_entity_norm = {norm_name(e['canonical_name']): e for e in all_entities}
-        cur.execute("select entity_id,alias,normalized_alias from entity_aliases")
+        cur.execute("""select a.entity_id,a.alias,a.normalized_alias from entity_aliases a
+                       join entities e on e.entity_id=a.entity_id where e.status='active'""")
         alias_rows = cur.fetchall()
-        by_alias = {r['normalized_alias']: r for r in alias_rows}
+        entity_lookup = build_entity_lookup(all_entities, alias_rows)
         for name in entity_names:
             normalized = norm_name(name)
             if not normalized:
                 continue
-            entity = by_entity_norm.get(normalized)
-            if not entity and normalized in by_alias:
-                alias_entity_id = by_alias[normalized]['entity_id']
-                entity = next((e for e in all_entities if e['entity_id'] == alias_entity_id), None)
+            # If the operator included a role/title, resolve as a person (e.g. "President Trump").
+            resolution_type = 'PERSON' if strip_person_title(name) != normalize_space(name).strip(' ,.;:-') else 'UNKNOWN'
+            entity_id, ambiguous = resolve_entity_in_lookup(name, resolution_type, entity_lookup)
+            if ambiguous:
+                raise HTTPException(status_code=422, detail=f"Entity '{name}' trùng với nhiều đối tượng. Hãy chọn tên chuẩn hoặc bổ sung ngữ cảnh.")
+            entity = entity_lookup['entities_by_id'].get(int(entity_id)) if entity_id else None
+            canonical_name = strip_person_title(name) if resolution_type == 'PERSON' else name
+            canonical_norm = norm_name(canonical_name)
             if not entity:
                 cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,description,origin)
-                               values(%s,%s,'UNKNOWN','Entity được tạo/chỉnh trực tiếp từ phân loại bài báo.','manual')
+                               values(%s,%s,%s,'Entity được tạo/chỉnh trực tiếp từ phân loại bài báo.','manual')
                                on conflict(normalized_name,entity_type) do update set updated_at=now()
-                               returning entity_id,canonical_name,normalized_name,entity_type""", (name,normalized))
+                               returning entity_id,canonical_name,normalized_name,entity_type,status""",
+                            (canonical_name,canonical_norm,resolution_type))
                 entity = cur.fetchone()
-                cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
-                               values(%s,%s,%s) on conflict do nothing""", (entity['entity_id'],name,normalized))
-                all_entities.append(entity); by_entity_norm[normalized] = entity
-            if not any(eid == entity['entity_id'] for eid, _ in entity_records):
-                entity_records.append((entity['entity_id'], name))
+                entity_id = int(entity['entity_id'])
+            variants = entity_name_variants(canonical_name, resolution_type)
+            for alias in variants:
+                alias_norm = norm_name(alias)
+                if alias_norm:
+                    cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
+                                   values(%s,%s,%s) on conflict do nothing""", (entity_id,alias,alias_norm))
+            add_entity_to_lookup(entity_lookup, entity, variants)
+            if not any(eid == int(entity_id) for eid, _ in entity_records):
+                entity_records.append((int(entity_id), name))
         cur.execute('delete from article_topics where article_id=%s', (article_id,))
         cur.execute('delete from article_entities where article_id=%s', (article_id,))
         for topic_id in topic_ids:
@@ -1023,8 +1035,6 @@ def approve_topic(candidate_id:int):
     candidate=fetch_one("select * from topic_candidates where candidate_id=%s",(candidate_id,))
     if not candidate: raise HTTPException(status_code=404,detail='Candidate not found')
     if candidate['status']!='pending': raise HTTPException(status_code=409,detail='Candidate is not pending')
-    if not should_track_entity(candidate['canonical_name'], candidate['entity_type']):
-        raise HTTPException(status_code=422, detail='Candidate là địa danh hành chính hoặc danh từ chung, không thể duyệt thành entity theo dõi.')
     with get_conn() as conn, conn.cursor() as cur:
         slug=slugify(candidate['suggested_name'])
         candidate_type = candidate.get('candidate_type') or 'event'
@@ -1069,42 +1079,116 @@ def list_entities(
     return {'entities':ents,'candidates':[],'pagination':pagination_meta(page,page_size,total)}
 @app.post('/api/entities',dependencies=[Depends(require_admin)])
 def create_entity(body:EntityBody):
-    if not should_track_entity(body.canonical_name, body.entity_type):
+    entity_type = str(body.entity_type or 'UNKNOWN').upper().strip()
+    input_name = body.canonical_name.strip()
+    canonical_name = strip_person_title(input_name) if entity_type == 'PERSON' else input_name
+    if not should_track_entity(canonical_name, entity_type):
         raise HTTPException(status_code=422, detail='Entity phải là một đối tượng cụ thể. Không lưu quốc gia/tỉnh/thành phố hoặc danh từ chung; địa điểm cụ thể có tên riêng vẫn được phép.')
-    row=fetch_one("""insert into entities(canonical_name,normalized_name,entity_type,external_id,description,origin)
-                     values(%s,%s,%s,%s,%s,'manual') returning *""",(body.canonical_name.strip(),norm_name(body.canonical_name),body.entity_type.upper(),body.external_id,body.description))
-    for alias in body.aliases:
-        if norm_name(alias):
-            fetch_one("insert into entity_aliases(entity_id,alias,normalized_alias) values(%s,%s,%s) on conflict do nothing returning alias_id",(row['entity_id'],alias.strip(),norm_name(alias)))
+    variants = entity_name_variants(input_name, entity_type, body.aliases)
+    with get_conn() as conn, conn.cursor() as cur:
+        resolved, ambiguous = resolve_entity_in_database(conn, input_name, entity_type, body.aliases)
+        if ambiguous:
+            raise HTTPException(status_code=409, detail='Tên entity này đang là bí danh của nhiều đối tượng. Hãy dùng tên chuẩn đầy đủ để tránh hợp nhất nhầm.')
+        if resolved:
+            entity_id = int(resolved['entity_id'])
+            current_norm = norm_name(str(resolved.get('normalized_name') or resolved.get('canonical_name') or ''))
+            canonical_norm = norm_name(canonical_name)
+            if entity_type == 'PERSON' and ' ' not in current_norm and ' ' in canonical_norm:
+                cur.execute("""select 1 from entities where status='active' and normalized_name=%s
+                               and entity_id<>%s and entity_type in ('PERSON','UNKNOWN') limit 1""",(canonical_norm,entity_id))
+                if not cur.fetchone():
+                    cur.execute("update entities set canonical_name=%s,normalized_name=%s,updated_at=now() where entity_id=%s",(canonical_name,canonical_norm,entity_id))
+            cur.execute("update entities set external_id=coalesce(%s,external_id),description=case when %s='' then description else %s end,updated_at=now() where entity_id=%s returning *",
+                        (body.external_id, body.description, body.description, entity_id))
+            row = cur.fetchone()
+        else:
+            cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,external_id,description,origin)
+                           values(%s,%s,%s,%s,%s,'manual') returning *""",
+                        (canonical_name,norm_name(canonical_name),entity_type,body.external_id,body.description))
+            row = cur.fetchone()
+            entity_id = int(row['entity_id'])
+        all_aliases = list(variants)
+        for alias in all_aliases:
+            alias_norm = norm_name(alias)
+            if alias_norm:
+                cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
+                               values(%s,%s,%s) on conflict do nothing""", (entity_id,alias,alias_norm))
+        cur.execute("select coalesce(array_agg(alias order by alias),'{}') as aliases from entity_aliases where entity_id=%s",(entity_id,))
+        row['aliases'] = cur.fetchone()['aliases']
     return row
+
 @app.patch('/api/entities/{entity_id}',dependencies=[Depends(require_admin)])
 def patch_entity(entity_id:int,patch:dict=Body(...)):
-    allowed={'canonical_name','entity_type','external_id','description','status'}; fields={k:v for k,v in patch.items() if k in allowed}
-    if 'canonical_name' in fields: fields['normalized_name']=norm_name(fields['canonical_name'])
+    allowed={'canonical_name','entity_type','external_id','description','status'}
+    fields={k:v for k,v in patch.items() if k in allowed}
     if not fields: raise HTTPException(status_code=400,detail='No allowed fields')
     current = fetch_one('select canonical_name,entity_type,status from entities where entity_id=%s',(entity_id,))
     if not current: raise HTTPException(status_code=404,detail='Entity not found')
+    candidate_type = str(fields.get('entity_type', current['entity_type']) or 'UNKNOWN').upper().strip()
     candidate_name = fields.get('canonical_name', current['canonical_name'])
-    candidate_type = fields.get('entity_type', current['entity_type'])
+    if candidate_type == 'PERSON':
+        candidate_name = strip_person_title(candidate_name)
+        if candidate_name != current['canonical_name'] or 'canonical_name' in fields:
+            fields['canonical_name'] = candidate_name
+            fields['normalized_name'] = norm_name(candidate_name)
+    if 'entity_type' in fields:
+        fields['entity_type'] = candidate_type
     candidate_status = fields.get('status', current['status'])
     if candidate_status == 'active' and not should_track_entity(candidate_name, candidate_type):
         raise HTTPException(status_code=422,detail='Không thể kích hoạt entity là quốc gia/tỉnh/thành phố hoặc danh từ chung.')
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(f'{k}=%s'); vals.append(v)
     sets.append('updated_at=now()'); vals.append(entity_id)
-    try: row=fetch_one(f"update entities set {', '.join(sets)} where entity_id=%s returning *",vals)
-    except Exception as exc: raise HTTPException(status_code=409,detail=f'Could not update entity: {str(exc)[:200]}')
-    if not row: raise HTTPException(status_code=404,detail='Entity not found')
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"update entities set {', '.join(sets)} where entity_id=%s returning *",vals)
+            row = cur.fetchone()
+            if not row: raise HTTPException(status_code=404,detail='Entity not found')
+            if row['status'] == 'active':
+                for alias in entity_name_variants(row['canonical_name'], row['entity_type']):
+                    alias_norm = norm_name(alias)
+                    if alias_norm:
+                        cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
+                                       values(%s,%s,%s) on conflict do nothing""",(entity_id,alias,alias_norm))
+                cur.execute("select coalesce(array_agg(alias order by alias),'{}') as aliases from entity_aliases where entity_id=%s",(entity_id,))
+                row['aliases'] = cur.fetchone()['aliases']
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=409,detail=f'Could not update entity: {str(exc)[:200]}')
     return row
 @app.post('/api/entity-candidates/{candidate_id}/approve',dependencies=[Depends(require_admin)])
 def approve_entity(candidate_id:int):
     candidate=fetch_one('select * from entity_candidates where candidate_id=%s',(candidate_id,))
     if not candidate: raise HTTPException(status_code=404,detail='Candidate not found')
     if candidate['status']!='pending': raise HTTPException(status_code=409,detail='Candidate is not pending')
+    candidate_type = str(candidate['entity_type'] or 'UNKNOWN').upper().strip()
+    candidate_name = strip_person_title(candidate['canonical_name']) if candidate_type == 'PERSON' else candidate['canonical_name']
+    if not should_track_entity(candidate_name, candidate_type):
+        raise HTTPException(status_code=422, detail='Candidate là địa danh hành chính hoặc danh từ chung, không thể duyệt thành entity theo dõi.')
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,origin) values(%s,%s,%s,'discovered')
-                       on conflict(normalized_name,entity_type) do update set canonical_name=excluded.canonical_name returning entity_id""",(candidate['canonical_name'],candidate['normalized_name'],candidate['entity_type']))
-        entity_id=cur.fetchone()['entity_id']
+        resolved, ambiguous = resolve_entity_in_database(conn, candidate_name, candidate_type)
+        if ambiguous:
+            raise HTTPException(status_code=409, detail='Candidate trùng bí danh của nhiều entity. Hãy chuẩn hóa thủ công trước khi duyệt.')
+        if resolved:
+            entity_id = int(resolved['entity_id'])
+            current_norm = norm_name(str(resolved.get('normalized_name') or resolved.get('canonical_name') or ''))
+            canonical_norm = norm_name(candidate_name)
+            if candidate_type == 'PERSON' and ' ' not in current_norm and ' ' in canonical_norm:
+                cur.execute("""select 1 from entities where status='active' and normalized_name=%s
+                               and entity_id<>%s and entity_type in ('PERSON','UNKNOWN') limit 1""",(canonical_norm,entity_id))
+                if not cur.fetchone():
+                    cur.execute("update entities set canonical_name=%s,normalized_name=%s,updated_at=now() where entity_id=%s",(candidate_name,canonical_norm,entity_id))
+        else:
+            cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,origin) values(%s,%s,%s,'discovered')
+                           on conflict(normalized_name,entity_type) do update set canonical_name=excluded.canonical_name,updated_at=now()
+                           returning entity_id""",(candidate_name,norm_name(candidate_name),candidate_type))
+            entity_id=int(cur.fetchone()['entity_id'])
+        for alias in entity_name_variants(candidate_name, candidate_type):
+            alias_norm = norm_name(alias)
+            if alias_norm:
+                cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
+                               values(%s,%s,%s) on conflict do nothing""",(entity_id,alias,alias_norm))
         cur.execute("""insert into article_entities(article_id,entity_id,mention_text,confidence)
                        select article_id,%s,mention_text,0.65 from entity_candidate_occurrences where candidate_id=%s on conflict do nothing""",(entity_id,candidate_id))
         cur.execute("update entity_candidates set status='approved',last_seen_at=now() where candidate_id=%s",(candidate_id,))

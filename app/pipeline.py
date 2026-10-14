@@ -75,17 +75,15 @@ def get_spacy_entity_matches(title, summary):
         return []
 
 def load_entity_lookup(conn) -> dict:
-    """Load the approved entity catalog once per pipeline run, not once per article."""
+    """Load active entities and aliases once per run, retaining collisions for safe resolution."""
     with conn.cursor() as cur:
-        cur.execute("select entity_id, canonical_name, normalized_name, entity_type from entities where status='active'")
+        cur.execute("select entity_id, canonical_name, normalized_name, entity_type, status from entities where status='active'")
         known = cur.fetchall()
-        cur.execute('select entity_id, normalized_alias from entity_aliases')
+        cur.execute("""select a.entity_id,a.alias,a.normalized_alias
+                       from entity_aliases a join entities e on e.entity_id=a.entity_id
+                       where e.status='active'""")
         aliases = cur.fetchall()
-    return {
-        'alias_to_entity': {r['normalized_alias']: r['entity_id'] for r in aliases},
-        'known_map': {(r['normalized_name'], r['entity_type']): r['entity_id'] for r in known},
-        'known_name_fallback': {r['normalized_name']: r['entity_id'] for r in known},
-    }
+    return build_entity_lookup(known, aliases)
 
 
 def load_active_topics(conn) -> list[dict]:
@@ -96,33 +94,56 @@ def load_active_topics(conn) -> list[dict]:
 
 
 def process_entities(conn, article_id, source_id, title, summary, entity_lookup=None):
-    """Fallback entity extraction when GenAI is not configured; entities are auto-created."""
+    """Fallback entity extraction with shared canonical/alias resolution."""
     found = get_spacy_entity_matches(title, summary)
     if entity_lookup is None:
         entity_lookup = load_entity_lookup(conn)
-    alias_to_entity = entity_lookup['alias_to_entity']
-    known_map = entity_lookup['known_map']
-    known_name_fallback = entity_lookup['known_name_fallback']
     count_known = 0
     for mention, typ, confidence in found:
         normalized = norm_name(mention)
         if len(normalized) < 2 or not should_track_entity(mention, typ):
             continue
-        entity_id = known_map.get((normalized, typ)) or alias_to_entity.get(normalized) or known_name_fallback.get(normalized)
+        entity_id, ambiguous = resolve_entity_in_lookup(mention, typ, entity_lookup)
+        if ambiguous:
+            log.warning('Skipping ambiguous entity surface=%r type=%s article_id=%s', mention, typ, article_id)
+            continue
+        canonical = strip_person_title(mention) if str(typ or '').upper() == 'PERSON' else normalize_space(mention)
+        canonical_norm = norm_name(canonical)
         if not entity_id:
             with conn.cursor() as cur:
                 cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,description,origin)
                                values(%s,%s,%s,'Fallback entity extraction from article text.','discovered')
                                on conflict(normalized_name,entity_type) do update set updated_at=now()
-                               returning entity_id""", (mention, normalized, typ))
-                entity_id = cur.fetchone()['entity_id']
-                cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
-                               values(%s,%s,%s) on conflict do nothing""", (entity_id, mention, normalized))
-            known_map[(normalized, typ)] = entity_id
-            known_name_fallback[normalized] = entity_id
-            alias_to_entity[normalized] = entity_id
+                               returning entity_id,canonical_name,normalized_name,entity_type,status""", (canonical, canonical_norm, typ))
+                row = cur.fetchone()
+                entity_id = int(row['entity_id'])
+                # If a unique surname alias resolved a pre-existing short-form row, use the full name.
+                add_entity_to_lookup(entity_lookup, row, entity_name_variants(canonical, typ))
         else:
             count_known += 1
+            row = entity_lookup['entities_by_id'][int(entity_id)]
+            current_norm = norm_name(str(row.get('normalized_name') or row.get('canonical_name') or ''))
+            if str(typ or '').upper() == 'PERSON' and ' ' not in current_norm and ' ' in canonical_norm:
+                with conn.cursor() as cur:
+                    cur.execute("""select 1 from entities where status='active' and normalized_name=%s
+                                   and entity_id<>%s and entity_type in ('PERSON','UNKNOWN') limit 1""", (canonical_norm, entity_id))
+                    if not cur.fetchone():
+                        cur.execute("update entities set canonical_name=%s,normalized_name=%s,updated_at=now() where entity_id=%s",
+                                    (canonical, canonical_norm, entity_id))
+                        entity_lookup['canonical_to_ids'][current_norm].discard(int(entity_id))
+                        row['canonical_name'] = canonical
+                        row['normalized_name'] = canonical_norm
+                        entity_lookup['canonical_to_ids'][canonical_norm].add(int(entity_id))
+        # Store both observed and deterministically generated variants; do not collapse ambiguous aliases.
+        variants = entity_name_variants(canonical, typ)
+        with conn.cursor() as cur:
+            for alias in variants:
+                alias_norm = norm_name(alias)
+                if not alias_norm:
+                    continue
+                cur.execute("""insert into entity_aliases(entity_id,alias,normalized_alias)
+                               values(%s,%s,%s) on conflict do nothing""", (entity_id, alias, alias_norm))
+        add_entity_to_lookup(entity_lookup, entity_lookup['entities_by_id'][int(entity_id)], variants)
         with conn.cursor() as cur:
             cur.execute("""insert into article_entities(article_id,entity_id,mention_text,confidence)
                            values(%s,%s,%s,%s) on conflict do nothing""", (article_id, entity_id, mention, confidence))
