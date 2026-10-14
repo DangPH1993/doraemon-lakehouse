@@ -12,6 +12,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 from .processing import normalize_space, norm_name
+from .entity_names import entity_normalized_key
 
 # Longest forms first. These are honorific/role prefixes, not identity-bearing words.
 _PERSON_TITLE_PREFIXES = sorted((
@@ -104,7 +105,12 @@ def build_entity_lookup(entities: Iterable[dict[str, Any]], aliases: Iterable[di
             continue
         eid = int(entity['entity_id'])
         lookup['entities_by_id'][eid] = dict(entity)
-        lookup['canonical_to_ids'][norm_name(str(entity.get('normalized_name') or entity.get('canonical_name') or ''))].add(eid)
+        # Support both pre-v0.7.2 names and structured `<kind>*_<name>` keys during rollout.
+        lookup['canonical_to_ids'][norm_name(str(entity.get('normalized_name') or ''))].add(eid)
+        lookup['canonical_to_ids'][norm_name(str(entity.get('canonical_name') or ''))].add(eid)
+        structured = entity_normalized_key(str(entity.get('canonical_name') or ''), str(entity.get('entity_type') or 'UNKNOWN'))
+        if structured:
+            lookup['canonical_to_ids'][structured].add(eid)
     for alias in aliases:
         eid = int(alias['entity_id'])
         if eid not in lookup['entities_by_id']:
@@ -118,7 +124,11 @@ def add_entity_to_lookup(lookup: dict[str, Any], entity: dict[str, Any], alias_n
     entity = dict(entity)
     entity.setdefault('status', 'active')
     lookup['entities_by_id'][eid] = entity
-    lookup['canonical_to_ids'][norm_name(str(entity.get('normalized_name') or entity.get('canonical_name') or ''))].add(eid)
+    lookup['canonical_to_ids'][norm_name(str(entity.get('normalized_name') or ''))].add(eid)
+    lookup['canonical_to_ids'][norm_name(str(entity.get('canonical_name') or ''))].add(eid)
+    structured = entity_normalized_key(str(entity.get('canonical_name') or ''), str(entity.get('entity_type') or 'UNKNOWN'))
+    if structured:
+        lookup['canonical_to_ids'][structured].add(eid)
     for alias in alias_names:
         normalized = norm_name(str(alias or ''))
         if normalized:
@@ -132,30 +142,38 @@ def resolve_entity_in_lookup(name: str, entity_type: str, lookup: dict[str, Any]
     preferred_norm = norm_name(strip_person_title(name)) if typ == 'PERSON' else input_norm
     variants = entity_name_variants(name, entity_type, aliases)
     for variant in variants:
-        normalized = norm_name(variant)
-        if not normalized:
-            continue
-        ids = set(lookup['canonical_to_ids'].get(normalized, set()))
-        ids.update(lookup['alias_to_ids'].get(normalized, set()))
-        compatible = {
-            eid for eid in ids
-            if _type_compatible(entity_type, lookup['entities_by_id'][eid].get('entity_type', 'UNKNOWN'))
-        }
-        if len(compatible) == 1:
-            return next(iter(compatible)), False
-        if len(compatible) > 1:
-            # A full multi-token name may still be a new, distinct person even when its
-            # generated surname alias collides. A bare/role-prefixed surname stays ambiguous.
-            if normalized in {input_norm, preferred_norm} or ' ' not in preferred_norm:
-                return None, True
-            continue
+        normalized_candidates = list(dict.fromkeys((
+            norm_name(variant),
+            entity_normalized_key(variant, entity_type),
+        )))
+        for normalized in normalized_candidates:
+            if not normalized:
+                continue
+            ids = set(lookup['canonical_to_ids'].get(normalized, set()))
+            ids.update(lookup['alias_to_ids'].get(normalized, set()))
+            compatible = {
+                eid for eid in ids
+                if _type_compatible(entity_type, lookup['entities_by_id'][eid].get('entity_type', 'UNKNOWN'))
+            }
+            if len(compatible) == 1:
+                return next(iter(compatible)), False
+            if len(compatible) > 1:
+                # A full multi-token name may still be a new, distinct person even when its
+                # generated surname alias collides. A bare/role-prefixed surname stays ambiguous.
+                if normalized in {input_norm, preferred_norm} or ' ' not in preferred_norm:
+                    return None, True
+                continue
     return None, False
 
 
 def resolve_entity_in_database(conn, name: str, entity_type: str, aliases: Iterable[str] | None = None) -> tuple[dict[str, Any] | None, bool]:
     """Resolve a surface form against indexed canonical-name and alias columns in PostgreSQL."""
     variants = entity_name_variants(name, entity_type, aliases)
-    normalized_variants = list(dict.fromkeys(norm_name(x) for x in variants if norm_name(x)))
+    normalized_variants = []
+    for value in variants:
+        for normalized in (norm_name(value), entity_normalized_key(value, entity_type)):
+            if normalized and normalized not in normalized_variants:
+                normalized_variants.append(normalized)
     if not normalized_variants:
         return None, False
     with conn.cursor() as cur:

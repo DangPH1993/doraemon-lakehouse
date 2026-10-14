@@ -22,6 +22,12 @@ except Exception as exc:
 _GENERIC_ENTITIES = {
     'nguoi dan', 'nguoi lao dong', 'nguoi tieu dung', 'nguoi mua', 'nguoi ban',
     'siêu thị', 'sieu thi', 'cửa hàng', 'cua hang', 'nhà hàng', 'nha hang',
+    'đường', 'phố', 'cao tốc', 'cầu', 'cầu vượt', 'tàu', 'máy bay', 'xe buýt',
+    'hồ chứa', 'đập', 'nhà hát', 'cụm công nghiệp', 'khu kinh tế', 'bến xe khách',
+    'bộ', 'sở', 'ủy ban', 'uỷ ban', 'tòa án', 'toà án', 'học viện', 'viện kiểm sát',
+    'liên đoàn', 'hiệp hội', 'quỹ', 'đảng', 'tổng công ty', 'trung tâm y tế',
+    'trung tâm hội nghị', 'vụ án', 'vụ kiện', 'giải đấu', 'giải vô địch', 'hội nghị',
+    'chiến dịch', 'cuộc thi', 'trận đấu', 'đại hội', 'chuyến công du', 'phiên tòa', 'vụ cháy', 'vụ tai nạn',
     'bệnh viện', 'benh vien', 'trường học', 'truong hoc', 'trường đại học', 'truong dai hoc',
     'công ty', 'cong ty', 'doanh nghiệp', 'doanh nghiep', 'ngân hàng', 'ngan hang',
     'chùa', 'đền', 'miếu', 'di tích', 'danh lam thắng cảnh', 'sân vận động', 'san van dong',

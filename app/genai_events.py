@@ -21,6 +21,7 @@ from .named_infrastructure import (
     augment_entities_with_named_infrastructure, extract_named_infrastructure_entities,
 )
 from .entity_resolution import entity_name_variants, resolve_entity_in_database
+from .entity_names import entity_normalized_key, named_head_and_tail
 from .timeline_groups import refresh_article_timeline_group
 
 log = logging.getLogger('mini-lakehouse.openai')
@@ -63,10 +64,10 @@ Mục tiêu:
 3) existing_event_topic_id chỉ giúp tái sử dụng nhãn hiển thị tương đương để tránh tạo quá nhiều tên nhãn gần giống nhau. Chỉ chọn nếu mô tả CÙNG VỤ VIỆC CỤ THỂ. Không dùng trường này làm điều kiện liên kết timeline; backend sẽ xác định timeline bằng entity_id chuẩn và thời gian xuất bản.
 4) Ưu tiên phân loại entity chính xác hơn đặt tên topic cầu kỳ. Với mỗi entity cụ thể, cung cấp tên chuẩn dễ nhận biết, các bí danh có bằng chứng trong tiêu đề/mô tả và đúng loại entity.
 5) Không bắt buộc tìm động từ chính hoặc nhóm hành động để ghép timeline. Cách ghép timeline được xử lý riêng bằng entity sự kiện hoặc entity đối tượng và cửa sổ thời gian trong backend.
-6) Chỉ trích xuất entity là đối tượng CỤ THỂ có danh tính riêng, thực sự xuất hiện trong tiêu đề, mô tả hoặc content_excerpt; không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases phải là biến thể trực tiếp được thể hiện trong văn bản.
+6) Chỉ trích xuất ENTITY có tên riêng và danh tính cụ thể được nêu trong tiêu đề, mô tả hoặc content_excerpt. Danh từ chung không có tên riêng không phải entity. Ví dụ: 'đường Võ Nguyên Giáp' => entity 'Đường Võ Nguyên Giáp'; 'siêu thị Big C' => entity 'Siêu thị Big C'; còn 'một con đường', 'siêu thị', 'một bệnh viện' thì không phải entity. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 15 entity/bài để không bỏ sót đối tượng có tên riêng; aliases phải là biến thể trực tiếp có căn cứ trong văn bản.
 7) Phân loại entity sự kiện bằng entity_type='EVENT' cho một sự kiện, giải đấu, vụ án hoặc diễn biến cụ thể có thể định danh. Người, tổ chức, sản phẩm và địa điểm có tên riêng là entity đối tượng theo đúng loại PERSON, ORG, PRODUCT hoặc LOCATION. Không dùng EVENT cho nhãn chủ đề rộng như 'chính trị' hay 'kinh tế'.
 8) KHÔNG tạo entity cho tên quốc gia, tỉnh/thành phố hoặc vùng hành chính lớn, ví dụ Việt Nam, Mỹ, Trung Quốc, Hà Nội, Đà Nẵng, TP.HCM, California, Tokyo. Những địa danh này chỉ là bối cảnh, không phải entity followable của Radar. Ngoại lệ quan trọng: tên đầy đủ của công trình/hạ tầng có chứa địa danh vẫn là LOCATION riêng. Cũng không tạo entity cho danh từ chung như "siêu thị", "người dân", "bệnh viện", "chùa" nếu không có tên riêng.
-9) ĐỊA ĐIỂM/CÔNG TRÌNH CỤ THỂ có tên riêng vẫn là entity type LOCATION. Ngoài di tích và điểm tham quan, BẮT BUỘC nhận diện đầy đủ tên công trình/hạ tầng được nêu trong bài: cao tốc, quốc lộ, tỉnh lộ, cầu, cầu vượt, hầm, tuyến đường sắt/metro, sân bay, cảng, nhà ga, khu công nghiệp, nhà máy, bệnh viện, trường đại học, sân vận động, công viên, chùa, đền, nhà thờ, vịnh và đảo. Ví dụ: 'Cao tốc Mỹ Thuận - Cần Thơ' là một LOCATION; 'Cầu vượt Võ Văn Kiệt' là một LOCATION riêng. Không chỉ trích xuất phần tên người 'Võ Văn Kiệt' thay cho tên công trình 'Cầu vượt Võ Văn Kiệt'. Chỉ tạo LOCATION khi có tên riêng thực sự theo sau loại công trình; các cụm chung như 'một cây cầu', 'cầu vượt đang thi công' không phải entity. Nếu cùng một đoạn chỉ nhắc 'Võ Văn Kiệt' để đặt tên công trình, không đồng thời tạo PERSON 'Võ Văn Kiệt' trừ khi bài cũng nói độc lập về người này.
+9) TÊN ENTITY PHẢI GIỮ ĐỦ CẤU TRÚC LOẠI + TÊN. Nếu bài có cả loại đối tượng và tên riêng, tên chuẩn phải bao gồm cả hai, không rút gọn mất loại: 'Đường Võ Nguyên Giáp', 'Cao tốc Mỹ Thuận - Cần Thơ', 'Cầu vượt Võ Văn Kiệt', 'Siêu thị Big C', 'Bệnh viện Bạch Mai', 'Tập đoàn Vingroup'. Lớp normalized key dùng đúng cấu trúc loại*_<tên>, ví dụ 'đường*_võ nguyên giáp', 'siêu thị*_big c'. Quy tắc tổng quát: mọi đối tượng có tên riêng nhận diện được đều là entity; nếu văn bản có loại đối tượng + tên riêng thì canonical name phải giữ toàn bộ cấu trúc (vd. 'đường Võ Nguyên Giáp', 'siêu thị Big C', 'cầu vượt Võ Văn Kiệt'), và key là '<loại>*_<tên>'. Bắt buộc nhận diện tên công trình/hạ tầng, cơ sở kinh doanh, tổ chức, phương tiện, sự kiện và sản phẩm cụ thể khi có proper name. Không tạo entity cho danh từ chung thiếu tên riêng. Nếu cùng một đoạn chỉ nhắc 'Võ Văn Kiệt' như một phần tên cầu, không đồng thời tạo PERSON 'Võ Văn Kiệt' trừ khi bài cũng nói độc lập về người này.
 10) Sự kiện cụ thể/giải đấu/vụ án có danh tính riêng (ví dụ World Cup 2026, một vụ án cụ thể) có thể là entity type EVENT; không nhầm nó với danh từ chung hay tên quốc gia.
 11) confidence là số 0..1. Nếu không chắc nhãn sự kiện, để null thay vì đoán. Không bịa diễn biến, ngày tháng hoặc quan hệ.
 
@@ -168,7 +169,7 @@ def _upsert_entity(conn, name: str, entity_type: str, aliases: list[str] | None 
     # canonical ID and follow target stable even when the source headline omits the first name.
     if entity_type == 'PERSON' and norm_name(canonical_name) == 'trump':
         canonical_name = 'Donald Trump'
-    normalized = norm_name(canonical_name)
+    normalized = entity_normalized_key(canonical_name, entity_type)
     if len(normalized) < 2 or len(normalized) > 180:
         return None
     if not should_track_entity(canonical_name, entity_type):
@@ -182,19 +183,36 @@ def _upsert_entity(conn, name: str, entity_type: str, aliases: list[str] | None 
         return None
     entity_id = int(resolved_row['entity_id']) if resolved_row else None
     if entity_id is not None and entity_type == 'PERSON' and resolved_row:
-        current_norm = norm_name(str(resolved_row.get('normalized_name') or resolved_row.get('canonical_name') or ''))
+        current_norm = norm_name(str(resolved_row.get('canonical_name') or ''))
         preferred = canonical_name
         preferred_norm = norm_name(preferred)
         # If a short-form-only row was created first (e.g. "Trump"), upgrade its display
         # name when a full person name is later seen, preserving entity_id and follows.
         if ' ' not in current_norm and ' ' in preferred_norm:
             with conn.cursor() as cur:
+                preferred_key = entity_normalized_key(preferred, entity_type)
                 cur.execute("""SELECT 1 FROM entities WHERE status='active' AND normalized_name=%s
                                AND entity_id<>%s AND entity_type IN ('PERSON','UNKNOWN') LIMIT 1""",
-                            (preferred_norm, entity_id))
+                            (preferred_key, entity_id))
                 if not cur.fetchone():
                     cur.execute("UPDATE entities SET canonical_name=%s,normalized_name=%s,updated_at=now() WHERE entity_id=%s",
-                                (preferred, preferred_norm, entity_id))
+                                (preferred, preferred_key, entity_id))
+                    resolved_row['canonical_name'] = preferred
+                    resolved_row['normalized_name'] = preferred_key
+    if entity_id is not None and resolved_row and named_head_and_tail(canonical_name):
+        old_display = norm_name(str(resolved_row.get('canonical_name') or ''))
+        supplied_norms = {norm_name(x) for x in supplied_aliases if norm_name(x)}
+        structured_key = entity_normalized_key(canonical_name, entity_type)
+        if old_display and old_display in supplied_norms and old_display != norm_name(canonical_name):
+            with conn.cursor() as cur:
+                cur.execute("""SELECT 1 FROM entities WHERE status='active' AND normalized_name=%s
+                               AND entity_type=%s AND entity_id<>%s LIMIT 1""",
+                            (structured_key, entity_type, entity_id))
+                if not cur.fetchone():
+                    cur.execute("UPDATE entities SET canonical_name=%s,normalized_name=%s,updated_at=now() WHERE entity_id=%s",
+                                (canonical_name, structured_key, entity_id))
+                    resolved_row['canonical_name'] = canonical_name
+                    resolved_row['normalized_name'] = structured_key
 
     with conn.cursor() as cur:
         if entity_id is None:
@@ -390,13 +408,13 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
         entity_type = entity.get('type') or entity.get('entity_type') or 'UNKNOWN'
         if entity_name and should_track_entity(str(entity_name), str(entity_type)):
             filtered_entities.append(entity)
-    entities = filtered_entities[:10]
+    entities = filtered_entities[:15]
     ai_result = {
         'category_topic_id': category_id,
         'existing_event_topic_id': existing_event_id,
         'event_topic_name': event_name or None,
         'event_confidence': confidence,
-        'entities': entities[:10],
+        'entities': entities[:15],
         'named_infrastructure_enriched': True,
     }
     with get_conn() as conn:
@@ -461,9 +479,9 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                 elif suppressed_person_names:
                     cur.execute("""DELETE FROM article_entities ae USING entities e
                                    WHERE ae.entity_id=e.entity_id AND ae.article_id=%s
-                                     AND upper(e.entity_type)='PERSON' AND e.normalized_name=ANY(%s)""",
-                                (article_id, list(suppressed_person_names)))
-                for entity in entities[:10]:
+                                     AND upper(e.entity_type)='PERSON' AND (norm_name(e.canonical_name)=ANY(%s) OR EXISTS (SELECT 1 FROM entity_aliases xa WHERE xa.entity_id=e.entity_id AND xa.normalized_alias=ANY(%s)))""",
+                                (article_id, list(suppressed_person_names), list(suppressed_person_names)))
+                for entity in entities[:15]:
                     if not isinstance(entity, dict):
                         continue
                     entity_name = entity.get('name') or entity.get('canonical_name')
@@ -501,7 +519,7 @@ def enrich_named_infrastructure_entities(limit: int = 800) -> dict[str, int]:
                            FROM news_articles
                            WHERE is_excluded=false
                              AND coalesce(published_at,collected_at) >= now()-interval '30 days'
-                             AND coalesce(ai_classification->>'named_infrastructure_enriched','false') <> 'true'
+                             AND coalesce(ai_classification->>'named_entity_rules_v073_enriched','false') <> 'true'
                            ORDER BY coalesce(published_at,collected_at) DESC
                            LIMIT %s""", (limit,))
         rows = cur.fetchall()
@@ -511,7 +529,7 @@ def enrich_named_infrastructure_entities(limit: int = 800) -> dict[str, int]:
         summary = row.get('summary') or ''
         content_text = row.get('content_text') or ''
         all_text = normalize_space('. '.join((title, summary, content_text)))
-        infra = extract_named_infrastructure_entities(all_text)[:10]
+        infra = extract_named_infrastructure_entities(all_text)[:15]
         suppress = set()
         for item in infra:
             suffix = item.get('person_suffix')
@@ -536,11 +554,11 @@ def enrich_named_infrastructure_entities(limit: int = 800) -> dict[str, int]:
                 if suppress:
                     cur.execute("""DELETE FROM article_entities ae USING entities e
                                    WHERE ae.entity_id=e.entity_id AND ae.article_id=%s
-                                     AND upper(e.entity_type)='PERSON' AND e.normalized_name=ANY(%s)""",
-                                (row['article_id'], list(suppress)))
+                                     AND upper(e.entity_type)='PERSON' AND (norm_name(e.canonical_name)=ANY(%s) OR EXISTS (SELECT 1 FROM entity_aliases xa WHERE xa.entity_id=e.entity_id AND xa.normalized_alias=ANY(%s)))""",
+                                (row['article_id'], list(suppress), list(suppress)))
                     changed = changed or cur.rowcount > 0
                 for item in infra:
-                    entity_id = _upsert_entity(conn, item['name'], 'LOCATION', item.get('aliases') or [])
+                    entity_id = _upsert_entity(conn, item['name'], item.get('type') or 'LOCATION', item.get('aliases') or [])
                     if not entity_id:
                         continue
                     cur.execute("SELECT 1 FROM article_entities WHERE article_id=%s AND entity_id=%s AND mention_text=%s",
@@ -555,7 +573,7 @@ def enrich_named_infrastructure_entities(limit: int = 800) -> dict[str, int]:
                         stats['entities_added'] += 1
                         changed = True
                     added_ids.append(entity_id)
-                    entity_conn_result.append({'name': item['name'], 'type': 'LOCATION', 'aliases': item.get('aliases') or []})
+                    entity_conn_result.append({'name': item['name'], 'type': item.get('type') or 'LOCATION', 'aliases': item.get('aliases') or []})
                 # Record the marker and the names in the JSON audit field; no schema migration required.
                 existing_by_norm = {
                     norm_name(str(e.get('name') or e.get('canonical_name') or '')): e
@@ -571,9 +589,9 @@ def enrich_named_infrastructure_entities(limit: int = 800) -> dict[str, int]:
                     entity for normalized_name, entity in existing_by_norm.items()
                     if normalized_name not in infrastructure_norms
                 ]
-                classification['entities'] = ordered_entities[:10]
-                classification['named_infrastructure_enriched'] = True
-                classification['named_infrastructure_enriched_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                classification['entities'] = ordered_entities[:15]
+                classification['named_entity_rules_v073_enriched'] = True
+                classification['named_entity_rules_v073_enriched_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                 cur.execute("""UPDATE news_articles SET ai_classification=%s::jsonb,updated_at=now()
                                WHERE article_id=%s""",
                             (json.dumps(classification, ensure_ascii=False), row['article_id']))

@@ -13,6 +13,7 @@ from .db import get_conn
 from .processing import (apply_cleaning_rules, canonicalize_url, clean_html, extract_entities,
                          hash_text, keyword_matches, norm_name, normalize_space, slugify, extract_event_signature)
 from .entity_rules import should_track_entity
+from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, add_entity_to_lookup,
                                 entity_name_variants, resolve_entity_in_lookup,
                                 resolve_entity_in_database, strip_person_title)
@@ -121,7 +122,7 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
             log.warning('Skipping ambiguous entity surface=%r type=%s article_id=%s', mention, typ, article_id)
             continue
         canonical = strip_person_title(mention) if str(typ or '').upper() == 'PERSON' else normalize_space(mention)
-        canonical_norm = norm_name(canonical)
+        canonical_norm = entity_normalized_key(canonical, typ)
         if not entity_id:
             with conn.cursor() as cur:
                 cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,description,origin)
@@ -135,18 +136,21 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
         else:
             count_known += 1
             row = entity_lookup['entities_by_id'][int(entity_id)]
-            current_norm = norm_name(str(row.get('normalized_name') or row.get('canonical_name') or ''))
+            current_norm = norm_name(str(row.get('canonical_name') or ''))
             if str(typ or '').upper() == 'PERSON' and ' ' not in current_norm and ' ' in canonical_norm:
                 with conn.cursor() as cur:
+                    canonical_key = entity_normalized_key(canonical, typ)
                     cur.execute("""select 1 from entities where status='active' and normalized_name=%s
-                                   and entity_id<>%s and entity_type in ('PERSON','UNKNOWN') limit 1""", (canonical_norm, entity_id))
+                                   and entity_id<>%s and entity_type in ('PERSON','UNKNOWN') limit 1""", (canonical_key, entity_id))
                     if not cur.fetchone():
                         cur.execute("update entities set canonical_name=%s,normalized_name=%s,updated_at=now() where entity_id=%s",
-                                    (canonical, canonical_norm, entity_id))
+                                    (canonical, canonical_key, entity_id))
                         entity_lookup['canonical_to_ids'][current_norm].discard(int(entity_id))
                         row['canonical_name'] = canonical
-                        row['normalized_name'] = canonical_norm
-                        entity_lookup['canonical_to_ids'][canonical_norm].add(int(entity_id))
+                        row['normalized_name'] = canonical_key
+                        entity_lookup['canonical_to_ids'][canonical_norm].discard(int(entity_id))
+                        entity_lookup['canonical_to_ids'][norm_name(canonical)].add(int(entity_id))
+                        entity_lookup['canonical_to_ids'][canonical_key].add(int(entity_id))
         # Store both observed and deterministically generated variants; do not collapse ambiguous aliases.
         variants = entity_name_variants(row.get('canonical_name') or canonical, typ) if fuzzy_resolved else entity_name_variants(canonical, typ)
         with conn.cursor() as cur:

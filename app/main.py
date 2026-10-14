@@ -15,13 +15,14 @@ from .db import get_conn, fetch_all, fetch_one
 from .security import (issue_token, require_admin, hash_password, verify_password, issue_user_token, require_user)
 from .processing import canonicalize_url, hash_text, norm_name, slugify
 from .entity_rules import should_track_entity
+from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
 from .timeline_groups import refresh_article_timeline_group
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.1',description='News Radar with canonical entity timelines and compact follow tags.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.3',description='News Radar with structured named entities and topic-plus-entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -114,7 +115,7 @@ def public_news_page(): return FileResponse('static/news.html')
 def public_following_page(): return FileResponse('static/following.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.7.1'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.7.3'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -804,31 +805,44 @@ def public_topic_timeline(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
 ):
-    """Public chronological view of articles assigned to one active event topic."""
+    """Open the same unified Timeline used by article anchors, seeded from an event topic."""
     topic = fetch_one("""SELECT topic_id, slug, name, description, topic_type
                          FROM topics WHERE topic_id=%s AND status='active'""", (topic_id,))
     if not topic or topic.get('topic_type') != 'event':
         raise HTTPException(status_code=404, detail='Event topic not found')
-    from_sql = " FROM article_topics at JOIN news_articles a ON a.article_id=at.article_id JOIN data_sources s ON s.source_id=a.source_id"
-    where_sql = " WHERE at.topic_id=%s AND a.is_excluded=false"
-    total_row = fetch_one("SELECT count(DISTINCT a.article_id)::int AS total" + from_sql + where_sql, (topic_id,))
-    total = int((total_row or {}).get('total', 0))
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = min(page, total_pages)
-    items = fetch_all("""SELECT a.article_id, a.title, a.url, a.author, a.language,
-                              left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
-                              a.published_at, a.collected_at,
-                              coalesce(a.published_at,a.collected_at) AS timeline_at,
-                              s.name AS source_name,
-                              coalesce((SELECT string_agg(e.canonical_name, ', ' ORDER BY e.canonical_name)
-                                        FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
-                                        WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities
-                       """ + from_sql + where_sql +
-                       " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
-                       (topic_id, page_size, (page - 1) * page_size))
-    return {'topic': topic, 'items': items,
-            'pagination': pagination_meta(page, page_size, total)}
-
+    anchor = fetch_one("""SELECT a.article_id FROM article_topics at
+                           JOIN news_articles a ON a.article_id=at.article_id
+                           WHERE at.topic_id=%s AND a.is_excluded=false
+                           ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
+                           LIMIT 1""", (topic_id,))
+    if not anchor:
+        return {'topic': topic, 'timeline_id': None, 'items': [], 'pagination': pagination_meta(1, page_size, 0)}
+    with get_conn() as conn:
+        group = refresh_article_timeline_group(conn, int(anchor['article_id']))
+        timeline_id = int(group['timeline_id'])
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*)::int AS total FROM news_articles WHERE timeline_id=%s AND is_excluded=false", (timeline_id,))
+            total = int(cur.fetchone()['total'])
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            actual_page = min(page, total_pages)
+            cur.execute("""SELECT a.article_id,a.title,a.url,a.author,a.language,
+                                  left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+                                  a.published_at,a.collected_at,
+                                  coalesce(a.published_at,a.collected_at) AS timeline_at,
+                                  s.name AS source_name,
+                                  coalesce((SELECT string_agg(DISTINCT e.canonical_name, ', ' ORDER BY e.canonical_name)
+                                            FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                                            WHERE ae.article_id=a.article_id AND e.status='active'),'') AS entities,
+                                  coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
+                                            FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                                            WHERE at.article_id=a.article_id AND t.status='active'),'') AS topics
+                           FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id
+                           WHERE a.timeline_id=%s AND a.is_excluded=false
+                           ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
+                           LIMIT %s OFFSET %s""", (timeline_id, page_size, (actual_page - 1) * page_size))
+            items = cur.fetchall()
+    return {'topic': topic, 'timeline_id': timeline_id, 'mode': 'topic_plus_entity', 'items': items,
+            'pagination': pagination_meta(actual_page, page_size, total)}
 
 
 
@@ -1001,7 +1015,7 @@ def patch_article_classifications(article_id: int, body: ArticleClassificationBo
                 raise HTTPException(status_code=422, detail=f"Entity '{name}' trùng với nhiều đối tượng. Hãy chọn tên chuẩn hoặc bổ sung ngữ cảnh.")
             entity = entity_lookup['entities_by_id'].get(int(entity_id)) if entity_id else None
             canonical_name = strip_person_title(name) if resolution_type == 'PERSON' else name
-            canonical_norm = norm_name(canonical_name)
+            canonical_norm = entity_normalized_key(canonical_name, resolution_type)
             if not entity:
                 cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,description,origin)
                                values(%s,%s,%s,'Entity được tạo/chỉnh trực tiếp từ phân loại bài báo.','manual')
@@ -1184,8 +1198,8 @@ def create_entity(body:EntityBody):
             raise HTTPException(status_code=409, detail='Tên entity này đang là bí danh của nhiều đối tượng. Hãy dùng tên chuẩn đầy đủ để tránh hợp nhất nhầm.')
         if resolved:
             entity_id = int(resolved['entity_id'])
-            current_norm = norm_name(str(resolved.get('normalized_name') or resolved.get('canonical_name') or ''))
-            canonical_norm = norm_name(canonical_name)
+            current_norm = norm_name(str(resolved.get('canonical_name') or ''))
+            canonical_norm = entity_normalized_key(canonical_name, entity_type)
             if entity_type == 'PERSON' and ' ' not in current_norm and ' ' in canonical_norm:
                 cur.execute("""select 1 from entities where status='active' and normalized_name=%s
                                and entity_id<>%s and entity_type in ('PERSON','UNKNOWN') limit 1""",(canonical_norm,entity_id))
@@ -1197,7 +1211,7 @@ def create_entity(body:EntityBody):
         else:
             cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,external_id,description,origin)
                            values(%s,%s,%s,%s,%s,'manual') returning *""",
-                        (canonical_name,norm_name(canonical_name),entity_type,body.external_id,body.description))
+                        (canonical_name,entity_normalized_key(canonical_name,entity_type),entity_type,body.external_id,body.description))
             row = cur.fetchone()
             entity_id = int(row['entity_id'])
         all_aliases = list(variants)
@@ -1221,9 +1235,9 @@ def patch_entity(entity_id:int,patch:dict=Body(...)):
     candidate_name = fields.get('canonical_name', current['canonical_name'])
     if candidate_type == 'PERSON':
         candidate_name = strip_person_title(candidate_name)
-        if candidate_name != current['canonical_name'] or 'canonical_name' in fields:
-            fields['canonical_name'] = candidate_name
-            fields['normalized_name'] = norm_name(candidate_name)
+    if 'canonical_name' in fields or 'entity_type' in fields:
+        fields['canonical_name'] = candidate_name
+        fields['normalized_name'] = entity_normalized_key(candidate_name, candidate_type)
     if 'entity_type' in fields:
         fields['entity_type'] = candidate_type
     candidate_status = fields.get('status', current['status'])
@@ -1265,8 +1279,8 @@ def approve_entity(candidate_id:int):
             raise HTTPException(status_code=409, detail='Candidate trùng bí danh của nhiều entity. Hãy chuẩn hóa thủ công trước khi duyệt.')
         if resolved:
             entity_id = int(resolved['entity_id'])
-            current_norm = norm_name(str(resolved.get('normalized_name') or resolved.get('canonical_name') or ''))
-            canonical_norm = norm_name(candidate_name)
+            current_norm = norm_name(str(resolved.get('canonical_name') or ''))
+            canonical_norm = entity_normalized_key(candidate_name, candidate_type)
             if candidate_type == 'PERSON' and ' ' not in current_norm and ' ' in canonical_norm:
                 cur.execute("""select 1 from entities where status='active' and normalized_name=%s
                                and entity_id<>%s and entity_type in ('PERSON','UNKNOWN') limit 1""",(canonical_norm,entity_id))
@@ -1275,7 +1289,7 @@ def approve_entity(candidate_id:int):
         else:
             cur.execute("""insert into entities(canonical_name,normalized_name,entity_type,origin) values(%s,%s,%s,'discovered')
                            on conflict(normalized_name,entity_type) do update set canonical_name=excluded.canonical_name,updated_at=now()
-                           returning entity_id""",(candidate_name,norm_name(candidate_name),candidate_type))
+                           returning entity_id""",(candidate_name,entity_normalized_key(candidate_name,candidate_type),candidate_type))
             entity_id=int(cur.fetchone()['entity_id'])
         for alias in entity_name_variants(candidate_name, candidate_type):
             alias_norm = norm_name(alias)
