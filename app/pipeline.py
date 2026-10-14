@@ -13,6 +13,9 @@ from .db import get_conn
 from .processing import (apply_cleaning_rules, canonicalize_url, clean_html, extract_entities,
                          hash_text, keyword_matches, norm_name, normalize_space, slugify, extract_event_signature)
 from .entity_rules import should_track_entity
+from .entity_resolution import (build_entity_lookup, add_entity_to_lookup,
+                                entity_name_variants, resolve_entity_in_lookup,
+                                strip_person_title)
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
