@@ -46,7 +46,7 @@ def refresh_article_timeline_group(conn, article_id: int) -> dict[str, Any]:
                       AND target.status='active'
                       AND target.entity_type=source_entity.entity_type
                       AND target.entity_id<>source_entity.entity_id
-                      AND target.normalized_name LIKE '% %'
+                      AND target.normalized_name LIKE '%% %%'
                 ) alias_match ON true
                 WHERE source_entity.status='active'
             ),
