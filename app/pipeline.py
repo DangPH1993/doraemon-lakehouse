@@ -675,7 +675,7 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         sources=[s for s in sources if s['source_id'] in source_ids]
     totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'raw_rows_purged':0,'source_errors':[]}
     log.info('Pipeline run %s started: sources=%s; active_topics=%s; active_entity_cache=%s; lookback_hours=%s; backfill_batch=%s',
-             run_id, len(sources), len(active_topics), len(entity_lookup['known_map']), settings.pipeline_lookback_hours,
+             run_id, len(sources), len(active_topics), len(entity_lookup['entities_by_id']), settings.pipeline_lookback_hours,
              settings.event_topic_backfill_batch_size)
     try:
         for source in sources:
