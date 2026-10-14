@@ -88,6 +88,7 @@ create table if not exists news_articles (
   ai_classified_at timestamptz,
   ai_classification jsonb not null default '{}'::jsonb,
   ai_classification_error text,
+  timeline_id bigint,
   unique(source_id, canonical_url)
 );
 create index if not exists idx_news_articles_published on news_articles(published_at desc nulls last);
@@ -95,6 +96,7 @@ create index if not exists idx_news_articles_collected on news_articles(collecte
 create index if not exists idx_news_articles_headline_hash on news_articles(headline_hash);
 create index if not exists idx_news_articles_source on news_articles(source_id, collected_at desc);
 create index if not exists idx_news_articles_ai_pending on news_articles (coalesce(published_at, collected_at) desc) where ai_classified_at is null and is_excluded=false;
+create index if not exists idx_news_articles_timeline_id on news_articles (timeline_id, published_at desc, article_id desc);
 
 create table if not exists topics (
   topic_id bigserial primary key,
@@ -305,6 +307,7 @@ insert into data_model_catalog(table_name,model_type,description,grain) values
  ('article_topics','bridge','Article-to-topic relationship with confidence and method','One record per article + topic'),
  ('article_entities','bridge','Article-to-entity mentions, automatically normalized by GenAI','One record per article + entity + mention text'),
  ('news_articles.ai_classification','operational','GenAI event/topic/entity classification result and processing state','One classification result per article'),
+ ('news_articles.timeline_id','operational','Canonical entity-defined Timeline ID; event entity takes precedence, otherwise a transitive 48-hour shared-entity chain','One assigned Timeline ID per article'),
  ('fact_news_article','fact','Article-level analytical metrics','One record per article'),
  ('fact_topic_daily','fact','Daily article counts by topic and source','One record per day + topic + source'),
  ('fact_topic_trending','fact','Specific event-topic heat ranking by day, week and month with source coverage and period-over-period change','One record per period type + period start + event topic'),
