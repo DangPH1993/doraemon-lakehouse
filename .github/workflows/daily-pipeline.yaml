@@ -1,9 +1,9 @@
-
 name: Mini Lakehouse Daily Pipeline
 
 on:
   schedule:
-    - cron: "35 * * * *"
+    - cron: "47 * * * *" # Every hour at minute 47
+      timezone: "Asia/Ho_Chi_Minh"
   workflow_dispatch:
 
 permissions:
@@ -17,20 +17,25 @@ jobs:
   collect-clean-model:
     runs-on: ubuntu-latest
     timeout-minutes: 35
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
+      - name: Show workflow trigger and time
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_EXPRESSION: ${{ github.event.schedule || 'manual' }}
+        run: |
+          echo "Workflow event: $EVENT_NAME"
+          echo "Configured schedule: $SCHEDULE_EXPRESSION"
+          date -u
+          TZ=Asia/Ho_Chi_Minh date
       - name: Run ingestion, cleaning, FACT refresh and optional Telegram digest
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -52,8 +57,5 @@ jobs:
           REQUEST_TIMEOUT_SECONDS: "25"
           TIMEZONE: Asia/Ho_Chi_Minh
         run: |
-          if [ -z "$DATABASE_URL" ]; then
-            echo "Missing GitHub secret DATABASE_URL"
-            exit 1
-          fi
+          if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
           python -m app.pipeline
