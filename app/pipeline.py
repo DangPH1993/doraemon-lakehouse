@@ -15,7 +15,8 @@ from .processing import (apply_cleaning_rules, canonicalize_url, clean_html, ext
 from .entity_rules import should_track_entity
 from .entity_resolution import (build_entity_lookup, add_entity_to_lookup,
                                 entity_name_variants, resolve_entity_in_lookup,
-                                strip_person_title)
+                                resolve_entity_in_database, strip_person_title)
+from .timeline_groups import refresh_article_timeline_group
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -107,6 +108,15 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
         if len(normalized) < 2 or not should_track_entity(mention, typ):
             continue
         entity_id, ambiguous = resolve_entity_in_lookup(mention, typ, entity_lookup)
+        fuzzy_resolved = False
+        if not entity_id and not ambiguous:
+            db_match, db_ambiguous = resolve_entity_in_database(conn, mention, typ)
+            if db_ambiguous:
+                ambiguous = True
+            elif db_match:
+                entity_id = int(db_match['entity_id'])
+                fuzzy_resolved = db_match.get('_resolution_method') == 'fuzzy'
+                add_entity_to_lookup(entity_lookup, db_match, entity_name_variants(db_match.get('canonical_name') or mention, typ))
         if ambiguous:
             log.warning('Skipping ambiguous entity surface=%r type=%s article_id=%s', mention, typ, article_id)
             continue
@@ -138,7 +148,7 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
                         row['normalized_name'] = canonical_norm
                         entity_lookup['canonical_to_ids'][canonical_norm].add(int(entity_id))
         # Store both observed and deterministically generated variants; do not collapse ambiguous aliases.
-        variants = entity_name_variants(canonical, typ)
+        variants = entity_name_variants(row.get('canonical_name') or canonical, typ) if fuzzy_resolved else entity_name_variants(canonical, typ)
         with conn.cursor() as cur:
             for alias in variants:
                 alias_norm = norm_name(alias)
@@ -150,6 +160,7 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
         with conn.cursor() as cur:
             cur.execute("""insert into article_entities(article_id,entity_id,mention_text,confidence)
                            values(%s,%s,%s,%s) on conflict do nothing""", (article_id, entity_id, mention, confidence))
+    refresh_article_timeline_group(conn, article_id)
     return len(found), count_known
 
 def apply_topics(conn, article_id, title, summary, topic_rows=None):
@@ -350,6 +361,10 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
                 result['skipped_existing'] += 1
                 continue
             article_id = inserted_row['article_id']
+            # New rows begin as their own Timeline; GenAI/fallback entity resolution may merge
+            # them into a shared entity-defined group later in this pipeline run.
+            with conn.cursor() as cur:
+                cur.execute("UPDATE news_articles SET timeline_id=article_id WHERE article_id=%s AND timeline_id IS NULL", (article_id,))
             result['inserted'] += 1
             if len(title) < 15:
                 add_quality_issue(conn, article_id, source['source_id'], 'short_title', 'warning',

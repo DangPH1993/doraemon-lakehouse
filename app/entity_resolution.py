@@ -58,9 +58,14 @@ def entity_name_variants(name: str, entity_type: str = 'UNKNOWN', aliases: Itera
         if value and norm_name(value) and all(norm_name(value) != norm_name(old) for old in candidates):
             candidates.append(value)
 
-    add(primary)
     if typ == 'PERSON':
         stripped = strip_person_title(primary)
+        # In Vietnamese/English news headlines, bare “Trump” is a common editorial
+        # reference to Donald Trump. Resolve this explicit high-frequency alias before
+        # testing the short surface form, which may otherwise collide with family names.
+        if norm_name(stripped) == 'trump':
+            add('Donald Trump')
+        add(primary)
         add(stripped)
         for alias in supplied_aliases:
             alias = normalize_space(str(alias or '')).strip(' ,.;:-')
@@ -75,6 +80,7 @@ def entity_name_variants(name: str, entity_type: str = 'UNKNOWN', aliases: Itera
             if len(tokens) >= 2 and tokens[-1].casefold().strip('.') not in _SUFFIXES_NOT_NAMES and len(tokens[-1]) >= 3:
                 add(tokens[-1])
     else:
+        add(primary)
         for alias in supplied_aliases:
             add(alias)
     return candidates[:30]
@@ -175,11 +181,77 @@ def resolve_entity_in_database(conn, name: str, entity_type: str, aliases: Itera
     for rank in sorted(by_rank):
         candidates = by_rank[rank]
         if len(candidates) == 1:
-            return next(iter(candidates.values())), False
+            row = dict(next(iter(candidates.values())))
+            row['_resolution_method'] = 'exact'
+            return row, False
         if len(candidates) > 1:
             variant_norm = normalized_variants[rank - 1] if 0 < rank <= len(normalized_variants) else ''
             if variant_norm in {input_norm, preferred_norm} or ' ' not in preferred_norm:
                 return None, True
             # A generated short alias is ambiguous, but the full multi-token name may be new.
             continue
+
+    # Approximate lookup is a fallback only after canonical-name/alias matching fails.
+    # pg_trgm indexes keep this viable for large entity catalogs; short ambiguous names
+    # (e.g. "Trump") are deliberately excluded from fuzzy matching.
+    fuzzy_variants = list(dict.fromkeys(
+        value for value in normalized_variants
+        if len(value) >= 8 and (' ' in value or len(value) >= 10)
+    ))
+    if fuzzy_variants:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT quote_ident(n.nspname) AS schema_ident
+                           FROM pg_extension ext JOIN pg_namespace n ON n.oid=ext.extnamespace
+                           WHERE ext.extname='pg_trgm' LIMIT 1""")
+            extension = cur.fetchone()
+        if extension:
+            schema_ident = str(extension['schema_ident'])
+            similarity_fn = f'{schema_ident}.similarity'
+            trigram_operator = f'OPERATOR({schema_ident}.%%)'
+            threshold = 0.78 if any(' ' in value for value in fuzzy_variants) else 0.90
+            with conn.cursor() as cur:
+                cur.execute(f"""WITH variants AS (
+                                  SELECT value AS variant_name
+                                  FROM unnest(%s::text[]) AS v(value)
+                                ), candidate_scores AS (
+                                  SELECT e.entity_id,e.canonical_name,e.normalized_name,e.entity_type,e.status,
+                                         max(greatest(
+                                           {similarity_fn}(e.normalized_name,v.variant_name),
+                                           coalesce(alias_scores.alias_score,0)
+                                         ))::float AS score
+                                  FROM entities e
+                                  CROSS JOIN variants v
+                                  LEFT JOIN LATERAL (
+                                    SELECT max({similarity_fn}(a.normalized_alias,v.variant_name)) AS alias_score
+                                    FROM entity_aliases a WHERE a.entity_id=e.entity_id
+                                  ) alias_scores ON true
+                                  WHERE e.status='active'
+                                    AND (%s='UNKNOWN' OR e.entity_type=%s OR e.entity_type='UNKNOWN')
+                                    AND (
+                                      e.normalized_name {trigram_operator} v.variant_name
+                                      OR EXISTS (
+                                        SELECT 1 FROM entity_aliases a
+                                        WHERE a.entity_id=e.entity_id
+                                          AND a.normalized_alias {trigram_operator} v.variant_name
+                                      )
+                                    )
+                                  GROUP BY e.entity_id,e.canonical_name,e.normalized_name,e.entity_type,e.status
+                                )
+                                SELECT entity_id,canonical_name,normalized_name,entity_type,status,score
+                                FROM candidate_scores
+                                WHERE score >= %s
+                                ORDER BY score DESC, entity_id
+                                LIMIT 3""",
+                            (fuzzy_variants, typ, typ, threshold))
+                fuzzy_matches = cur.fetchall()
+            if fuzzy_matches:
+                top = dict(fuzzy_matches[0])
+                second_score = float(fuzzy_matches[1]['score']) if len(fuzzy_matches) > 1 else 0.0
+                top_score = float(top['score'])
+                # Similar candidates are ambiguous; require a clear winner to avoid false merges.
+                if top_score >= threshold and top_score - second_score >= 0.06:
+                    top['_resolution_method'] = 'fuzzy'
+                    top['_similarity'] = top_score
+                    return top, False
+                return None, True
     return None, False

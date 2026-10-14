@@ -18,6 +18,7 @@ from .db import get_conn
 from .processing import hash_text, norm_name, normalize_space, slugify
 from .entity_rules import should_track_entity
 from .entity_resolution import entity_name_variants, resolve_entity_in_database
+from .timeline_groups import refresh_article_timeline_group
 
 log = logging.getLogger('mini-lakehouse.openai')
 OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions'
@@ -55,16 +56,16 @@ Phân tích TỪNG bài riêng biệt, trả về CHỈ JSON hợp lệ, không 
 
 Mục tiêu:
 1) Chọn đúng 1 category_topic_id trong danh sách category được cung cấp, hoặc null nếu không phù hợp.
-2) Với mỗi bài, đặt event_topic_name là tên ngắn, cụ thể cho sự kiện/hành động đang xảy ra, nêu chủ thể + hành động + đối tượng/địa điểm khi có thể. Không dùng tên quá rộng kiểu 'Chính trị', 'Quốc phòng', 'Tình hình Iran'. Với tin nền, danh sách, lịch, dự báo hoặc không đủ bằng chứng thì event_topic_name=null.
-3) existing_event_topic_id chỉ được dùng khi có bằng chứng rõ rằng bài nói về CÙNG VỤ VIỆC CỤ THỂ, cùng hành động/sự việc chính, với topic hiện có. So sánh event name và sample_titles. Cùng danh mục, cùng ngành, cùng loại tội phạm, cùng quốc gia, cùng tổ chức hay cùng cụm từ KHÔNG có nghĩa là cùng sự kiện. Một vụ án về ma túy, vụ lừa đảo ngân hàng và vụ chuyển tiền trái phép ra nước ngoài là ba sự kiện khác nhau kể cả khi cùng xuất hiện trong mục pháp luật.
-4) Khi so khớp, phải so sánh cả hành động chính, đối tượng/mục tiêu, người/tổ chức liên quan, địa điểm và dấu hiệu định danh vụ việc. Nếu hành động chính khác nhau (ví dụ lừa đảo vs tuồn/chuyển tiền, đe dọa tấn công vs tấn công thực tế, đàm phán vs không kích), hoặc là các vụ án/đối tượng/số tiền khác nhau, KHÔNG chọn existing_event_topic_id. Khi không chắc, tạo event_topic_name riêng hoặc null; ưu tiên tách nhầm hơn gộp nhầm.
-5) Luôn trả event_topic_name đề xuất cho bài nếu bài có thể theo dõi như một sự kiện, kể cả khi đề xuất dùng existing_event_topic_id. Nếu chọn sự kiện có sẵn, event_topic_name phải lặp lại chính xác tên chuẩn của sự kiện đó. Điều này giúp hệ thống kiểm chứng kết quả trước khi nối bài.
-6) Đọc các bài trong batch. Chỉ gộp hai bài khi chúng nói về cùng một vụ việc cụ thể, không chỉ có từ khóa/entity trùng nhau. Không gộp hai vụ án riêng biệt, hai động thái chính sách riêng biệt hay hai diễn biến quân sự khác nhau.
-7) Chỉ trích xuất entity là đối tượng CỤ THỂ có danh tính riêng, thực sự xuất hiện trong tiêu đề/mô tả; không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases phải là biến thể trực tiếp được thể hiện trong văn bản.
+2) event_topic_name chỉ là NHÃN HIỂN THỊ ngắn gọn cho người đọc, không phải định danh timeline. Không dùng tên topic hoặc động từ chính để quyết định bài nào chung timeline. Không dùng tên quá rộng kiểu "chính trị", "kinh tế"; chỉ dùng nhãn mô tả CÙNG VỤ VIỆC CỤ THỂ. Nếu không chắc nhãn hiển thị, ưu tiên tách nhãn hơn gộp nhãn; điều này không ảnh hưởng việc các bài thuộc cùng Timeline theo entity ID. Nếu bài không có nhãn sự kiện đáng tin cậy thì event_topic_name=null.
+3) existing_event_topic_id chỉ giúp tái sử dụng nhãn hiển thị tương đương để tránh tạo quá nhiều tên nhãn gần giống nhau. Chỉ chọn nếu mô tả CÙNG VỤ VIỆC CỤ THỂ. Không dùng trường này làm điều kiện liên kết timeline; backend sẽ xác định timeline bằng entity_id chuẩn và thời gian xuất bản.
+4) Ưu tiên phân loại entity chính xác hơn đặt tên topic cầu kỳ. Với mỗi entity cụ thể, cung cấp tên chuẩn dễ nhận biết, các bí danh có bằng chứng trong tiêu đề/mô tả và đúng loại entity.
+5) Không bắt buộc tìm động từ chính hoặc nhóm hành động để ghép timeline. Cách ghép timeline được xử lý riêng bằng entity sự kiện hoặc entity đối tượng và cửa sổ thời gian trong backend.
+6) Chỉ trích xuất entity là đối tượng CỤ THỂ có danh tính riêng, thực sự xuất hiện trong tiêu đề/mô tả; không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases phải là biến thể trực tiếp được thể hiện trong văn bản.
+7) Phân loại entity sự kiện bằng entity_type='EVENT' cho một sự kiện, giải đấu, vụ án hoặc diễn biến cụ thể có thể định danh. Người, tổ chức, sản phẩm và địa điểm có tên riêng là entity đối tượng theo đúng loại PERSON, ORG, PRODUCT hoặc LOCATION. Không dùng EVENT cho nhãn chủ đề rộng như 'chính trị' hay 'kinh tế'.
 8) KHÔNG tạo entity cho tên quốc gia, tỉnh/thành phố hoặc vùng hành chính lớn, ví dụ Việt Nam, Mỹ, Trung Quốc, Hà Nội, Đà Nẵng, TP.HCM, California, Tokyo. Những địa danh này chỉ là bối cảnh, không phải entity followable của Radar. Cũng không tạo entity cho danh từ chung như "siêu thị", "người dân", "bệnh viện", "chùa" nếu không có tên riêng.
 9) ĐỊA ĐIỂM CỤ THỂ có tên riêng vẫn là entity type LOCATION, ví dụ Chùa Hương, Chùa Bái Đính, Vịnh Hạ Long, Sân vận động Mỹ Đình, Bệnh viện Bạch Mai, Nhà thờ Đức Bà. Phân biệt địa điểm có tên riêng với tỉnh/thành phố chứa địa điểm đó.
 10) Sự kiện cụ thể/giải đấu/vụ án có danh tính riêng (ví dụ World Cup 2026, một vụ án cụ thể) có thể là entity type EVENT; không nhầm nó với danh từ chung hay tên quốc gia.
-11) confidence là số 0..1. Nếu không chắc sự kiện, để null thay vì đoán. Không bịa diễn biến, ngày tháng hoặc quan hệ.
+11) confidence là số 0..1. Nếu không chắc nhãn sự kiện, để null thay vì đoán. Không bịa diễn biến, ngày tháng hoặc quan hệ.
 
 Định dạng JSON bắt buộc:
 {{"results":[{{"article_id":123,"category_topic_id":1,"existing_event_topic_id":null,"event_topic_name":"OpenAI ra mắt mô hình AI","event_confidence":0.91,"entities":[{{"name":"OpenAI","type":"ORG","aliases":[]}}]}}]}}
@@ -160,6 +161,10 @@ def _upsert_entity(conn, name: str, entity_type: str, aliases: list[str] | None 
     if entity_type not in ALLOWED_ENTITY_TYPES:
         entity_type = 'UNKNOWN'
     canonical_name = strip_title_for_entity(name, entity_type)
+    # In this Radar, bare “Trump” in PERSON context means Donald Trump; keep the
+    # canonical ID and follow target stable even when the source headline omits the first name.
+    if entity_type == 'PERSON' and norm_name(canonical_name) == 'trump':
+        canonical_name = 'Donald Trump'
     normalized = norm_name(canonical_name)
     if len(normalized) < 2 or len(normalized) > 180:
         return None
@@ -197,7 +202,12 @@ def _upsert_entity(conn, name: str, entity_type: str, aliases: list[str] | None 
                            returning entity_id""", (canonical_name, normalized, entity_type))
             entity_id = int(cur.fetchone()['entity_id'])
 
-        all_aliases = entity_name_variants(name, entity_type, supplied_aliases)
+        if resolved_row and resolved_row.get('_resolution_method') == 'fuzzy':
+            # A fuzzy match may be a spelling variation, not a real alias; only add
+            # established canonical variants rather than persisting an accidental typo.
+            all_aliases = entity_name_variants(canonical_name, entity_type)
+        else:
+            all_aliases = entity_name_variants(name, entity_type, supplied_aliases)
         for alias in all_aliases[:30]:
             alias_norm = norm_name(alias)
             if not alias_norm:
@@ -459,6 +469,8 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                 cur.execute("""update news_articles set ai_classified_at=now(),ai_classification=%s::jsonb,
                                ai_classification_error=null,event_topic_scanned_at=now(),updated_at=now()
                                where article_id=%s""", (json.dumps(ai_result, ensure_ascii=False), article_id))
+            # Persist the entity-defined Timeline ID after all canonical entities were attached.
+            refresh_article_timeline_group(conn, article_id)
     return True
 
 

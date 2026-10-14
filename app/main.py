@@ -17,10 +17,11 @@ from .processing import canonicalize_url, hash_text, norm_name, slugify
 from .entity_rules import should_track_entity
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
+from .timeline_groups import refresh_article_timeline_group
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.9',description='News Radar with global archive search, topic/entity timelines, grouped personal feed and Telegram notifications.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.0',description='News Radar with canonical entity timelines and compact follow tags.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -113,7 +114,7 @@ def public_news_page(): return FileResponse('static/news.html')
 def public_following_page(): return FileResponse('static/following.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.6.7'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.7.0'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -504,7 +505,14 @@ def public_hot_topics(
                               t.description, f.period_type, f.period_start,
                               f.article_count, f.source_count,
                               f.previous_article_count, f.growth_pct,
-                              f.hotness_score, f.rank_position
+                              f.hotness_score, f.rank_position,
+                              (SELECT at.article_id
+                               FROM article_topics at
+                               JOIN news_articles anchor ON anchor.article_id=at.article_id
+                               WHERE at.topic_id=t.topic_id AND anchor.is_excluded=false
+                               ORDER BY coalesce(anchor.published_at,anchor.collected_at) DESC,
+                                        anchor.article_id DESC
+                               LIMIT 1) AS anchor_article_id
                        FROM fact_topic_trending f
                        JOIN topics t ON t.topic_id=f.topic_id
                        WHERE f.period_type=%s AND f.period_start=%s
@@ -590,9 +598,37 @@ def public_daily_articles(
                               coalesce((SELECT json_agg(json_build_object('id', t.topic_id, 'name', t.name) ORDER BY t.name)
                                         FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
                                         WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topic_refs,
-                              coalesce((SELECT json_agg(json_build_object('id', e.entity_id, 'name', e.canonical_name) ORDER BY e.canonical_name)
-                                        FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
-                                        WHERE ae.article_id=a.article_id AND e.status='active'), '[]'::json) AS entity_refs
+                              coalesce((SELECT json_agg(json_build_object('id', resolved.entity_id, 'name', resolved.canonical_name,
+                                                                      'type', resolved.entity_type) ORDER BY resolved.canonical_name)
+                                        FROM (
+                                          SELECT DISTINCT canonical.entity_id, canonical.canonical_name, canonical.entity_type
+                                          FROM article_entities ae
+                                          JOIN entities source_entity ON source_entity.entity_id=ae.entity_id AND source_entity.status='active'
+                                          LEFT JOIN LATERAL (
+                                            SELECT min(target.entity_id) AS target_id,
+                                                   min(target.canonical_name) AS target_name,
+                                                   count(DISTINCT target.entity_id)::int AS target_count
+                                            FROM entity_aliases alias_row
+                                            JOIN entities target ON target.entity_id=alias_row.entity_id
+                                            WHERE alias_row.normalized_alias=source_entity.normalized_name
+                                              AND target.status='active'
+                                              AND target.entity_type=source_entity.entity_type
+                                              AND target.entity_id<>source_entity.entity_id
+                                              AND target.normalized_name LIKE '% %'
+                                          ) alias_match ON true
+                                          JOIN entities canonical ON canonical.entity_id = CASE
+                                            WHEN source_entity.entity_type='PERSON'
+                                             AND source_entity.normalized_name='trump'
+                                             AND EXISTS (SELECT 1 FROM entities donald
+                                                          WHERE donald.status='active' AND donald.entity_type='PERSON'
+                                                            AND donald.normalized_name='donald trump')
+                                              THEN (SELECT donald.entity_id FROM entities donald
+                                                    WHERE donald.status='active' AND donald.entity_type='PERSON'
+                                                      AND donald.normalized_name='donald trump' LIMIT 1)
+                                            WHEN alias_match.target_count=1 THEN alias_match.target_id
+                                            ELSE source_entity.entity_id END
+                                          WHERE ae.article_id=a.article_id
+                                        ) resolved), '[]'::json) AS entity_refs
                        """ + from_sql + where_sql +
                        " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
                        vals + [page_size, (page - 1) * page_size])
@@ -704,6 +740,62 @@ def user_news_feed(user: dict = Depends(require_user)):
                         reverse=True)
     return {'groups': groups, 'items': flat_items, 'count': grouped_count,
             'limit_per_group': 5}
+
+
+@app.get('/api/public/news/articles/{article_id}/timeline')
+def public_article_timeline(
+    article_id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=50),
+):
+    """Open Timeline using entity rules; topic labels are display-only.
+
+    EVENT entity: all articles sharing the same canonical event entity, regardless of time.
+    No EVENT entity: transitive chain of articles sharing any canonical entity where adjacent
+    publication timestamps differ by no more than 48 hours.
+    """
+    anchor = fetch_one("""SELECT a.article_id, a.title, a.published_at, a.collected_at,
+                               coalesce(a.published_at,a.collected_at) AS timeline_at
+                        FROM news_articles a
+                        WHERE a.article_id=%s AND a.is_excluded=false""", (article_id,))
+    if not anchor:
+        raise HTTPException(status_code=404, detail='Article not found')
+
+    # Recompute the component lazily when a Timeline is opened. This also repairs old
+    # article group IDs without requiring a full historical GenAI reclassification.
+    with get_conn() as conn:
+        group = refresh_article_timeline_group(conn, article_id)
+        timeline_id = int(group['timeline_id'])
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*)::int AS total FROM news_articles WHERE timeline_id=%s AND is_excluded=false", (timeline_id,))
+            total = int(cur.fetchone()['total'])
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            actual_page = min(page, total_pages)
+            cur.execute("""SELECT a.article_id, a.title, a.url, a.author, a.language,
+                                  left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+                                  a.published_at, a.collected_at,
+                                  coalesce(a.published_at,a.collected_at) AS timeline_at,
+                                  s.name AS source_name,
+                                  coalesce((SELECT string_agg(DISTINCT e.canonical_name, ', ' ORDER BY e.canonical_name)
+                                            FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                                            WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities,
+                                  coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
+                                            FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                                            WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
+                           FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id
+                           WHERE a.timeline_id=%s AND a.is_excluded=false
+                           ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
+                           LIMIT %s OFFSET %s""", (timeline_id, page_size, (actual_page - 1) * page_size))
+            items = cur.fetchall()
+    mode_name = 'event_entity' if group['has_event'] else 'entity_48h'
+    return {
+        'anchor': anchor,
+        'timeline_id': timeline_id,
+        'timeline_name': group.get('timeline_name') or anchor['title'],
+        'mode': mode_name,
+        'items': items,
+        'pagination': pagination_meta(actual_page, page_size, total),
+    }
 
 
 @app.get('/api/public/news/topics/{topic_id}/timeline')
@@ -937,6 +1029,7 @@ def patch_article_classifications(article_id: int, body: ArticleClassificationBo
                            values(%s,%s,%s,1.0) on conflict do nothing""", (article_id,entity_id,mention))
         cur.execute("""update news_articles set ai_classified_at=now(),ai_classification='{"manual_override":true}'::jsonb,
                        ai_classification_error=null,event_topic_scanned_at=now(),updated_at=now() where article_id=%s""", (article_id,))
+        refresh_article_timeline_group(conn, article_id)
     try:
         from .pipeline import refresh_facts
         refresh_facts()
