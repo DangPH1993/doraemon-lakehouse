@@ -614,7 +614,7 @@ def public_daily_articles(
                                               AND target.status='active'
                                               AND target.entity_type=source_entity.entity_type
                                               AND target.entity_id<>source_entity.entity_id
-                                              AND target.normalized_name LIKE '% %'
+                                              AND target.normalized_name LIKE '%% %%'
                                           ) alias_match ON true
                                           JOIN entities canonical ON canonical.entity_id = CASE
                                             WHEN source_entity.entity_type='PERSON'
