@@ -722,6 +722,22 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
             totals['event_topics_backfilled']=backfill_unscanned_event_topics()
             log.info('Stage rule-based event backfill complete: assigned=%s; elapsed=%.1fs', totals['event_topics_backfilled'], time.monotonic()-stage_started)
             log.warning('OPENAI_API_KEY is not set; running deterministic event fallback. No topic candidate approval queue is used.')
+        # Backfill high-precision named infrastructure entities on recent already-classified
+        # articles without re-calling GenAI. This repairs cases such as a named highway/bridge
+        # being represented only by a PERSON mention (e.g. "Cầu vượt Võ Văn Kiệt").
+        stage_started = time.monotonic()
+        try:
+            from .genai_events import enrich_named_infrastructure_entities
+            infrastructure_stats = enrich_named_infrastructure_entities(limit=800)
+            totals['named_infrastructure_entities_added'] = infrastructure_stats['entities_added']
+            totals['named_infrastructure_articles_changed'] = infrastructure_stats['articles_changed']
+            totals['named_infrastructure_scan_failed'] = infrastructure_stats['failed']
+            log.info('Stage named infrastructure entity enrichment complete: %s; elapsed=%.1fs',
+                     infrastructure_stats, time.monotonic()-stage_started)
+        except Exception as exc:
+            # Do not fail RSS ingestion because this supplementary enrichment needs repair.
+            log.exception('Named infrastructure entity enrichment failed non-blocking: %s', exc)
+            totals['named_infrastructure_enrichment_error'] = f'{type(exc).__name__}: {str(exc)[:240]}'
         # Event topics are normalized automatically by GenAI; the old TF-IDF approval queue
         # is deliberately not run because the admin no longer needs a moderation step.
         totals['topic_candidates'] = 0

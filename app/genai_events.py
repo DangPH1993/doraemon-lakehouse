@@ -17,6 +17,9 @@ from .config import settings
 from .db import get_conn
 from .processing import hash_text, norm_name, normalize_space, slugify
 from .entity_rules import should_track_entity
+from .named_infrastructure import (
+    augment_entities_with_named_infrastructure, extract_named_infrastructure_entities,
+)
 from .entity_resolution import entity_name_variants, resolve_entity_in_database
 from .timeline_groups import refresh_article_timeline_group
 
@@ -60,10 +63,10 @@ Mục tiêu:
 3) existing_event_topic_id chỉ giúp tái sử dụng nhãn hiển thị tương đương để tránh tạo quá nhiều tên nhãn gần giống nhau. Chỉ chọn nếu mô tả CÙNG VỤ VIỆC CỤ THỂ. Không dùng trường này làm điều kiện liên kết timeline; backend sẽ xác định timeline bằng entity_id chuẩn và thời gian xuất bản.
 4) Ưu tiên phân loại entity chính xác hơn đặt tên topic cầu kỳ. Với mỗi entity cụ thể, cung cấp tên chuẩn dễ nhận biết, các bí danh có bằng chứng trong tiêu đề/mô tả và đúng loại entity.
 5) Không bắt buộc tìm động từ chính hoặc nhóm hành động để ghép timeline. Cách ghép timeline được xử lý riêng bằng entity sự kiện hoặc entity đối tượng và cửa sổ thời gian trong backend.
-6) Chỉ trích xuất entity là đối tượng CỤ THỂ có danh tính riêng, thực sự xuất hiện trong tiêu đề/mô tả; không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases phải là biến thể trực tiếp được thể hiện trong văn bản.
+6) Chỉ trích xuất entity là đối tượng CỤ THỂ có danh tính riêng, thực sự xuất hiện trong tiêu đề, mô tả hoặc content_excerpt; không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases phải là biến thể trực tiếp được thể hiện trong văn bản.
 7) Phân loại entity sự kiện bằng entity_type='EVENT' cho một sự kiện, giải đấu, vụ án hoặc diễn biến cụ thể có thể định danh. Người, tổ chức, sản phẩm và địa điểm có tên riêng là entity đối tượng theo đúng loại PERSON, ORG, PRODUCT hoặc LOCATION. Không dùng EVENT cho nhãn chủ đề rộng như 'chính trị' hay 'kinh tế'.
-8) KHÔNG tạo entity cho tên quốc gia, tỉnh/thành phố hoặc vùng hành chính lớn, ví dụ Việt Nam, Mỹ, Trung Quốc, Hà Nội, Đà Nẵng, TP.HCM, California, Tokyo. Những địa danh này chỉ là bối cảnh, không phải entity followable của Radar. Cũng không tạo entity cho danh từ chung như "siêu thị", "người dân", "bệnh viện", "chùa" nếu không có tên riêng.
-9) ĐỊA ĐIỂM CỤ THỂ có tên riêng vẫn là entity type LOCATION, ví dụ Chùa Hương, Chùa Bái Đính, Vịnh Hạ Long, Sân vận động Mỹ Đình, Bệnh viện Bạch Mai, Nhà thờ Đức Bà. Phân biệt địa điểm có tên riêng với tỉnh/thành phố chứa địa điểm đó.
+8) KHÔNG tạo entity cho tên quốc gia, tỉnh/thành phố hoặc vùng hành chính lớn, ví dụ Việt Nam, Mỹ, Trung Quốc, Hà Nội, Đà Nẵng, TP.HCM, California, Tokyo. Những địa danh này chỉ là bối cảnh, không phải entity followable của Radar. Ngoại lệ quan trọng: tên đầy đủ của công trình/hạ tầng có chứa địa danh vẫn là LOCATION riêng. Cũng không tạo entity cho danh từ chung như "siêu thị", "người dân", "bệnh viện", "chùa" nếu không có tên riêng.
+9) ĐỊA ĐIỂM/CÔNG TRÌNH CỤ THỂ có tên riêng vẫn là entity type LOCATION. Ngoài di tích và điểm tham quan, BẮT BUỘC nhận diện đầy đủ tên công trình/hạ tầng được nêu trong bài: cao tốc, quốc lộ, tỉnh lộ, cầu, cầu vượt, hầm, tuyến đường sắt/metro, sân bay, cảng, nhà ga, khu công nghiệp, nhà máy, bệnh viện, trường đại học, sân vận động, công viên, chùa, đền, nhà thờ, vịnh và đảo. Ví dụ: 'Cao tốc Mỹ Thuận - Cần Thơ' là một LOCATION; 'Cầu vượt Võ Văn Kiệt' là một LOCATION riêng. Không chỉ trích xuất phần tên người 'Võ Văn Kiệt' thay cho tên công trình 'Cầu vượt Võ Văn Kiệt'. Chỉ tạo LOCATION khi có tên riêng thực sự theo sau loại công trình; các cụm chung như 'một cây cầu', 'cầu vượt đang thi công' không phải entity. Nếu cùng một đoạn chỉ nhắc 'Võ Văn Kiệt' để đặt tên công trình, không đồng thời tạo PERSON 'Võ Văn Kiệt' trừ khi bài cũng nói độc lập về người này.
 10) Sự kiện cụ thể/giải đấu/vụ án có danh tính riêng (ví dụ World Cup 2026, một vụ án cụ thể) có thể là entity type EVENT; không nhầm nó với danh từ chung hay tên quốc gia.
 11) confidence là số 0..1. Nếu không chắc nhãn sự kiện, để null thay vì đoán. Không bịa diễn biến, ngày tháng hoặc quan hệ.
 
@@ -76,7 +79,7 @@ Categories có thể chọn (chỉ dùng id có trong danh sách):
 Sự kiện đã tồn tại để tránh tạo topic trùng (chỉ chọn ID nếu cùng một sự kiện):
 {json.dumps(existing_events, ensure_ascii=False)}
 
-Các bài cần phân tích:
+Các bài cần phân tích (xem cả title, summary và content_excerpt để tìm đủ tên công trình/hạ tầng; không chỉ lấy tên người đứng trong tên công trình):
 {json.dumps(articles, ensure_ascii=False)}
 """
 
@@ -376,6 +379,9 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
         confidence = 0.0
     confidence = max(0.0, min(1.0, confidence))
     entities = result.get('entities') if isinstance(result.get('entities'), list) else []
+    entities, suppressed_person_names = augment_entities_with_named_infrastructure(
+        article.get('title') or '', article.get('summary') or '', entities, article.get('content_text') or ''
+    )
     filtered_entities = []
     for entity in entities:
         if not isinstance(entity, dict):
@@ -391,6 +397,7 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
         'event_topic_name': event_name or None,
         'event_confidence': confidence,
         'entities': entities[:10],
+        'named_infrastructure_enriched': True,
     }
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -451,6 +458,11 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                     ai_result['mismatch_repair_attempted'] = True
                 if not manual:
                     cur.execute('delete from article_entities where article_id=%s', (article_id,))
+                elif suppressed_person_names:
+                    cur.execute("""DELETE FROM article_entities ae USING entities e
+                                   WHERE ae.entity_id=e.entity_id AND ae.article_id=%s
+                                     AND upper(e.entity_type)='PERSON' AND e.normalized_name=ANY(%s)""",
+                                (article_id, list(suppressed_person_names)))
                 for entity in entities[:10]:
                     if not isinstance(entity, dict):
                         continue
@@ -472,6 +484,108 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
             # Persist the entity-defined Timeline ID after all canonical entities were attached.
             refresh_article_timeline_group(conn, article_id)
     return True
+
+
+def enrich_named_infrastructure_entities(limit: int = 800) -> dict[str, int]:
+    """Backfill named physical infrastructure without re-calling GenAI.
+
+    This catches articles already classified before stronger infrastructure extraction
+    rules were deployed. A JSON marker makes the scan idempotent and schema-free.
+    """
+    stats = {'scanned': 0, 'articles_changed': 0, 'entities_added': 0, 'failed': 0}
+    limit = max(1, min(int(limit or 800), 2000))
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT article_id,title,coalesce(summary,'') AS summary,
+                                  coalesce(content_text,'') AS content_text,
+                                  coalesce(ai_classification,'{}'::jsonb) AS ai_classification
+                           FROM news_articles
+                           WHERE is_excluded=false
+                             AND coalesce(published_at,collected_at) >= now()-interval '30 days'
+                             AND coalesce(ai_classification->>'named_infrastructure_enriched','false') <> 'true'
+                           ORDER BY coalesce(published_at,collected_at) DESC
+                           LIMIT %s""", (limit,))
+        rows = cur.fetchall()
+    for row in rows:
+        stats['scanned'] += 1
+        title = row.get('title') or ''
+        summary = row.get('summary') or ''
+        content_text = row.get('content_text') or ''
+        all_text = normalize_space('. '.join((title, summary, content_text)))
+        infra = extract_named_infrastructure_entities(all_text)[:10]
+        suppress = set()
+        for item in infra:
+            suffix = item.get('person_suffix')
+            if not suffix:
+                continue
+            occurrences = list(re.finditer(r'(?<!\w)' + re.escape(suffix) + r'(?!\w)', all_text, re.IGNORECASE | re.UNICODE))
+            if occurrences and all(item['start'] <= m.start() and m.end() <= item['end'] for m in occurrences):
+                suppress.add(norm_name(suffix))
+        changed = False
+        added_ids = []
+        try:
+            classification = row.get('ai_classification') or {}
+            if not isinstance(classification, dict):
+                classification = {}
+            stored_entities = classification.get('entities') if isinstance(classification.get('entities'), list) else []
+            stored_entities = [e for e in stored_entities if not (
+                isinstance(e, dict) and str(e.get('type') or e.get('entity_type') or '').upper() == 'PERSON'
+                and norm_name(str(e.get('name') or e.get('canonical_name') or '')) in suppress
+            )]
+            entity_conn_result = []
+            with get_conn() as conn, conn.cursor() as cur:
+                if suppress:
+                    cur.execute("""DELETE FROM article_entities ae USING entities e
+                                   WHERE ae.entity_id=e.entity_id AND ae.article_id=%s
+                                     AND upper(e.entity_type)='PERSON' AND e.normalized_name=ANY(%s)""",
+                                (row['article_id'], list(suppress)))
+                    changed = changed or cur.rowcount > 0
+                for item in infra:
+                    entity_id = _upsert_entity(conn, item['name'], 'LOCATION', item.get('aliases') or [])
+                    if not entity_id:
+                        continue
+                    cur.execute("SELECT 1 FROM article_entities WHERE article_id=%s AND entity_id=%s AND mention_text=%s",
+                                (row['article_id'], entity_id, item['name']))
+                    was_missing = cur.fetchone() is None
+                    cur.execute("""INSERT INTO article_entities(article_id,entity_id,mention_text,confidence)
+                                   VALUES(%s,%s,%s,0.94)
+                                   ON CONFLICT(article_id,entity_id,mention_text) DO UPDATE
+                                   SET confidence=GREATEST(article_entities.confidence,excluded.confidence)""",
+                                (row['article_id'], entity_id, item['name']))
+                    if was_missing:
+                        stats['entities_added'] += 1
+                        changed = True
+                    added_ids.append(entity_id)
+                    entity_conn_result.append({'name': item['name'], 'type': 'LOCATION', 'aliases': item.get('aliases') or []})
+                # Record the marker and the names in the JSON audit field; no schema migration required.
+                existing_by_norm = {
+                    norm_name(str(e.get('name') or e.get('canonical_name') or '')): e
+                    for e in stored_entities if isinstance(e, dict)
+                    and norm_name(str(e.get('name') or e.get('canonical_name') or ''))
+                }
+                # Put recovered named infrastructure first in the audit JSON so it remains
+                # visible even when the model already returned ten other entity candidates.
+                for item in reversed(entity_conn_result):
+                    existing_by_norm[norm_name(item['name'])] = item
+                infrastructure_norms = {norm_name(item['name']) for item in entity_conn_result}
+                ordered_entities = list(entity_conn_result) + [
+                    entity for normalized_name, entity in existing_by_norm.items()
+                    if normalized_name not in infrastructure_norms
+                ]
+                classification['entities'] = ordered_entities[:10]
+                classification['named_infrastructure_enriched'] = True
+                classification['named_infrastructure_enriched_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                cur.execute("""UPDATE news_articles SET ai_classification=%s::jsonb,updated_at=now()
+                               WHERE article_id=%s""",
+                            (json.dumps(classification, ensure_ascii=False), row['article_id']))
+                if changed:
+                    refresh_article_timeline_group(conn, int(row['article_id']))
+            if changed:
+                stats['articles_changed'] += 1
+        except Exception:
+            stats['failed'] += 1
+            log.exception('Named infrastructure entity enrichment failed for article_id=%s', row['article_id'])
+    log.info('Named infrastructure enrichment complete: %s', stats)
+    return stats
 
 
 def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[str, int]:
@@ -500,7 +614,7 @@ def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[
         if since is None:
             from datetime import datetime, timezone
             since = datetime.now(timezone.utc)
-        cur.execute("""select article_id,title,coalesce(summary,'') as summary,language,published_at,collected_at
+        cur.execute("""select article_id,title,coalesce(summary,'') as summary,coalesce(content_text,'') as content_text,language,published_at,collected_at
                        from news_articles
                        where ai_classified_at is null and is_excluded=false
                          and coalesce(published_at,collected_at) >= now()-interval '30 days'
@@ -536,7 +650,9 @@ def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[
     for start in range(0, len(articles), batch_size):
         batch_rows = articles[start:start + batch_size]
         prompt_rows = [{'article_id': int(a['article_id']), 'title': a['title'][:600],
-                        'summary': (a['summary'] or '')[:1200], 'language': a.get('language') or 'vi'} for a in batch_rows]
+                        'summary': (a['summary'] or '')[:1200],
+                        'content_excerpt': (a.get('content_text') or '')[:1200],
+                        'language': a.get('language') or 'vi'} for a in batch_rows]
         # Refresh active event topics between batches so a topic created in one batch
         # can be reused by the next batch instead of producing near-duplicate labels.
         with get_conn() as conn, conn.cursor() as cur:
