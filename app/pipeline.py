@@ -12,6 +12,7 @@ from .config import settings
 from .db import get_conn
 from .processing import (apply_cleaning_rules, canonicalize_url, clean_html, extract_entities,
                          hash_text, keyword_matches, norm_name, normalize_space, slugify, extract_event_signature)
+from .entity_rules import should_track_entity
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -105,7 +106,7 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
     count_known = 0
     for mention, typ, confidence in found:
         normalized = norm_name(mention)
-        if len(normalized) < 2:
+        if len(normalized) < 2 or not should_track_entity(mention, typ):
             continue
         entity_id = known_map.get((normalized, typ)) or alias_to_entity.get(normalized) or known_name_fallback.get(normalized)
         if not entity_id:

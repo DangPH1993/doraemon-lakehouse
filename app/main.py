@@ -14,10 +14,11 @@ from .config import settings
 from .db import get_conn, fetch_all, fetch_one
 from .security import (issue_token, require_admin, hash_password, verify_password, issue_user_token, require_user)
 from .processing import canonicalize_url, hash_text, norm_name, slugify
+from .entity_rules import should_track_entity
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.7',description='News Radar with global archive search, topic/entity timelines, grouped personal feed and Telegram notifications.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.6.8',description='News Radar with global archive search, topic/entity timelines, grouped personal feed and Telegram notifications.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -838,9 +839,9 @@ def list_articles(
     page = min(page, total_pages)
     sql="""select a.article_id,a.title,a.url,a.canonical_url,a.summary,left(a.content_text,500) as content_preview,a.author,a.language,a.published_at,a.collected_at,a.quality_score,a.is_excluded,a.exclude_reason,s.name as source_name,
            coalesce((select string_agg(t.name,', ' order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id),'') as topics,
-           coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id),'') as entities,
+           coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id and e.status='active'),'') as entities,
            coalesce((select json_agg(t.name order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id),'[]'::json) as topic_names,
-           coalesce((select json_agg(e.canonical_name order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id),'[]'::json) as entity_names""" + from_sql + where_sql + ' order by a.collected_at desc limit %s offset %s'
+           coalesce((select json_agg(e.canonical_name order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id and e.status='active'),'[]'::json) as entity_names""" + from_sql + where_sql + ' order by a.collected_at desc limit %s offset %s'
     items = fetch_all(sql, vals + [page_size, (page - 1) * page_size])
     return {'items': items, 'pagination': pagination_meta(page, page_size, total)}
 
@@ -852,7 +853,7 @@ def get_article_classifications(article_id: int):
     topics = fetch_all("""select t.topic_id,t.name,t.topic_type from article_topics at
                          join topics t on t.topic_id=at.topic_id where at.article_id=%s order by t.name""", (article_id,))
     entities = fetch_all("""select distinct e.entity_id,e.canonical_name,e.entity_type from article_entities ae
-                           join entities e on e.entity_id=ae.entity_id where ae.article_id=%s order by e.canonical_name""", (article_id,))
+                           join entities e on e.entity_id=ae.entity_id where ae.article_id=%s and e.status='active' order by e.canonical_name""", (article_id,))
     return {'article': article, 'topics': topics, 'entities': entities}
 
 @app.patch('/api/articles/{article_id}/classifications', dependencies=[Depends(require_admin)])
@@ -861,7 +862,7 @@ def patch_article_classifications(article_id: int, body: ArticleClassificationBo
     if not article:
         raise HTTPException(status_code=404, detail='Article not found')
     topic_names = list(dict.fromkeys(str(x).strip()[:180] for x in body.topic_names if str(x).strip()))
-    entity_names = list(dict.fromkeys(str(x).strip()[:180] for x in body.entity_names if str(x).strip()))
+    entity_names = list(dict.fromkeys(str(x).strip()[:180] for x in body.entity_names if str(x).strip() and should_track_entity(str(x).strip()[:180], 'UNKNOWN')))
     topic_ids: list[int] = []
     entity_records: list[tuple[int, str]] = []
     with get_conn() as conn, conn.cursor() as cur:
@@ -940,7 +941,7 @@ def topic_timeline(topic_id: int, limit: int = Query(default=100, ge=1, le=300))
                              recent.source_name,recent.published_at,recent.collected_at,recent.timeline_at,
                              coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name)
                                        from article_entities ae join entities e on e.entity_id=ae.entity_id
-                                       where ae.article_id=recent.article_id),'') as entities
+                                       where ae.article_id=recent.article_id and e.status='active'),'') as entities
                       from (
                         select a.article_id,a.title,a.url,a.summary,a.author,s.name as source_name,
                                a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) as timeline_at
@@ -1022,6 +1023,8 @@ def approve_topic(candidate_id:int):
     candidate=fetch_one("select * from topic_candidates where candidate_id=%s",(candidate_id,))
     if not candidate: raise HTTPException(status_code=404,detail='Candidate not found')
     if candidate['status']!='pending': raise HTTPException(status_code=409,detail='Candidate is not pending')
+    if not should_track_entity(candidate['canonical_name'], candidate['entity_type']):
+        raise HTTPException(status_code=422, detail='Candidate là địa danh hành chính hoặc danh từ chung, không thể duyệt thành entity theo dõi.')
     with get_conn() as conn, conn.cursor() as cur:
         slug=slugify(candidate['suggested_name'])
         candidate_type = candidate.get('candidate_type') or 'event'
@@ -1066,6 +1069,8 @@ def list_entities(
     return {'entities':ents,'candidates':[],'pagination':pagination_meta(page,page_size,total)}
 @app.post('/api/entities',dependencies=[Depends(require_admin)])
 def create_entity(body:EntityBody):
+    if not should_track_entity(body.canonical_name, body.entity_type):
+        raise HTTPException(status_code=422, detail='Entity phải là một đối tượng cụ thể. Không lưu quốc gia/tỉnh/thành phố hoặc danh từ chung; địa điểm cụ thể có tên riêng vẫn được phép.')
     row=fetch_one("""insert into entities(canonical_name,normalized_name,entity_type,external_id,description,origin)
                      values(%s,%s,%s,%s,%s,'manual') returning *""",(body.canonical_name.strip(),norm_name(body.canonical_name),body.entity_type.upper(),body.external_id,body.description))
     for alias in body.aliases:
@@ -1077,6 +1082,13 @@ def patch_entity(entity_id:int,patch:dict=Body(...)):
     allowed={'canonical_name','entity_type','external_id','description','status'}; fields={k:v for k,v in patch.items() if k in allowed}
     if 'canonical_name' in fields: fields['normalized_name']=norm_name(fields['canonical_name'])
     if not fields: raise HTTPException(status_code=400,detail='No allowed fields')
+    current = fetch_one('select canonical_name,entity_type,status from entities where entity_id=%s',(entity_id,))
+    if not current: raise HTTPException(status_code=404,detail='Entity not found')
+    candidate_name = fields.get('canonical_name', current['canonical_name'])
+    candidate_type = fields.get('entity_type', current['entity_type'])
+    candidate_status = fields.get('status', current['status'])
+    if candidate_status == 'active' and not should_track_entity(candidate_name, candidate_type):
+        raise HTTPException(status_code=422,detail='Không thể kích hoạt entity là quốc gia/tỉnh/thành phố hoặc danh từ chung.')
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(f'{k}=%s'); vals.append(v)
     sets.append('updated_at=now()'); vals.append(entity_id)

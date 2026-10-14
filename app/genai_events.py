@@ -16,6 +16,7 @@ import requests
 from .config import settings
 from .db import get_conn
 from .processing import hash_text, norm_name, normalize_space, slugify
+from .entity_rules import should_track_entity
 
 log = logging.getLogger('mini-lakehouse.openai')
 OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions'
@@ -58,11 +59,14 @@ Mục tiêu:
 4) Khi so khớp, phải so sánh cả hành động chính, đối tượng/mục tiêu, người/tổ chức liên quan, địa điểm và dấu hiệu định danh vụ việc. Nếu hành động chính khác nhau (ví dụ lừa đảo vs tuồn/chuyển tiền, đe dọa tấn công vs tấn công thực tế, đàm phán vs không kích), hoặc là các vụ án/đối tượng/số tiền khác nhau, KHÔNG chọn existing_event_topic_id. Khi không chắc, tạo event_topic_name riêng hoặc null; ưu tiên tách nhầm hơn gộp nhầm.
 5) Luôn trả event_topic_name đề xuất cho bài nếu bài có thể theo dõi như một sự kiện, kể cả khi đề xuất dùng existing_event_topic_id. Nếu chọn sự kiện có sẵn, event_topic_name phải lặp lại chính xác tên chuẩn của sự kiện đó. Điều này giúp hệ thống kiểm chứng kết quả trước khi nối bài.
 6) Đọc các bài trong batch. Chỉ gộp hai bài khi chúng nói về cùng một vụ việc cụ thể, không chỉ có từ khóa/entity trùng nhau. Không gộp hai vụ án riêng biệt, hai động thái chính sách riêng biệt hay hai diễn biến quân sự khác nhau.
-7) Trích xuất entity thực sự có trong tiêu đề/mô tả. Tên chuẩn, không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases là biến thể trực tiếp được thể hiện trong văn bản.
-8) confidence là số 0..1. Nếu không chắc sự kiện, để null thay vì đoán. Không bịa diễn biến, ngày tháng hoặc quan hệ.
+7) Chỉ trích xuất entity là đối tượng CỤ THỂ có danh tính riêng, thực sự xuất hiện trong tiêu đề/mô tả; không tạo entity suy đoán. entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Chỉ tối đa 10 entity/bài; aliases phải là biến thể trực tiếp được thể hiện trong văn bản.
+8) KHÔNG tạo entity cho tên quốc gia, tỉnh/thành phố hoặc vùng hành chính lớn, ví dụ Việt Nam, Mỹ, Trung Quốc, Hà Nội, Đà Nẵng, TP.HCM, California, Tokyo. Những địa danh này chỉ là bối cảnh, không phải entity followable của Radar. Cũng không tạo entity cho danh từ chung như "siêu thị", "người dân", "bệnh viện", "chùa" nếu không có tên riêng.
+9) ĐỊA ĐIỂM CỤ THỂ có tên riêng vẫn là entity type LOCATION, ví dụ Chùa Hương, Chùa Bái Đính, Vịnh Hạ Long, Sân vận động Mỹ Đình, Bệnh viện Bạch Mai, Nhà thờ Đức Bà. Phân biệt địa điểm có tên riêng với tỉnh/thành phố chứa địa điểm đó.
+10) Sự kiện cụ thể/giải đấu/vụ án có danh tính riêng (ví dụ World Cup 2026, một vụ án cụ thể) có thể là entity type EVENT; không nhầm nó với danh từ chung hay tên quốc gia.
+11) confidence là số 0..1. Nếu không chắc sự kiện, để null thay vì đoán. Không bịa diễn biến, ngày tháng hoặc quan hệ.
 
 Định dạng JSON bắt buộc:
-{{"results":[{{"article_id":123,"category_topic_id":1,"existing_event_topic_id":null,"event_topic_name":"Mỹ không kích Iran","event_confidence":0.91,"entities":[{{"name":"Mỹ","type":"LOCATION","aliases":["Hoa Kỳ"]}}]}}]}}
+{{"results":[{{"article_id":123,"category_topic_id":1,"existing_event_topic_id":null,"event_topic_name":"OpenAI ra mắt mô hình AI","event_confidence":0.91,"entities":[{{"name":"OpenAI","type":"ORG","aliases":[]}}]}}]}}
 
 Categories có thể chọn (chỉ dùng id có trong danh sách):
 {json.dumps(categories, ensure_ascii=False)}
@@ -157,6 +161,9 @@ def _upsert_entity(conn, name: str, entity_type: str, aliases: list[str] | None 
     entity_type = str(entity_type or 'UNKNOWN').upper().strip()
     if entity_type not in ALLOWED_ENTITY_TYPES:
         entity_type = 'UNKNOWN'
+    if not should_track_entity(name, entity_type):
+        log.debug('Skipping non-followable entity name=%r type=%s', name, entity_type)
+        return None
     aliases = aliases or []
     entity_id = None
     with conn.cursor() as cur:
@@ -342,6 +349,15 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
         confidence = 0.0
     confidence = max(0.0, min(1.0, confidence))
     entities = result.get('entities') if isinstance(result.get('entities'), list) else []
+    filtered_entities = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        entity_name = entity.get('name') or entity.get('canonical_name')
+        entity_type = entity.get('type') or entity.get('entity_type') or 'UNKNOWN'
+        if entity_name and should_track_entity(str(entity_name), str(entity_type)):
+            filtered_entities.append(entity)
+    entities = filtered_entities[:10]
     ai_result = {
         'category_topic_id': category_id,
         'existing_event_topic_id': existing_event_id,
