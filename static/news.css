@@ -210,3 +210,11 @@ body{background:#fff;color:#202124;font-size:14px}
 .article-row .article-card-footer .article-source-link{white-space:nowrap;flex-shrink:0}
 .article-no-timeline{max-width:none;text-align:left;margin-top:7px}
 @media(max-width:640px){.article-row{grid-template-columns:minmax(0,1fr)!important}.article-follow-tags{gap:4px}.article-follow-tags .article-action-pair-compact{max-width:100%}.article-row .article-card-footer{margin-top:5px}}
+
+/* v0.7.5: editorial field taxonomy is separate from event topics. */
+.field-filter-row{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:0 0 14px;padding:10px 12px;background:#f8f9fa;border:1px solid #e8eaed;border-radius:10px;color:#5f6368;font-size:11px}
+.field-filter-row label{font-weight:750;color:#344054}
+.field-filter-row select{min-width:190px;max-width:100%;padding:8px 10px;border:1px solid #d8dee4;border-radius:8px;background:#fff;color:#202124;font:inherit}
+.field-filter-help{font-size:10px;color:#7b858d}
+.field-category-badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 7px;background:#eaf2ff;color:#2457a7;font-size:9px;font-weight:750}
+@media(max-width:640px){.field-filter-row{align-items:stretch;flex-direction:column}.field-filter-row select{width:100%;min-width:0}}

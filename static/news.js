@@ -4,7 +4,7 @@
   const MAX_SAVED_TIMELINES = 10;
   const state = {
     period: 'day', selectedTimeline: null, timelinePage: 1, articlePage: 1, searchPage: 1,
-    articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '',
+    articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '', fieldCategory: '',
     user: null, savedTimelines: [], picked: new Set(), followMeta: new Map(),
     pendingFollow: null, followSaving: false, authMode: 'login', telegram: null
   };
@@ -147,8 +147,9 @@
     const followableTopicNames = new Set((feedMode ? (item.matched_topics || []) : (item.topic_refs || [])).map(tag => String(tag.name || '').toLocaleLowerCase('vi')));
     const tags = (feedMode ? [] : (item.topics || []).filter(name => !followableTopicNames.has(String(name || '').toLocaleLowerCase('vi'))).map(name => ({name})))
       .slice(0, 6).map(tag => `<span class="article-tag">${esc(tag.name)}</span>`).join('');
+    const fieldTag = item.field_category ? `<span class="field-category-badge">${esc(item.field_category)}</span>` : '';
     return `<article class="radar-row article-row${feedMode ? ' feed-row' : ''}">
-      <div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span>${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
+      <div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span>${fieldTag}${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
         <h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>
         ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}
         ${tags ? `<div class="article-tags">${tags}</div>` : ''}
@@ -167,6 +168,7 @@
     $('#dailyArticles').innerHTML = '<div class="loading-card">Đang tải bài báo…</div>';
     $('#articlePagination').innerHTML = '';
     const params = new URLSearchParams({page:String(page), page_size:String(state.articlePageSize)});
+    if (state.fieldCategory) params.set('field_category', state.fieldCategory);
     try {
       const data = await getJSON(`/api/public/news/articles?${params.toString()}`);
       renderArticleList('#dailyArticles', data.items || [], false, 'Chưa có bài báo hôm nay', 'Chưa có bài nào được xuất bản hoặc thu thập trong ngày hôm nay.');
@@ -185,6 +187,7 @@
     $('#searchResults').innerHTML = '<div class="loading-card">Đang tìm trên kho tin…</div>';
     $('#searchPagination').innerHTML = '';
     const params = new URLSearchParams({q:query, page:String(page), page_size:String(state.searchPageSize)});
+    if (state.fieldCategory) params.set('field_category', state.fieldCategory);
     try {
       const data = await getJSON(`/api/public/news/articles?${params.toString()}`);
       renderArticleList('#searchResults', data.items || [], false, 'Không tìm thấy tin phù hợp', 'Thử từ khóa khác hoặc kiểm tra chính tả.');
@@ -506,6 +509,11 @@
       else if (pager.dataset.pager === 'search') await loadSearchResults(Math.max(1, state.searchPage + dir));
       else if (pager.dataset.pager === 'timeline' && state.selectedTimeline) await loadTimeline(state.selectedTimeline.type, state.selectedTimeline.id, Math.max(1, state.timelinePage + dir));
     }
+  });
+  $('#fieldCategoryFilter').addEventListener('change', async event => {
+    state.fieldCategory = String(event.target.value || '');
+    await loadArticles(1);
+    if (state.searchQuery) await loadSearchResults(1);
   });
   $('#radarSearchForm').addEventListener('submit', async event => {
     event.preventDefault(); state.searchQuery = $('#radarSearch').value.trim();

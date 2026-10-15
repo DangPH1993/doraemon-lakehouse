@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#ffffff">
   <meta name="description" content="Tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>News Radar — Doraemon</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.3">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.5">
 </head>
 <body>
   <header class="site-header">
@@ -71,6 +71,17 @@
     <section class="content-section articles-section" id="articles">
       <div class="section-heading articles-heading">
         <div><p class="eyebrow">LATEST HEADLINES</p><h2>Tin tức trong ngày</h2><p class="section-subtitle" id="articleDateLabel">Các bài mới được xuất bản hôm nay, theo giờ Việt Nam.</p></div>
+      </div>
+      <div class="field-filter-row">
+        <label for="fieldCategoryFilter">Lọc theo lĩnh vực</label>
+        <select id="fieldCategoryFilter" aria-label="Lọc bài báo theo lĩnh vực">
+          <option value="">Tất cả lĩnh vực</option>
+          <option>Thời sự</option><option>Thế giới</option><option>Kinh doanh</option><option>Bất động sản</option>
+          <option>Pháp luật</option><option>Giáo dục</option><option>Sức khỏe</option><option>Đời sống</option>
+          <option>Du lịch</option><option>Khoa học</option><option>Số hóa</option><option>Xe</option>
+          <option>Thể thao</option><option>Văn hóa - Giải trí</option><option>Môi trường</option><option>Ý kiến - Góc nhìn</option><option>Chưa phân loại</option>
+        </select>
+        <span class="field-filter-help">Lĩnh vực là bộ phân loại biên tập, tách biệt với Topic sự kiện.</span>
       </div>
       <div id="dailyArticles" class="radar-list" aria-live="polite"><div class="loading-card">Đang tải bài báo…</div></div>
       <div id="articlePagination" class="pagination-row"></div>
@@ -141,6 +152,6 @@
       <a href="/" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/news.js?v=0.7.3" defer></script>
+  <script src="/static/news.js?v=0.7.5" defer></script>
 </body>
 </html>
