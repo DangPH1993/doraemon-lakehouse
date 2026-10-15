@@ -44,7 +44,7 @@ jobs:
           TELEGRAM_DIGEST_MAX_ARTICLES: "12"
           OPENAI_MODEL: gpt-4.1-mini
           AI_CLASSIFICATION_BATCH_SIZE: "12"
-          AI_CLASSIFICATION_RUN_LIMIT: "72"
+          AI_CLASSIFICATION_RUN_LIMIT: "48"
           AI_CLASSIFICATION_BACKFILL_ENABLED: "false"
           AI_CLASSIFICATION_RETRY_COOLDOWN_HOURS: "6"
           AI_CLASSIFICATION_MAX_RETRIES: "3"
@@ -55,6 +55,7 @@ jobs:
           EVENT_TOPIC_BACKFILL_BATCH_SIZE: "60"
           TOPIC_DISCOVERY_ARTICLE_LIMIT: "800"
           REQUEST_TIMEOUT_SECONDS: "25"
+          PYTHONUNBUFFERED: "1"
           TIMEZONE: Asia/Ho_Chi_Minh
         run: |
           if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
