@@ -692,7 +692,6 @@ def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[
         # Failed rows have a cooldown and retry cap; mismatch repairs are allowed through once and carry a
         # JSON marker to prevent repeated repair loops.
         if since is None:
-            from datetime import datetime, timezone
             since = datetime.now(timezone.utc)
         cur.execute("""select article_id,title,coalesce(summary,'') as summary,coalesce(content_text,'') as content_text,language,published_at,collected_at
                        from news_articles
