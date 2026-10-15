@@ -1,6 +1,8 @@
 """Daily RSS -> Raw/Clean -> topics/entities -> FACTs pipeline."""
 from __future__ import annotations
 import calendar, hashlib, json, logging, re, time
+import psycopg
+from psycopg.rows import dict_row
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -12,12 +14,12 @@ from .config import settings
 from .db import get_conn
 from .processing import (apply_cleaning_rules, canonicalize_url, clean_html, extract_entities,
                          hash_text, keyword_matches, norm_name, normalize_space, slugify, extract_event_signature)
-from .entity_rules import should_track_entity
+from .entity_rules import should_track_entity, is_grounded_entity
+from .named_infrastructure import augment_entities_with_named_infrastructure
 from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, add_entity_to_lookup,
                                 entity_name_variants, resolve_entity_in_lookup,
                                 resolve_entity_in_database, strip_person_title)
-from .timeline_groups import refresh_article_timeline_group
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -99,29 +101,52 @@ def load_active_topics(conn) -> list[dict]:
 
 
 def process_entities(conn, article_id, source_id, title, summary, entity_lookup=None):
-    """Fallback entity extraction with shared canonical/alias resolution."""
-    found = get_spacy_entity_matches(title, summary)
+    """Fast fallback extraction, enriched with typed names and source-grounding checks."""
+    raw_found = get_spacy_entity_matches(title, summary)
     if entity_lookup is None:
         entity_lookup = load_entity_lookup(conn)
+    raw_entities = [{'name': name, 'type': typ, 'aliases': []} for name, typ, _ in raw_found]
+    entities, suppressed_person_names = augment_entities_with_named_infrastructure(
+        title, summary, raw_entities, content_text=''
+    )
+    source_text = normalize_space(f'{title}. {summary}')
+    confidence_by_key = {(norm_name(name), str(typ).upper()): confidence for name, typ, confidence in raw_found}
+    found = []
+    seen_found = set()
+    for item in entities:
+        mention = normalize_space(str(item.get('name') or item.get('canonical_name') or ''))
+        typ = str(item.get('type') or item.get('entity_type') or 'UNKNOWN').upper().strip()
+        aliases = item.get('aliases') if isinstance(item.get('aliases'), list) else []
+        key = (norm_name(mention), typ)
+        if not mention or key in seen_found or not should_track_entity(mention, typ):
+            continue
+        if typ == 'PERSON' and norm_name(mention) in suppressed_person_names:
+            continue
+        if not is_grounded_entity(mention, aliases, source_text, typ):
+            continue
+        seen_found.add(key)
+        confidence = confidence_by_key.get(key, 0.94 if item.get('kind_head') or any(a for a in aliases if norm_name(a) != norm_name(mention)) else 0.72)
+        found.append((mention, typ, confidence, aliases))
+
     count_known = 0
-    for mention, typ, confidence in found:
+    for mention, typ, confidence, supplied_aliases in found:
         normalized = norm_name(mention)
-        if len(normalized) < 2 or not should_track_entity(mention, typ):
+        if len(normalized) < 2:
             continue
         entity_id, ambiguous = resolve_entity_in_lookup(mention, typ, entity_lookup)
         fuzzy_resolved = False
         if not entity_id and not ambiguous:
-            db_match, db_ambiguous = resolve_entity_in_database(conn, mention, typ)
+            db_match, db_ambiguous = resolve_entity_in_database(conn, mention, typ, supplied_aliases)
             if db_ambiguous:
                 ambiguous = True
             elif db_match:
                 entity_id = int(db_match['entity_id'])
                 fuzzy_resolved = db_match.get('_resolution_method') == 'fuzzy'
-                add_entity_to_lookup(entity_lookup, db_match, entity_name_variants(db_match.get('canonical_name') or mention, typ))
+                add_entity_to_lookup(entity_lookup, db_match, entity_name_variants(db_match.get('canonical_name') or mention, typ, supplied_aliases))
         if ambiguous:
             log.warning('Skipping ambiguous entity surface=%r type=%s article_id=%s', mention, typ, article_id)
             continue
-        canonical = strip_person_title(mention) if str(typ or '').upper() == 'PERSON' else normalize_space(mention)
+        canonical = strip_person_title(mention) if typ == 'PERSON' else normalize_space(mention)
         canonical_norm = entity_normalized_key(canonical, typ)
         if not entity_id:
             with conn.cursor() as cur:
@@ -131,13 +156,12 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
                                returning entity_id,canonical_name,normalized_name,entity_type,status""", (canonical, canonical_norm, typ))
                 row = cur.fetchone()
                 entity_id = int(row['entity_id'])
-                # If a unique surname alias resolved a pre-existing short-form row, use the full name.
-                add_entity_to_lookup(entity_lookup, row, entity_name_variants(canonical, typ))
+                add_entity_to_lookup(entity_lookup, row, entity_name_variants(canonical, typ, supplied_aliases))
         else:
             count_known += 1
             row = entity_lookup['entities_by_id'][int(entity_id)]
             current_norm = norm_name(str(row.get('canonical_name') or ''))
-            if str(typ or '').upper() == 'PERSON' and ' ' not in current_norm and ' ' in canonical_norm:
+            if typ == 'PERSON' and ' ' not in current_norm and ' ' in canonical_norm:
                 with conn.cursor() as cur:
                     canonical_key = entity_normalized_key(canonical, typ)
                     cur.execute("""select 1 from entities where status='active' and normalized_name=%s
@@ -151,8 +175,7 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
                         entity_lookup['canonical_to_ids'][canonical_norm].discard(int(entity_id))
                         entity_lookup['canonical_to_ids'][norm_name(canonical)].add(int(entity_id))
                         entity_lookup['canonical_to_ids'][canonical_key].add(int(entity_id))
-        # Store both observed and deterministically generated variants; do not collapse ambiguous aliases.
-        variants = entity_name_variants(row.get('canonical_name') or canonical, typ) if fuzzy_resolved else entity_name_variants(canonical, typ)
+        variants = entity_name_variants(row.get('canonical_name') or canonical, typ, supplied_aliases) if not fuzzy_resolved else entity_name_variants(row.get('canonical_name') or canonical, typ)
         with conn.cursor() as cur:
             for alias in variants:
                 alias_norm = norm_name(alias)
@@ -164,7 +187,8 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
         with conn.cursor() as cur:
             cur.execute("""insert into article_entities(article_id,entity_id,mention_text,confidence)
                            values(%s,%s,%s,%s) on conflict do nothing""", (article_id, entity_id, mention, confidence))
-    refresh_article_timeline_group(conn, article_id)
+    # Timeline components are recomputed lazily by the Timeline API. Re-running the recursive
+    # graph query after every ingested article caused a large avoidable DB cost during RSS runs.
     return len(found), count_known
 
 def apply_topics(conn, article_id, title, summary, topic_rows=None):
@@ -677,7 +701,7 @@ def purge_raw_feed_items_after_fact_refresh() -> int:
     return deleted
 
 
-def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) -> dict:
+def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = None) -> dict:
     started = datetime.now(timezone.utc)
     run_clock = time.monotonic()
     with get_conn() as conn, conn.cursor() as cur:
@@ -714,7 +738,11 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         stage_started = time.monotonic()
         if settings.openai_api_key:
             from .genai_events import classify_unprocessed_articles
-            ai_stats = classify_unprocessed_articles(limit=settings.ai_classification_run_limit, since=started)
+            # Keep each scheduled run bounded even if an older workflow still exports 72+.
+            # At the current article arrival rate, 48 fresh/repair classifications per hour
+            # leaves ample headroom while avoiding long OpenAI batches.
+            ai_limit = max(1, min(int(settings.ai_classification_run_limit), 48))
+            ai_stats = classify_unprocessed_articles(limit=ai_limit, since=started)
             totals['ai_articles_classified'] = ai_stats['classified']
             totals['ai_articles_failed'] = ai_stats['failed']
             totals['event_topics_assigned'] += ai_stats['events_assigned']
@@ -732,10 +760,11 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         stage_started = time.monotonic()
         try:
             from .genai_events import enrich_named_infrastructure_entities
-            infrastructure_stats = enrich_named_infrastructure_entities(limit=800)
+            infrastructure_stats = enrich_named_infrastructure_entities(limit=100)
             totals['named_infrastructure_entities_added'] = infrastructure_stats['entities_added']
             totals['named_infrastructure_articles_changed'] = infrastructure_stats['articles_changed']
             totals['named_infrastructure_scan_failed'] = infrastructure_stats['failed']
+            totals['named_infrastructure_entities_archived'] = infrastructure_stats.get('entities_archived', 0)
             log.info('Stage named infrastructure entity enrichment complete: %s; elapsed=%.1fs',
                      infrastructure_stats, time.monotonic()-stage_started)
         except Exception as exc:
@@ -777,6 +806,71 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("update pipeline_runs set status='failed',finished_at=now(),message=%s,details=%s::jsonb where run_id=%s",(f'{type(exc).__name__}: {str(exc)[:700]}',json.dumps(totals,ensure_ascii=False),run_id))
         raise
+
+
+_PIPELINE_ADVISORY_LOCK_KEY = 723071403
+
+
+def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) -> dict:
+    """Serialize pipeline runs and recover database rows left in ``running`` after crashes.
+
+    GitHub Actions concurrency serializes workflow jobs, while this PostgreSQL session-level
+    advisory lock also protects manual/retried invocations. A worker killed by timeout cannot
+    mark its own row; the next run marks records older than 45 minutes as failed.
+    """
+    if not settings.database_url:
+        raise RuntimeError('DATABASE_URL is not configured')
+    invocation_started = datetime.now(timezone.utc)
+    lock_conn = psycopg.connect(
+        settings.database_url, row_factory=dict_row, connect_timeout=12,
+        options='-c statement_timeout=120000 -c lock_timeout=15000 -c idle_in_transaction_session_timeout=180000',
+    )
+    acquired = False
+    try:
+        # The workflow has a 35-minute hard timeout. Recover rows older than 45 minutes
+        # before attempting the advisory lock, so a prior stuck connection cannot prevent
+        # the status dashboard from cleaning abandoned rows.
+        with lock_conn.cursor() as cur:
+            cur.execute("""UPDATE pipeline_runs
+                           SET status='failed', finished_at=COALESCE(finished_at,now()),
+                               message='Recovered stale run: worker exceeded the 35-minute workflow timeout (older than 45 minutes).'
+                           WHERE status='running' AND started_at < now()-interval '45 minutes'
+                           RETURNING run_id""")
+            stale_ids = [int(row['run_id']) for row in cur.fetchall()]
+        lock_conn.commit()
+        if stale_ids:
+            log.warning('Recovered %s stale pipeline_runs as failed before lock acquisition: %s', len(stale_ids), stale_ids[:30])
+
+        with lock_conn.cursor() as cur:
+            cur.execute('SELECT pg_try_advisory_lock(%s) AS acquired', (_PIPELINE_ADVISORY_LOCK_KEY,))
+            acquired = bool(cur.fetchone()['acquired'])
+        lock_conn.commit()
+        if not acquired:
+            log.warning('Pipeline skipped: another invocation already holds the PostgreSQL pipeline lock.')
+            return {'status': 'skipped_concurrent_run', 'trigger_type': trigger_type}
+
+        try:
+            return _run_pipeline_impl(trigger_type, source_ids)
+        except Exception as exc:
+            # _run_pipeline_impl handles errors after entering its main try block. This catches
+            # failures during post-insert initialization/logging, which previously left rows running.
+            with lock_conn.cursor() as cur:
+                cur.execute("""UPDATE pipeline_runs
+                               SET status='failed', finished_at=COALESCE(finished_at,now()),
+                                   message=%s
+                               WHERE status='running' AND started_at >= %s""",
+                            (f'{type(exc).__name__}: {str(exc)[:700]}', invocation_started - timedelta(seconds=5)))
+            lock_conn.commit()
+            raise
+    finally:
+        if acquired:
+            try:
+                with lock_conn.cursor() as cur:
+                    cur.execute('SELECT pg_advisory_unlock(%s)', (_PIPELINE_ADVISORY_LOCK_KEY,))
+                lock_conn.commit()
+            except Exception:
+                log.exception('Could not explicitly release pipeline advisory lock; connection close will release it.')
+        lock_conn.close()
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(name)s | %(message)s')

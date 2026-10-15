@@ -23,7 +23,7 @@ class Settings:
     openai_api_key: str = os.getenv('OPENAI_API_KEY', '')
     openai_model: str = os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
     ai_classification_batch_size: int = int(os.getenv('AI_CLASSIFICATION_BATCH_SIZE', '12'))
-    ai_classification_run_limit: int = int(os.getenv('AI_CLASSIFICATION_RUN_LIMIT', '72'))
+    ai_classification_run_limit: int = int(os.getenv('AI_CLASSIFICATION_RUN_LIMIT', '48'))
     # Historical backlog processing is opt-in. Scheduled runs classify fresh articles only.
     ai_classification_backfill_enabled: bool = os.getenv('AI_CLASSIFICATION_BACKFILL_ENABLED', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
     # Failed articles are retried only after this cooldown unless explicitly queued for repair.

@@ -1,4 +1,4 @@
-"""Union topic-created event links and structured-entity links for News Radar v0.7.3.
+"""Union topic-created event links and structured-entity links for News Radar v0.7.4.
 
 A Timeline is the transitive component reached through either of these rules:
 1. two articles share an active, specific EVENT entity (no time limit);

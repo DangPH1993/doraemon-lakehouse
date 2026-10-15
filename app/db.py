@@ -7,7 +7,10 @@ from .config import settings
 def get_conn():
     if not settings.database_url:
         raise RuntimeError('DATABASE_URL is not configured')
-    conn = psycopg.connect(settings.database_url, row_factory=dict_row, connect_timeout=12)
+    conn = psycopg.connect(
+        settings.database_url, row_factory=dict_row, connect_timeout=12,
+        options='-c statement_timeout=120000 -c lock_timeout=15000 -c idle_in_transaction_session_timeout=180000',
+    )
     try:
         yield conn
         conn.commit()

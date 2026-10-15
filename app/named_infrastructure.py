@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from .processing import normalize_space, norm_name
+from .entity_rules import is_administrative_location, should_track_entity
 
 # Match longer heads before shorter overlapping heads. Canonical heads are stable display
 # forms, while the specific name comes from the actual article text.
@@ -198,12 +199,18 @@ def extract_named_infrastructure_entities(text: str) -> list[dict[str, Any]]:
         if not tail_tokens:
             continue
         raw_tail = text[head_match.end():last_end].strip(' \t-–—/')
-        if not raw_tail:
+        linear_head_keys = {'đường', 'phố', 'đại lộ', 'tuyến đường', 'quốc lộ', 'tỉnh lộ',
+                            'đường tỉnh', 'đường cao tốc', 'đường vành đai', 'tuyến cao tốc'}
+        if not raw_tail or (head_key in linear_head_keys and is_administrative_location(raw_tail)):
+            # Prevent false linear objects like ``Phố TPHCM`` where a city abbreviation
+            # was misread as a street name. Keep true named landmarks such as Vịnh Hạ Long.
             continue
         name = normalize_space(f'{display_head} {raw_tail}')[:180]
         if len(norm_name(name)) < 5:
             continue
         entity_type = _HEAD_TYPES.get(head_key, 'LOCATION')
+        if not should_track_entity(name, entity_type):
+            continue
         # Only suppress a PERSON extraction if the person name is exactly the named suffix
         # of a physical-location label (e.g. "Võ Văn Kiệt" inside "Cầu vượt Võ Văn Kiệt").
         person_suffix = None
@@ -243,7 +250,9 @@ def augment_entities_with_named_infrastructure(
     content_text: str = '',
 ) -> tuple[list[dict[str, Any]], set[str]]:
     """Add named infrastructure and return safe PERSON names to suppress for this article."""
-    text = normalize_space('. '.join(x for x in (title, summary, content_text) if x))
+    # Keep extraction bounded: RSS content bodies can be >100 KB, while the title,
+    # summary and opening excerpt contain nearly all useful named-object mentions.
+    text = normalize_space('. '.join(x for x in (title, summary, (content_text or '')[:5000]) if x))
     infrastructure = extract_named_infrastructure_entities(text)
     suppress_names: set[str] = set()
     for item in infrastructure:

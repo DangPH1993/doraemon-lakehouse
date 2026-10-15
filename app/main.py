@@ -22,7 +22,7 @@ from .timeline_groups import refresh_article_timeline_group
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.3',description='News Radar with structured named entities and topic-plus-entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.4',description='News Radar with structured named entities and topic-plus-entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -115,7 +115,7 @@ def public_news_page(): return FileResponse('static/news.html')
 def public_following_page(): return FileResponse('static/following.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.7.3'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.7.4'}
 @app.get('/api/health/ready')
 def ready():
     try:
