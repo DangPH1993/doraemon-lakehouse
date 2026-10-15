@@ -20,6 +20,7 @@ from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, add_entity_to_lookup,
                                 entity_name_variants, resolve_entity_in_lookup,
                                 resolve_entity_in_database, strip_person_title)
+from .field_categories import classify_field_category
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -376,14 +377,14 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
             if len(content_text) < 80: quality -= 20
             if not author: quality -= 5
             with conn.cursor() as cur:
-                cur.execute("""insert into news_articles(source_id,raw_id,external_id,url,canonical_url,title,summary,content_text,author,language,published_at,headline_hash,content_hash,is_excluded,exclude_reason,quality_score)
-                               values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                cur.execute("""insert into news_articles(source_id,raw_id,external_id,url,canonical_url,title,summary,content_text,author,language,published_at,headline_hash,content_hash,is_excluded,exclude_reason,quality_score,field_category)
+                               values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                                on conflict(source_id,canonical_url) do nothing
                                returning article_id""",
                             (source['source_id'], raw_id, external_id, raw_url, canon, title, summary,
                              content_text, author, source.get('language') or 'vi', pub_date,
                              hash_text(title), hash_text(content_text) if content_text else None,
-                             excluded, reason, max(0, quality)))
+                             excluded, reason, max(0, quality), classify_field_category(f'{title} {summary}')))
                 inserted_row = cur.fetchone()
             if not inserted_row:
                 result['skipped_existing'] += 1

@@ -19,10 +19,11 @@ from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
 from .timeline_groups import refresh_article_timeline_group
+from .field_categories import FIELD_CATEGORIES, is_broad_field_topic
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.4',description='News Radar with structured named entities and topic-plus-entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.5',description='News Radar with structured named entities and topic-plus-entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -441,7 +442,8 @@ def dashboard():
     top_topics=fetch_all("""select t.topic_id,t.name,sum(f.article_count)::int as article_count
                           from fact_topic_daily f join topics t on t.topic_id=f.topic_id
                           where f.stat_date >= (current_date - 6) and t.status='active' and t.topic_type='event'
-                          group by t.topic_id,t.name order by article_count desc limit 10""")
+                          group by t.topic_id,t.name order by article_count desc limit 100""")
+    top_topics = [item for item in top_topics if not is_broad_field_topic(item.get('name'))][:10]
     top_sources=fetch_all("""select s.source_id,s.name,count(a.article_id)::int as article_count
                            from data_sources s left join news_articles a on a.source_id=s.source_id and a.collected_at>=now()-interval '7 days'
                            group by s.source_id,s.name order by article_count desc limit 8""")
@@ -459,6 +461,7 @@ def dashboard():
     WHERE f.topic_id IS NOT NULL AND t.topic_id IS NOT NULL
     ORDER BY CASE p.period_type WHEN 'day' THEN 1 WHEN 'week' THEN 2 ELSE 3 END, f.rank_position
     """, (settings.timezone,))
+    hot_topics = [item for item in hot_topics if not is_broad_field_topic(item.get('topic_name'))]
     return {'counts':counts,'collection_trend':trend,'top_topics':top_topics,'top_sources':top_sources,'recent_runs':recent_runs,'hot_topics':hot_topics}
 
 @app.get('/api/public/news/overview')
@@ -519,7 +522,8 @@ def public_hot_topics(
                        WHERE f.period_type=%s AND f.period_start=%s
                          AND t.status='active' AND t.topic_type='event'
                        ORDER BY f.rank_position ASC, f.hotness_score DESC
-                       LIMIT %s""", (period, period_start, limit))
+                       LIMIT %s""", (period, period_start, max(100, min(600, limit * 20))))
+    items = [item for item in items if not is_broad_field_topic(item.get('topic_name'))][:limit]
     return {'period': period, 'period_start': period_start, 'period_label': label,
             'items': items, 'count': len(items)}
 
@@ -527,6 +531,7 @@ def public_hot_topics(
 @app.get('/api/public/news/articles')
 def public_daily_articles(
     q: str | None = Query(default=None, max_length=150),
+    field_category: str | None = Query(default=None, max_length=60),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
 ):
@@ -537,8 +542,17 @@ def public_daily_articles(
         raise HTTPException(status_code=503, detail='Could not resolve local date')
 
     query = (q or '').strip()[:150]
+    chosen_field = (field_category or '').strip()
+    allowed_fields = set(FIELD_CATEGORIES) | {'Chưa phân loại'}
+    if chosen_field and chosen_field not in allowed_fields:
+        raise HTTPException(status_code=400, detail='Lĩnh vực không hợp lệ')
     where = ["a.is_excluded=false"]
     vals: list = []
+    if chosen_field == 'Chưa phân loại':
+        where.append('a.field_category IS NULL')
+    elif chosen_field:
+        where.append('a.field_category=%s')
+        vals.append(chosen_field)
     if query:
         term = f"%{query}%"
         # A search query intentionally has no publication-date predicate: search the
@@ -593,6 +607,7 @@ def public_daily_articles(
                               a.published_at, a.collected_at,
                               coalesce(a.published_at,a.collected_at) AS timeline_at,
                               s.name AS source_name,
+                              coalesce(a.field_category,'Chưa phân loại') AS field_category,
                               coalesce((SELECT json_agg(t.name ORDER BY t.name)
                                         FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
                                         WHERE at.article_id=a.article_id AND t.status='active'), '[]'::json) AS topics,
@@ -633,7 +648,8 @@ def public_daily_articles(
                        """ + from_sql + where_sql +
                        " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
                        vals + [page_size, (page - 1) * page_size])
-    return {'date': today, 'query': query or None, 'items': items,
+    return {'date': today, 'query': query or None, 'field_category': chosen_field or None,
+            'field_categories': [*FIELD_CATEGORIES, 'Chưa phân loại'], 'items': items,
             'pagination': pagination_meta(page, page_size, total)}
 
 
