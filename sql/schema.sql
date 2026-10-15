@@ -84,6 +84,7 @@ create table if not exists news_articles (
   is_excluded boolean not null default false,
   exclude_reason text,
   quality_score numeric(5,2) not null default 100,
+  field_category text,
   event_topic_scanned_at timestamptz,
   ai_classified_at timestamptz,
   ai_classification jsonb not null default '{}'::jsonb,
@@ -95,6 +96,7 @@ create index if not exists idx_news_articles_published on news_articles(publishe
 create index if not exists idx_news_articles_collected on news_articles(collected_at desc);
 create index if not exists idx_news_articles_headline_hash on news_articles(headline_hash);
 create index if not exists idx_news_articles_source on news_articles(source_id, collected_at desc);
+create index if not exists idx_news_articles_field_category_published on news_articles(field_category,published_at desc) where is_excluded=false;
 create index if not exists idx_news_articles_ai_pending on news_articles (coalesce(published_at, collected_at) desc) where ai_classified_at is null and is_excluded=false;
 create index if not exists idx_news_articles_timeline_id on news_articles (timeline_id, published_at desc, article_id desc);
 
