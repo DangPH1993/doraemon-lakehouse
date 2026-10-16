@@ -18,11 +18,11 @@ from .entity_rules import should_track_entity
 from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
-from .field_categories import FIELD_CATEGORIES, is_broad_field_topic
+from .field_categories import FIELD_CATEGORIES, LEGACY_BROAD_TOPIC_LABELS, is_broad_field_topic
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.7',description='News Radar with structured named entities and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.8',description='News Radar with structured named entities and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -115,7 +115,7 @@ def public_news_page(): return FileResponse('static/news.html')
 def public_following_page(): return FileResponse('static/following.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.7.6'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':app.version}
 @app.get('/api/health/ready')
 def ready():
     try:
