@@ -3,7 +3,8 @@
 This is deliberately separate from RSS ingestion/classification and Telegram delivery. It
 compares candidate catalog records linked to the rolling 48-hour article window, stores pair
 decisions to avoid paying for the same comparison repeatedly, transfers references to canonical
-IDs, and archives duplicates rather than deleting history.
+IDs, and deletes GenAI-rejected discovered Entities and their dependent links. A minimal
+rejection fingerprint is retained separately so the same rejected name does not trigger repeat calls.
 """
 from __future__ import annotations
 
@@ -36,6 +37,8 @@ MAX_TOPICS = max(20, min(20000, int(os.getenv('RECONCILIATION_MAX_TOPICS', '5000
 MAX_ENTITIES = max(20, min(30000, int(os.getenv('RECONCILIATION_MAX_ENTITIES', '12000'))))
 MAX_PAIRS_PER_TYPE = max(10, min(250, int(os.getenv('RECONCILIATION_MAX_PAIRS_PER_TYPE', '80'))))
 PAIRS_PER_REQUEST = max(5, min(30, int(os.getenv('RECONCILIATION_PAIRS_PER_REQUEST', '20'))))
+ENTITY_QUALITY_BATCH_SIZE = max(5, min(40, int(os.getenv('RECONCILIATION_ENTITY_QUALITY_BATCH_SIZE', '25'))))
+ENTITY_QUALITY_MAX_PER_RUN = max(20, min(5000, int(os.getenv('RECONCILIATION_ENTITY_QUALITY_MAX_PER_RUN', '500'))))
 MERGE_CONFIDENCE = max(0.5, min(1.0, float(os.getenv('RECONCILIATION_MERGE_CONFIDENCE', '0.88'))))
 
 _DDL = (
@@ -45,6 +48,18 @@ _DDL = (
          alias text NOT NULL, normalized_alias text NOT NULL,
          created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(topic_id,normalized_alias))""",
     "CREATE INDEX IF NOT EXISTS idx_topic_aliases_normalized ON topic_aliases(normalized_alias)",
+    """CREATE TABLE IF NOT EXISTS catalog_entity_quality_decisions (
+         entity_id bigint PRIMARY KEY REFERENCES entities(entity_id) ON DELETE CASCADE,
+         input_fingerprint text NOT NULL,
+         decision text NOT NULL CHECK(decision IN ('KEEP','REJECT')),
+         confidence numeric(5,4) NOT NULL DEFAULT 0,
+         reason text NOT NULL DEFAULT '',
+         model text NOT NULL DEFAULT '',
+         decided_at timestamptz NOT NULL DEFAULT now())""",
+    "CREATE INDEX IF NOT EXISTS idx_catalog_entity_quality_decisions_decision ON catalog_entity_quality_decisions(decision,decided_at DESC)",
+    """CREATE TABLE IF NOT EXISTS catalog_entity_quality_rejections (
+         identity_fingerprint text PRIMARY KEY,
+         rejected_at timestamptz NOT NULL DEFAULT now())""",
     """CREATE TABLE IF NOT EXISTS catalog_reconciliation_runs (
          run_id bigserial PRIMARY KEY, started_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz,
          status text NOT NULL DEFAULT 'running' CHECK(status IN ('running','success','partial','failed','skipped')),
@@ -119,7 +134,7 @@ def load_recent_topics() -> list[dict]:
 
 def load_recent_entities() -> list[dict]:
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""SELECT e.entity_id AS id,e.canonical_name AS name,e.entity_type,e.normalized_name,e.created_at,
+        cur.execute("""SELECT e.entity_id AS id,e.canonical_name AS name,e.entity_type,e.normalized_name,e.origin,e.description,e.created_at,
                               count(DISTINCT a.article_id)::int AS article_count,
                               max(coalesce(a.published_at,a.collected_at)) AS last_seen_at,
                               (array_agg(DISTINCT a.title))[1:3] AS sample_titles,
@@ -128,10 +143,293 @@ def load_recent_entities() -> list[dict]:
                        JOIN news_articles a ON a.article_id=ae.article_id
                        WHERE e.status='active' AND a.is_excluded=false
                          AND coalesce(a.published_at,a.collected_at)>=now()-(%s * interval '1 hour')
-                       GROUP BY e.entity_id,e.canonical_name,e.entity_type,e.normalized_name,e.created_at
+                       GROUP BY e.entity_id,e.canonical_name,e.entity_type,e.normalized_name,e.origin,e.description,e.created_at
                        ORDER BY max(coalesce(a.published_at,a.collected_at)) DESC,count(DISTINCT a.article_id) DESC,e.entity_id
                        LIMIT %s""", (WINDOW_HOURS, MAX_ENTITIES))
         return [dict(row) for row in cur.fetchall()]
+
+
+
+def load_entities_for_quality_review() -> list[dict]:
+    """Load active discovered entities for GenAI identity validation, with article context.
+
+    Manual entities are deliberately excluded from automatic rejection. The model receives
+    the canonical name, type, aliases, description, and up to three article contexts; the
+    decision cache fingerprint excludes volatile article counts/titles to avoid repeat spend.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT e.entity_id AS id,e.canonical_name AS name,e.entity_type,
+                              e.normalized_name,e.description,e.origin,e.status,e.created_at,
+                              coalesce(ctx.article_count,0)::int AS article_count,
+                              coalesce(ctx.last_seen_at,e.created_at) AS last_seen_at,
+                              coalesce(ctx.sample_titles,ARRAY[]::text[]) AS sample_titles,
+                              coalesce(ctx.sample_contexts,ARRAY[]::text[]) AS sample_contexts,
+                              coalesce((SELECT array_agg(ea.alias ORDER BY ea.alias)
+                                        FROM entity_aliases ea WHERE ea.entity_id=e.entity_id),ARRAY[]::text[]) AS aliases
+                       FROM entities e
+                       LEFT JOIN LATERAL (
+                           SELECT count(DISTINCT a.article_id)::int AS article_count,
+                                  max(coalesce(a.published_at,a.collected_at)) AS last_seen_at,
+                                  ARRAY(SELECT a2.title
+                                        FROM article_entities ae2 JOIN news_articles a2 ON a2.article_id=ae2.article_id
+                                        WHERE ae2.entity_id=e.entity_id AND a2.is_excluded=false
+                                        ORDER BY coalesce(a2.published_at,a2.collected_at) DESC NULLS LAST,a2.article_id DESC
+                                        LIMIT 3) AS sample_titles,
+                                  ARRAY(SELECT left(concat_ws(' | ',nullif(a3.title,''),nullif(a3.summary,'')),320)
+                                        FROM article_entities ae3 JOIN news_articles a3 ON a3.article_id=ae3.article_id
+                                        WHERE ae3.entity_id=e.entity_id AND a3.is_excluded=false
+                                        ORDER BY coalesce(a3.published_at,a3.collected_at) DESC NULLS LAST,a3.article_id DESC
+                                        LIMIT 3) AS sample_contexts
+                           FROM article_entities ae JOIN news_articles a ON a.article_id=ae.article_id
+                           WHERE ae.entity_id=e.entity_id AND a.is_excluded=false
+                       ) ctx ON true
+                       WHERE e.status='active' AND e.origin='discovered'
+                       ORDER BY coalesce(ctx.last_seen_at,e.created_at) DESC NULLS LAST,e.entity_id DESC
+                       LIMIT %s""", (MAX_ENTITIES,))
+        return [dict(row) for row in cur.fetchall()]
+
+
+def _entity_quality_fingerprint(item: dict) -> str:
+    """Stable fingerprint: new articles alone must not trigger repeat GenAI calls."""
+    payload = {
+        'entity_id': int(item['id']),
+        'name': str(item.get('name') or '').strip(),
+        'entity_type': str(item.get('entity_type') or 'UNKNOWN').upper(),
+        'aliases': sorted(str(x).strip() for x in _json_list(item.get('aliases')) if str(x).strip()),
+        'description': str(item.get('description') or '').strip(),
+        'origin': str(item.get('origin') or ''),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:32]
+
+
+def _entity_quality_rejection_fingerprint(item: dict) -> str:
+    """Fingerprint rejected identity metadata without an entity_id, surviving row deletion/recreation."""
+    payload = {
+        'name': str(item.get('name') or '').strip(),
+        'entity_type': str(item.get('entity_type') or 'UNKNOWN').upper(),
+        'aliases': sorted(str(x).strip() for x in _json_list(item.get('aliases')) if str(x).strip()),
+        'description': str(item.get('description') or '').strip(),
+        'origin': str(item.get('origin') or 'discovered'),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:32]
+
+
+def _delete_discovered_entities(cur, entity_ids: list[int]) -> int:
+    """Physically delete rejected discovered entities and clear non-FK reconciliation references.
+
+    Entity aliases, article_entities and saved-entity references use ON DELETE CASCADE. Article
+    records remain. Denormalized FACT entity counts are recalculated for affected articles.
+    """
+    entity_ids = sorted({int(x) for x in entity_ids})
+    if not entity_ids:
+        return 0
+    cur.execute("SELECT entity_id FROM entities WHERE entity_id=ANY(%s::bigint[]) AND origin='discovered'", (entity_ids,))
+    actual_ids = [int(row['entity_id']) for row in cur.fetchall()]
+    if not actual_ids:
+        return 0
+    cur.execute("SELECT DISTINCT article_id FROM article_entities WHERE entity_id=ANY(%s::bigint[])", (actual_ids,))
+    article_ids = [int(row['article_id']) for row in cur.fetchall()]
+    cur.execute("DELETE FROM catalog_reconciliation_decisions WHERE object_type='entity' AND (left_id=ANY(%s::bigint[]) OR right_id=ANY(%s::bigint[]))", (actual_ids, actual_ids))
+    cur.execute("DELETE FROM catalog_reconciliation_merges WHERE object_type='entity' AND (source_id=ANY(%s::bigint[]) OR target_id=ANY(%s::bigint[]))", (actual_ids, actual_ids))
+    cur.execute("DELETE FROM entities WHERE entity_id=ANY(%s::bigint[]) AND origin='discovered' RETURNING entity_id", (actual_ids,))
+    deleted_ids = [int(row['entity_id']) for row in cur.fetchall()]
+    if article_ids:
+        cur.execute("""UPDATE fact_news_article f
+                       SET detected_entity_count = (SELECT count(DISTINCT ae.entity_id)::int
+                                                    FROM article_entities ae WHERE ae.article_id=f.article_id)
+                       WHERE f.article_id=ANY(%s::bigint[])""", (article_ids,))
+    return len(deleted_ids)
+
+
+def _persist_rejection_tombstone(cur, item: dict) -> None:
+    """Store only an opaque identity hash so deleted Entity details are not retained."""
+    cur.execute("""INSERT INTO catalog_entity_quality_rejections(identity_fingerprint,rejected_at)
+                   VALUES(%s,now())
+                   ON CONFLICT(identity_fingerprint) DO UPDATE SET rejected_at=now()""",
+                (_entity_quality_rejection_fingerprint(item),))
+
+
+def _entity_quality_context(item: dict) -> dict:
+    return {
+        'entity_id': int(item['id']),
+        'name': str(item.get('name') or '')[:160],
+        'entity_type': str(item.get('entity_type') or 'UNKNOWN').upper()[:40],
+        'aliases': [str(x)[:90] for x in _json_list(item.get('aliases'))[:8]],
+        'description': str(item.get('description') or '')[:220],
+        'article_count': int(item.get('article_count') or 0),
+        'sample_articles': [str(x)[:320] for x in _json_list(item.get('sample_contexts'))[:3]],
+        'sample_titles': [str(x)[:180] for x in _json_list(item.get('sample_titles'))[:3]],
+    }
+
+
+def call_openai_entity_quality(items: list[dict]) -> list[dict]:
+    """Ask GenAI whether every candidate is a concrete, identifiable entity."""
+    if not settings.openai_api_key:
+        raise RuntimeError('OPENAI_API_KEY is required for entity quality validation')
+    prompt = {
+        'task': 'validate whether each discovered entity is a specific identifiable real-world entity',
+        'decision_policy': [
+            'KEEP only when the name and supplied context identify a specific entity/referent, not merely a type, concept, common word, role, label, fragment, or ambiguous name.',
+            'Specific entities include identifiable people, organizations, companies, locations, events, named products/brands, groups, works, and other particular named objects.',
+            'REJECT generic nouns, bare ambiguous words, category labels, ordinal labels such as "Kỳ 1", noisy extraction fragments, and entries whose context is insufficient to identify a particular entity.',
+            'Do not infer an identity from a short name alone or from a famous name association without support in the supplied context.',
+            'When uncertain, choose REJECT. Do not invent facts. The decision must be grounded only in the supplied name, type, aliases, description and article context.',
+            'Evaluate identity/eligibility, not whether two records are duplicates. Do not merge or rename records.',
+        ],
+        'response_schema': {'decisions': [{'entity_id': 123, 'decision': 'KEEP or REJECT', 'confidence': 0.0, 'reason': 'short evidence-based explanation'}]},
+        'entities': [_entity_quality_context(item) for item in items],
+    }
+    payload = {
+        'model': settings.openai_model.strip() or 'gpt-4.1-mini',
+        'messages': [
+            {'role': 'system', 'content': 'Return only valid JSON, no markdown. Decide every supplied entity exactly once. Use only the supplied entity_id values. KEEP is allowed only for a specific, identifiable entity; otherwise REJECT.'},
+            {'role': 'user', 'content': json.dumps(prompt, ensure_ascii=False)},
+        ],
+        'response_format': {'type': 'json_object'}, 'temperature': 0.0, 'max_completion_tokens': 3500,
+    }
+    response = requests.post(OPENAI_URL, headers={'Authorization': f'Bearer {settings.openai_api_key}', 'Content-Type': 'application/json'},
+                             json=payload, timeout=(10, max(10, settings.ai_request_timeout_seconds)))
+    if not response.ok:
+        raise RuntimeError(f'OpenAI entity-quality HTTP {response.status_code}: {response.text[:300]}')
+    try:
+        parsed = json.loads(response.json()['choices'][0]['message']['content'])
+    except Exception as exc:
+        raise RuntimeError('OpenAI entity-quality response returned invalid JSON') from exc
+    decisions = parsed.get('decisions') if isinstance(parsed, dict) else None
+    if not isinstance(decisions, list):
+        raise RuntimeError('OpenAI entity-quality response is missing decisions[]')
+    return [decision for decision in decisions if isinstance(decision, dict)]
+
+
+def validate_discovered_entities(items: list[dict], stats: dict) -> set[int]:
+    """Return GenAI-approved discovered IDs; physically delete all GenAI-rejected records.
+
+    Only an opaque stable-metadata fingerprint is retained in a separate rejection tombstone. It is not an Entity row and has no FK to entities, so deleting a
+    rejected Entity does not cause the same unchanged label to consume GenAI tokens again.
+    """
+    stats.setdefault('entity_quality_candidates', len(items))
+    stats.setdefault('entity_quality_pending', 0)
+    stats.setdefault('entity_quality_checked', 0)
+    stats.setdefault('entity_quality_kept', 0)
+    stats.setdefault('entity_quality_rejected', 0)
+    stats.setdefault('entity_quality_deleted', 0)
+    stats.setdefault('entity_quality_deleted_from_previous_runs', 0)
+    model_name = settings.openai_model.strip() or 'gpt-4.1-mini'
+
+    # Migrate decisions from v0.7.10: formerly rejected rows were archived. Persist a detached
+    # tombstone before physically deleting them so the next article cannot trigger the same call.
+    previously_rejected: list[dict] = []
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT e.entity_id AS id,e.canonical_name AS name,e.normalized_name,e.entity_type,
+                              e.description,e.origin,
+                              coalesce((SELECT array_agg(ea.alias ORDER BY ea.alias)
+                                        FROM entity_aliases ea WHERE ea.entity_id=e.entity_id),ARRAY[]::text[]) AS aliases,
+                              d.confidence,d.reason,d.model
+                       FROM catalog_entity_quality_decisions d
+                       JOIN entities e ON e.entity_id=d.entity_id
+                       WHERE d.decision='REJECT' AND e.origin='discovered'""")
+        previously_rejected = [dict(row) for row in cur.fetchall()]
+        for item in previously_rejected:
+            _persist_rejection_tombstone(cur, item)
+        previous_ids = [int(item['id']) for item in previously_rejected]
+        deleted_previous = _delete_discovered_entities(cur, previous_ids)
+        stats['entity_quality_deleted_from_previous_runs'] += deleted_previous
+        stats['entity_quality_deleted'] += deleted_previous
+        stats['entity_quality_rejected'] += deleted_previous
+
+    previous_ids_set = {int(item['id']) for item in previously_rejected}
+    items = [item for item in items if int(item['id']) not in previous_ids_set]
+    if not items:
+        return set()
+
+    # If a rejected identity is rediscovered with unchanged metadata under a new entity_id,
+    # delete it directly from the persistent tombstone without another GenAI request.
+    rejection_fingerprints = [_entity_quality_rejection_fingerprint(item) for item in items]
+    rejected_fingerprints: set[str] = set()
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT identity_fingerprint FROM catalog_entity_quality_rejections WHERE identity_fingerprint=ANY(%s::text[])",
+                    (rejection_fingerprints,))
+        rejected_fingerprints = {str(row['identity_fingerprint']) for row in cur.fetchall()}
+        tombstoned = [item for item in items
+                      if _entity_quality_rejection_fingerprint(item) in rejected_fingerprints]
+        tombstoned_ids = [int(item['id']) for item in tombstoned]
+        deleted_tombstoned = _delete_discovered_entities(cur, tombstoned_ids)
+        stats['entity_quality_deleted'] += deleted_tombstoned
+        stats['entity_quality_rejected'] += deleted_tombstoned
+
+    tombstoned_ids_set = {int(item['id']) for item in tombstoned}
+    items = [item for item in items if int(item['id']) not in tombstoned_ids_set]
+    if not items:
+        return set()
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT entity_id,input_fingerprint,decision FROM catalog_entity_quality_decisions WHERE entity_id=ANY(%s::bigint[])",
+                    ([int(item['id']) for item in items],))
+        cached = {int(row['entity_id']): dict(row) for row in cur.fetchall()}
+
+    pending = [item for item in items if not (
+        cached.get(int(item['id'])) and cached[int(item['id'])]['input_fingerprint'] == _entity_quality_fingerprint(item)
+        and str(cached[int(item['id'])]['decision']).upper() == 'KEEP'
+    )]
+    pending = pending[:ENTITY_QUALITY_MAX_PER_RUN]
+    keep_ids = {
+        int(item['id']) for item in items
+        if cached.get(int(item['id']))
+        and cached[int(item['id'])]['input_fingerprint'] == _entity_quality_fingerprint(item)
+        and str(cached[int(item['id'])]['decision']).upper() == 'KEEP'
+    }
+    stats['entity_quality_pending'] = len(pending)
+
+    for offset in range(0, len(pending), ENTITY_QUALITY_BATCH_SIZE):
+        batch = pending[offset:offset + ENTITY_QUALITY_BATCH_SIZE]
+        expected = {int(item['id']): item for item in batch}
+        stats['llm_calls'] += 1
+        returned = call_openai_entity_quality(batch)
+        seen: set[int] = set()
+        validated: list[tuple[dict, str, float, str]] = []
+        for decision in returned:
+            try:
+                entity_id = int(decision.get('entity_id'))
+            except (TypeError, ValueError):
+                continue
+            if entity_id not in expected or entity_id in seen:
+                continue
+            normalized_decision = str(decision.get('decision') or '').strip().upper()
+            if normalized_decision not in {'KEEP', 'REJECT'}:
+                continue
+            try:
+                confidence = max(0.0, min(1.0, float(decision.get('confidence', 0) or 0)))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            reason = str(decision.get('reason') or '')[:500]
+            seen.add(entity_id)
+            validated.append((expected[entity_id], normalized_decision, confidence, reason))
+        missing = set(expected) - seen
+        if missing:
+            raise RuntimeError(f'GenAI omitted or invalidated {len(missing)} entity-quality decision(s); batch was not applied')
+        with get_conn() as conn, conn.cursor() as cur:
+            for item, decision, confidence, reason in validated:
+                entity_id = int(item['id'])
+                if decision == 'REJECT':
+                    _persist_rejection_tombstone(cur, item)
+                    deleted = _delete_discovered_entities(cur, [entity_id])
+                    stats['entity_quality_rejected'] += 1
+                    stats['entity_quality_deleted'] += deleted
+                else:
+                    cur.execute("UPDATE entities SET status='active',updated_at=now() WHERE entity_id=%s AND origin='discovered'", (entity_id,))
+                    keep_ids.add(entity_id)
+                    stats['entity_quality_kept'] += 1
+                    cur.execute("""INSERT INTO catalog_entity_quality_decisions(entity_id,input_fingerprint,decision,confidence,reason,model,decided_at)
+                                   VALUES(%s,%s,'KEEP',%s,%s,%s,now())
+                                   ON CONFLICT(entity_id) DO UPDATE SET input_fingerprint=excluded.input_fingerprint,
+                                     decision=excluded.decision,confidence=excluded.confidence,reason=excluded.reason,
+                                     model=excluded.model,decided_at=now()""",
+                                (entity_id, _entity_quality_fingerprint(item), confidence, reason, model_name))
+                stats['entity_quality_checked'] += 1
+        log.info('GenAI entity quality batch: %s entities reviewed; KEEP=%s REJECT=%s', len(batch),
+                 sum(1 for _, decision, _, _ in validated if decision == 'KEEP'),
+                 sum(1 for _, decision, _, _ in validated if decision == 'REJECT'))
+    return keep_ids
 
 
 def _fingerprint(kind: str, item: dict) -> str:
@@ -517,13 +815,21 @@ def run_reconciliation() -> dict:
         run_id = int(cur.fetchone()['run_id'])
     try:
         topics = load_recent_topics()
+        quality_candidates = load_entities_for_quality_review()
+        quality_keep_ids = validate_discovered_entities(quality_candidates, stats)
         entities = load_recent_entities()
+        # GenAI-approved discovered entities may proceed to duplicate reconciliation. Manual
+        # entities remain eligible; discovered entities not yet reviewed are held for a later run.
+        entities = [item for item in entities
+                    if str(item.get('origin') or '').lower() != 'discovered' or int(item['id']) in quality_keep_ids]
         stats['topics_seen'], stats['entities_seen'] = len(topics), len(entities)
-        log.info('Reconciliation run %s started: window=%sh topics=%s entities=%s', run_id, WINDOW_HOURS, len(topics), len(entities))
+        log.info('Reconciliation run %s started: window=%sh topics=%s entities=%s quality_reviewed=%s quality_keep=%s quality_reject=%s',
+                 run_id, WINDOW_HOURS, len(topics), len(entities), stats.get('entity_quality_checked', 0),
+                 stats.get('entity_quality_kept', 0), stats.get('entity_quality_rejected', 0))
         _process_kind('topic', topics, stats)
         _process_kind('entity', entities, stats)
         stats['status'] = 'success'
-        stats['message'] = 'Catalog reconciliation finished.'
+        stats['message'] = 'Catalog reconciliation finished; discovered entity quality decisions are GenAI-validated and cached.'
         return stats
     except Exception as exc:
         stats['status'] = 'failed'
