@@ -93,6 +93,23 @@ _HEADS = {
 # Named companies, outlets and institutions are proper entities too. The descriptor stays
 # in the canonical name so e.g. ``Siêu thị Big C`` is not collapsed into an unrelated person.
 _ORG_HEADS = {
+    'công an tỉnh': 'Công an tỉnh',
+    'công an thành phố': 'Công an thành phố',
+    'công an huyện': 'Công an huyện',
+    'công an xã': 'Công an xã',
+    'bộ công an': 'Bộ Công an',
+    'bộ': 'Bộ',
+    'sở': 'Sở',
+    'cục': 'Cục',
+    'phòng cảnh sát': 'Phòng Cảnh sát',
+    'phòng công an': 'Phòng Công an',
+    'ủy ban nhân dân': 'Ủy ban nhân dân',
+    'uỷ ban nhân dân': 'Ủy ban nhân dân',
+    'công an': 'Công an',
+    'viện': 'Viện',
+    'học viện': 'Học viện',
+    'báo': 'Báo',
+    'đài truyền hình': 'Đài truyền hình',
     'siêu thị': 'Siêu thị',
     'trung tâm y tế': 'Trung tâm y tế',
     'trung tâm hội nghị': 'Trung tâm hội nghị',
@@ -135,6 +152,8 @@ _HEAD_TYPES.update({key.casefold(): 'ORG' for key in _ORG_HEADS})
 _HEADS.update(_ORG_HEADS)
 _PRODUCT_HEADS = {'tàu điện', 'tàu', 'máy bay', 'xe buýt'}
 _HEAD_TYPES.update({key.casefold(): 'PRODUCT' for key in _PRODUCT_HEADS})
+STANDALONE_NAMED_ORGS = {'Bộ Công an', 'NASA', 'SpaceX'}
+
 _EVENT_HEADS = {
     'vụ án': 'Vụ án', 'vụ kiện': 'Vụ kiện', 'giải đấu': 'Giải đấu',
     'giải vô địch': 'Giải vô địch', 'hội nghị': 'Hội nghị', 'chiến dịch': 'Chiến dịch',
@@ -169,6 +188,13 @@ def extract_named_infrastructure_entities(text: str) -> list[dict[str, Any]]:
         return []
 
     candidates: list[dict[str, Any]] = []
+    for standalone in STANDALONE_NAMED_ORGS:
+        for match in re.finditer(r'(?<!\w)' + re.escape(standalone) + r'(?!\w)', text, re.IGNORECASE | re.UNICODE):
+            display = normalize_space(match.group(0))
+            canonical = standalone if norm_name(display) == norm_name(standalone) else display
+            if should_track_entity(canonical, 'ORG'):
+                candidates.append({'name': canonical, 'type': 'ORG', 'aliases': [canonical], 'kind_head': '',
+                                   'proper_name': canonical, 'start': match.start(), 'end': match.end(), 'person_suffix': None})
     for head_match in _HEAD_PATTERN.finditer(text):
         head_key = head_match.group('head').casefold()
         display_head = _HEADS.get(head_key)

@@ -16,11 +16,13 @@ from .processing import (apply_cleaning_rules, canonicalize_url, clean_html, ext
                          hash_text, keyword_matches, norm_name, normalize_space, slugify, extract_event_signature)
 from .entity_rules import should_track_entity, is_grounded_entity
 from .named_infrastructure import augment_entities_with_named_infrastructure
+from .named_people import extract_named_person_entities
+from .named_proper_nouns import extract_named_proper_noun_entities
 from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, add_entity_to_lookup,
                                 entity_name_variants, resolve_entity_in_lookup,
                                 resolve_entity_in_database, strip_person_title)
-from .field_categories import classify_field_category
+from .field_categories import classify_field_category, is_broad_field_topic
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -95,10 +97,10 @@ def load_entity_lookup(conn) -> dict:
 
 
 def load_active_topics(conn) -> list[dict]:
-    """Load category topics once per run; event topics are handled separately."""
+    """Load specific event topics only; editorial fields live in news_articles.field_category."""
     with conn.cursor() as cur:
-        cur.execute("select topic_id, keywords, topic_type, event_key from topics where status='active' and (topic_type='category' or event_key is null)")
-        return cur.fetchall()
+        cur.execute("select topic_id, keywords, topic_type, event_key, name from topics where status='active' and topic_type='event'")
+        return [row for row in cur.fetchall() if not is_broad_field_topic(row.get('name'))]
 
 
 def process_entities(conn, article_id, source_id, title, summary, entity_lookup=None):
@@ -110,6 +112,17 @@ def process_entities(conn, article_id, source_id, title, summary, entity_lookup=
     entities, suppressed_person_names = augment_entities_with_named_infrastructure(
         title, summary, raw_entities, content_text=''
     )
+    # Vietnamese NER quality is uneven with the English spaCy fallback. Recover named
+    # people explicitly introduced by roles in the title/summary before GenAI runs.
+    seen_names = {norm_name(str(item.get('name') or '')) for item in entities}
+    for person in extract_named_person_entities(f'{title}. {summary}'):
+        if norm_name(person.get('name') or '') not in seen_names:
+            entities.append(person)
+            seen_names.add(norm_name(person.get('name') or ''))
+    for named_item in extract_named_proper_noun_entities(f'{title}. {summary}'):
+        if norm_name(named_item.get('name') or '') not in seen_names:
+            entities.append(named_item)
+            seen_names.add(norm_name(named_item.get('name') or ''))
     source_text = normalize_space(f'{title}. {summary}')
     confidence_by_key = {(norm_name(name), str(typ).upper()): confidence for name, typ, confidence in raw_found}
     found = []
@@ -216,10 +229,13 @@ def assign_event_topic(conn, article_id: int, title: str) -> bool:
         with conn.cursor() as cur:
             cur.execute("update news_articles set event_topic_scanned_at=now() where article_id=%s", (article_id,))
         return False
+    if is_broad_field_topic(event.get('name')):
+        with conn.cursor() as cur:
+            cur.execute("update news_articles set event_topic_scanned_at=now() where article_id=%s", (article_id,))
+        return False
+    # Editorial fields are stored on news_articles.field_category, never as Topic parents.
+    parent_id = None
     with conn.cursor() as cur:
-        cur.execute("select topic_id from topics where slug=%s and topic_type='category' and status='active' limit 1", (event['parent_slug'],))
-        parent = cur.fetchone()
-        parent_id = parent['topic_id'] if parent else None
         slug = 'event-' + slugify(event['name'])
         cur.execute("""insert into topics(slug,event_key,name,description,keywords,parent_topic_id,topic_type,status,origin)
                        values(%s,%s,%s,%s,%s,%s,'event','active','discovered')
@@ -778,21 +794,7 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
         stage_started = time.monotonic()
         refresh_facts()
         log.info('Stage FACT refresh complete; elapsed=%.1fs', time.monotonic()-stage_started)
-        # Send a compact Telegram digest from the same pipeline run. This is optional and
-        # must never make successful ingestion fail if Telegram is not configured/unavailable.
-        stage_started = time.monotonic()
-        try:
-            from .telegram_notifications import send_telegram_digests, cleanup_old_delivery_markers
-            totals['telegram_notifications'] = send_telegram_digests()
-            if totals['telegram_notifications'].get('status') != 'skipped_missing_token':
-                try:
-                    totals['telegram_delivery_markers_purged'] = cleanup_old_delivery_markers()
-                except Exception:
-                    log.exception('Telegram delivery-marker cleanup failed; continuing pipeline.')
-            log.info('Stage Telegram digest complete: %s; elapsed=%.1fs', totals['telegram_notifications'], time.monotonic()-stage_started)
-        except Exception as exc:
-            totals['telegram_notifications'] = {'status': 'failed_non_blocking', 'error': f'{type(exc).__name__}: {str(exc)[:240]}'}
-            log.exception('Telegram notification stage failed; ingestion will continue.')
+        # Telegram delivery is handled by its own scheduled workflow.
         # Raw capture is temporary: after facts are persisted for every clean article,
         # purge RSS payloads to conserve the Supabase database quota.
         totals['raw_rows_purged'] = purge_raw_feed_items_after_fact_refresh()

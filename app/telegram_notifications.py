@@ -1,5 +1,7 @@
 """Telegram linking replies and per-user digest notifications.
 
+Digest delivery is invoked by the standalone ``app.telegram_digest`` workflow, not RSS ingestion.
+
 The sender runs as a stage inside the existing ingestion pipeline; no extra workflow is needed.
 """
 from __future__ import annotations

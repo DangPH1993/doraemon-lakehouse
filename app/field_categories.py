@@ -31,6 +31,23 @@ _CATEGORY_ALIASES.update({
 
 # Priority-ordered terms also used to create a SQL fallback for legacy records that
 # have not yet been through the new classifier. Keep phrases specific, not broad labels.
+
+# Labels that appeared historically as Topics even though they are editorial fields.
+# Keep these out of the event topic catalog and migrate their article links to field_category.
+LEGACY_BROAD_TOPIC_LABELS = (
+    'Thời sự', 'Thế giới', 'Kinh doanh', 'Bất động sản', 'Pháp luật', 'Giáo dục',
+    'Sức khỏe', 'Đời sống', 'Du lịch', 'Khoa học', 'Số hóa', 'Xe', 'Thể thao',
+    'Văn hóa - Giải trí', 'Môi trường', 'Ý kiến - Góc nhìn',
+    'Văn hóa & du lịch', 'Văn hóa và du lịch', 'Văn hóa & giải trí', 'Văn hóa và giải trí',
+    'Xã hội & đời sống', 'Xã hội và đời sống', 'Chính trị & chính sách', 'Chính trị và chính sách',
+    'Công nghệ', 'Công nghệ số', 'Kinh tế & doanh nghiệp', 'Kinh doanh & thị trường',
+    'Bất động sản & hạ tầng', 'Y tế & sức khỏe', 'Y tế, sức khỏe và khoa học',
+    'Tin tức trong ngày', 'Thời sự và chính sách', 'Công nghệ và đời sống', 'Xã hội đời sống',
+    'Văn hóa du lịch', 'Y tế, sức khỏe & khoa học', 'Tin nổi bật', 'Tin tức nổi bật',
+    'Artificial Intelligence', 'Technology', 'Economy & Business', 'Politics & Policy',
+    'Defence & Security', 'Climate & Environment', 'Health & Science',
+)
+
 FIELD_KEYWORDS = {
     'Thế giới': ('ngoại giao', 'đại sứ mỹ', 'nhà trắng', 'quốc hội mỹ', 'trump', 'putin', 'ukraine', 'nga tấn công', 'trung đông', 'iran', 'israel', 'triều tiên', 'hàn quốc', 'trung quốc', 'đài loan', 'bầu cử mỹ', 'world cup'),
     'Pháp luật': ('khởi tố', 'bắt tạm giam', 'tạm giam', 'truy tố', 'xét xử', 'kháng cáo', 'bản án', 'bị cáo', 'nghi can', 'nghi phạm', 'điều tra vụ án', 'lừa đảo', 'tử vong do', 'vi phạm pháp luật', 'công an điều tra'),
@@ -75,7 +92,7 @@ def is_broad_field_topic(name: str | None) -> bool:
     key = _fold(name or '')
     if not key:
         return False
-    broad = set(_CATEGORY_ALIASES) | {
+    broad = set(_CATEGORY_ALIASES) | {_fold(x) for x in LEGACY_BROAD_TOPIC_LABELS} | {
         'xa hoi va doi song', 'xa hoi doi song', 'kinh te va doanh nghiep', 'bat dong san va ha tang',
         'chinh tri va chinh sach', 'y te suc khoe va khoa hoc', 'van hoa va giai tri',
         'van hoa du lich', 'tin tuc trong ngay', 'thoi su va chinh sach', 'cong nghe va doi song',

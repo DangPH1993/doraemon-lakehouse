@@ -101,7 +101,7 @@ def should_track_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
     if folded in _GENERIC_FOLDED or folded in _NON_ENTITY_FOLDED or folded in _REGION_FOLDED:
         return False
     typ = str(entity_type or 'UNKNOWN').upper().strip()
-    if typ != 'PERSON' and is_administrative_location(name):
+    if typ not in {'PERSON', 'PRODUCT'} and is_administrative_location(name):
         return False
     try:
         from .entity_names import named_head_and_tail
@@ -111,7 +111,7 @@ def should_track_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
         # named landmark ("Vịnh Hạ Long"). Only suppress linear transport labels here.
         linear_heads = {norm_name(x) for x in ('đường', 'phố', 'đại lộ', 'tuyến đường', 'quốc lộ', 'tỉnh lộ',
                                                 'đường tỉnh', 'đường cao tốc', 'đường vành đai', 'tuyến cao tốc')}
-        if typ != 'PERSON' and typed_name and norm_name(typed_name[0]) in linear_heads and is_administrative_location(typed_name[1]):
+        if typ not in {'PERSON', 'PRODUCT'} and typed_name and norm_name(typed_name[0]) in linear_heads and is_administrative_location(typed_name[1]):
             return False
     except Exception:
         pass
@@ -158,6 +158,11 @@ def is_grounded_entity(name: str, aliases, article_text: str, entity_type: str =
         match = re.search(re.escape(candidate), source, flags=re.IGNORECASE | re.UNICODE)
         if not match:
             continue
+        if typ == 'PRODUCT' and is_administrative_location(candidate):
+            local = source[max(0, match.start() - 100):min(len(source), match.end() + 100)].casefold()
+            product_context = ('hyundai', 'toyota', 'ford', 'kia', 'mazda', 'vinfast', 'mẫu xe', 'hãng xe', 'xe mới', 'ô tô', 'xe điện', 'suv', 'sedan', 'dòng xe')
+            if not any(cue in local for cue in product_context):
+                continue
         surface = match.group(0)
         tokens = re.findall(r"[^\W_]+(?:[.'’][^\W_]+)*", surface, flags=re.UNICODE)
         if not tokens:

@@ -25,6 +25,7 @@ from .entity_resolution import entity_name_variants, resolve_entity_in_database
 from .entity_names import entity_normalized_key, named_head_and_tail
 from .field_categories import FIELD_CATEGORIES, classify_field_category, normalize_field_category, is_broad_field_topic
 from .named_people import extract_named_person_entities
+from .named_proper_nouns import extract_named_proper_noun_entities
 
 log = logging.getLogger('mini-lakehouse.openai')
 OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions'
@@ -62,14 +63,15 @@ Phân tích TỪNG bài riêng biệt, trả về CHỈ JSON hợp lệ, không 
 
 Mục tiêu:
 1) field_category phải là ĐÚNG MỘT nhãn trong danh sách lĩnh vực cố định ở cuối prompt. Đây là trường phân loại biên tập của bài báo, KHÔNG tạo Topic trong database và KHÔNG dùng tên lĩnh vực làm event_topic_name.
-2) event_topic_name chỉ là NHÃN HIỂN THỊ ngắn gọn cho một VỤ VIỆC CỤ THỂ, không phải định danh timeline. Không dùng tên quá rộng kiểu lĩnh vực như "Văn hóa - Giải trí", "Kinh doanh", "Thời sự", "Đời sống", "Văn hóa & du lịch" làm tên sự kiện. Nếu không rõ cùng một vụ việc thì ưu tiên tách nhãn hơn gộp nhãn; chỉ gộp nếu xác định CÙNG VỤ VIỆC CỤ THỂ. Nếu không có sự kiện cụ thể thì để null.
-3) existing_event_topic_id chỉ giúp tái sử dụng nhãn hiển thị tương đương cho cùng một vụ việc, không quyết định toàn bộ timeline.
-4) Trích xuất entity chính xác và đủ: đọc tiêu đề, mô tả và content_excerpt. Không được bỏ qua người/công trình/tổ chức/sản phẩm/sự kiện có tên riêng chỉ vì nó xuất hiện trong một cụm dài. Ví dụ "Hoa hậu Phan Thị Mơ" phải trích xuất PERSON "Phan Thị Mơ"; "Đường Võ Nguyên Giáp", "Cao tốc Mỹ Thuận - Cần Thơ", "Cầu vượt Võ Văn Kiệt", "Siêu thị Big C" (tên loại + tên riêng là "siêu thị Big C"), "Bộ Công an" phải giữ trọn tên loại + tên riêng.
-5) Danh từ chung thiếu tên riêng không phải entity: "một con đường", "siêu thị", "một bệnh viện", "người dân", "người Dao". Không tạo entity cho quốc gia/tỉnh-thành/vùng rộng khi chỉ là bối cảnh. Địa danh cấp hành chính nằm trong tên công trình có tên riêng vẫn là một phần entity đầy đủ.
-6) Tên entity chuẩn phải giữ đủ cấu trúc loại + tên nếu văn bản nêu đủ; normalized key theo cấu trúc loại*_<tên>, ví dụ "đường*_võ nguyên giáp", "siêu thị*_big c". Bí danh chỉ là biến thể trực tiếp có căn cứ trong văn bản.
-7) entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Dùng EVENT cho một sự kiện/giải đấu/vụ án cụ thể có danh tính riêng, không dùng EVENT cho lĩnh vực chung. Chỉ dùng entity_type='EVENT' khi có sự kiện cụ thể.
-8) Không cần tìm động từ chính để ghép Timeline. Backend sử dụng entity sự kiện và entity chuẩn theo quy tắc riêng.
-9) confidence là số 0..1. Không bịa entity, nhãn, diễn biến hoặc quan hệ. Tối đa 15 entity/bài, ưu tiên các entity cụ thể gắn trực tiếp với nội dung.
+2) event_topic_name là NHÃN TOPIC mô tả khái quát nhất nội dung chính của BÀI BÁO, đủ cụ thể để phân biệt câu chuyện nhưng không phải lĩnh vực biên tập. Không dùng tên quá rộng như "Văn hóa - Giải trí", "Kinh doanh", "Thời sự", "Đời sống", "Văn hóa & du lịch". Luôn trả nhãn topic cho bài; nếu chưa đủ thông tin về sự kiện, dùng một nhãn ngắn dựa trên tiêu đề/mô tả thay vì để null. Không cần cố gộp topic với bài khác: pipeline đối soát riêng sẽ hợp nhất nhãn tương đương sau đó.
+3) existing_event_topic_id có thể để null; không cần tìm topic hiện có trong danh mục. Pipeline đối soát định kỳ sẽ hợp nhất topic tương đương về cùng topic_id.
+4) Trích xuất TẤT CẢ danh từ riêng khác nhau xuất hiện trong TIÊU ĐỀ và TÓM TẮT: người, tổ chức, thương hiệu, sản phẩm/model, công trình, địa điểm cụ thể, giải đấu/vụ án/sự kiện cụ thể. Không chỉ chọn 1-3 entity nổi bật. Có thể dùng content_excerpt để phân biệt loại/ngữ cảnh, nhưng không thêm entity chỉ xuất hiện ngoài tiêu đề/tóm tắt.
+5) Không bỏ tên nằm trong cụm dài: "Hoa hậu Phan Thị Mơ" -> PERSON "Phan Thị Mơ"; "Đường Võ Nguyên Giáp", "Cao tốc Mỹ Thuận - Cần Thơ", "Cầu vượt Võ Văn Kiệt", "Siêu thị Big C" và "Bộ Công an" phải giữ đủ tên loại + tên riêng. Bổ sung các tên sản phẩm/tổ chức như "Hyundai Bayon 2027", "Santa Fe", "Intel", "CXMT", "Deep Blue Aerospace", "Starship", "SpaceX" khi được nhắc trong tiêu đề/tóm tắt.
+6) Danh từ chung thiếu tên riêng không phải entity: "một con đường", "siêu thị", "một bệnh viện", "người dân", "người Dao". Không tạo entity cho quốc gia/tỉnh-thành/vùng rộng khi chỉ là bối cảnh. Địa danh cấp hành chính nằm trong tên công trình có tên riêng vẫn là một phần entity đầy đủ.
+7) Tên entity chuẩn phải giữ đủ cấu trúc loại + tên nếu văn bản nêu đủ; normalized key theo cấu trúc loại*_<tên>, ví dụ "đường*_võ nguyên giáp", "siêu thị*_big c". Bí danh chỉ là biến thể trực tiếp có căn cứ trong văn bản.
+8) entity_type thuộc PERSON, ORG, LOCATION, PRODUCT, EVENT, GROUP, UNKNOWN. Dùng EVENT cho một sự kiện/giải đấu/vụ án cụ thể có danh tính riêng, không dùng EVENT cho lĩnh vực chung.
+9) Không cần tìm động từ chính để ghép Timeline. Backend sử dụng entity sự kiện và entity chuẩn theo quy tắc riêng.
+10) confidence là số 0..1. Không bịa entity, nhãn, diễn biến hoặc quan hệ. Trả về tối đa 50 entity/bài; nếu bài có hơn 50 thì ưu tiên tất cả các tên riêng đầy đủ trong tiêu đề và tóm tắt theo thứ tự xuất hiện, không chỉ lấy entity nổi tiếng nhất.
 
 Định dạng JSON bắt buộc:
 {{"results":[{{"article_id":123,"field_category":"Văn hóa - Giải trí","existing_event_topic_id":null,"event_topic_name":"Phan Thị Mơ chia sẻ về cuộc sống","event_confidence":0.91,"entities":[{{"name":"Phan Thị Mơ","type":"PERSON","aliases":[]}}]}}]}}
@@ -101,7 +103,7 @@ def _call_openai(batch: list[dict], categories: list[dict], existing_events: lis
         ],
         'response_format': {'type': 'json_object'},
         'temperature': 0.1,
-        'max_completion_tokens': 4096,
+        'max_completion_tokens': 8192,
     }
     response = requests.post(
         OPENAI_CHAT_COMPLETIONS_URL,
@@ -185,6 +187,20 @@ def _upsert_entity(conn, name: str, entity_type: str, aliases: list[str] | None 
         log.warning('Ambiguous entity alias; not auto-merging or creating duplicate name=%r type=%s', name, entity_type)
         return None
     entity_id = int(resolved_row['entity_id']) if resolved_row else None
+    # Upgrade a deterministic UNKNOWN recovery in-place when GenAI later recognizes its type.
+    # Preserve entity_id and follows; avoid violating the unique (normalized_name, entity_type) key.
+    if entity_id is not None and resolved_row and str(resolved_row.get('entity_type') or '').upper() == 'UNKNOWN' and entity_type != 'UNKNOWN':
+        typed_key = entity_normalized_key(canonical_name, entity_type)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT 1 FROM entities WHERE status='active' AND normalized_name=%s
+                           AND entity_type=%s AND entity_id<>%s LIMIT 1""", (typed_key, entity_type, entity_id))
+            if not cur.fetchone():
+                cur.execute("UPDATE entities SET canonical_name=%s,normalized_name=%s,entity_type=%s,updated_at=now() WHERE entity_id=%s",
+                            (canonical_name, typed_key, entity_type, entity_id))
+                resolved_row['canonical_name'] = canonical_name
+                resolved_row['normalized_name'] = typed_key
+                resolved_row['entity_type'] = entity_type
+                log.info('Typed recovered entity in place: entity_id=%s type=%s name=%r', entity_id, entity_type, canonical_name)
     if entity_id is not None and entity_type == 'PERSON' and resolved_row:
         current_norm = norm_name(str(resolved_row.get('canonical_name') or ''))
         preferred = canonical_name
@@ -394,6 +410,9 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
     except (TypeError, ValueError):
         existing_event_id = None
     event_name = normalize_space(str(result.get('event_topic_name') or ''))[:180]
+    topic_label_fallback = not event_name or is_broad_field_topic(event_name)
+    if topic_label_fallback:
+        event_name = _fallback_event_name(article.get('title') or '')
     if is_broad_field_topic(event_name):
         event_name = ''
     try:
@@ -403,9 +422,15 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
     confidence = max(0.0, min(1.0, confidence))
     entities = result.get('entities') if isinstance(result.get('entities'), list) else []
     entities, suppressed_person_names = augment_entities_with_named_infrastructure(
-        article.get('title') or '', article.get('summary') or '', entities, article.get('content_text') or ''
+        article.get('title') or '', article.get('summary') or '', entities, ''
     )
-    grounded_text = normalize_space(' '.join(str(article.get(k) or '') for k in ('title', 'summary', 'content_text'))[:20000])
+    grounded_text = normalize_space(' '.join(str(article.get(k) or '') for k in ('title', 'summary'))[:20000])
+    seen_entity_names = {norm_name(str((item or {}).get('name') or (item or {}).get('canonical_name') or '')) for item in entities if isinstance(item, dict)}
+    for recovered in extract_named_person_entities(grounded_text) + extract_named_proper_noun_entities(grounded_text):
+        recovered_norm = norm_name(recovered.get('name') or '')
+        if recovered_norm and recovered_norm not in seen_entity_names:
+            entities.append(recovered)
+            seen_entity_names.add(recovered_norm)
     existing_entity_names = {norm_name(str((e or {}).get('name') or (e or {}).get('canonical_name') or '')) for e in entities if isinstance(e, dict)}
     for recovered_person in extract_named_person_entities(grounded_text):
         if norm_name(recovered_person['name']) not in existing_entity_names:
@@ -413,7 +438,7 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
             existing_entity_names.add(norm_name(recovered_person['name']))
     field_category_value = normalize_field_category(result.get('field_category'), article.get('title') or '', article.get('summary') or '')
     filtered_entities = []
-    article_text = normalize_space(' '.join(str(article.get(k) or '') for k in ('title', 'summary', 'content_text'))[:20000])
+    article_text = normalize_space(' '.join(str(article.get(k) or '') for k in ('title', 'summary'))[:20000])
     for entity in entities:
         if not isinstance(entity, dict):
             continue
@@ -429,7 +454,7 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
             filtered_entities.append(entity)
         elif entity_name:
             log.debug('Rejected ungrounded/generic entity article_id=%s name=%r type=%s', article_id, entity_name, entity_type)
-    entities = filtered_entities[:15]
+    entities = filtered_entities[:50]
     ai_result = {
         'field_category': field_category_value,
         'field_category_source': 'genai' if normalize_field_category(result.get('field_category'), article.get('title') or '', article.get('summary') or '') == field_category_value and result.get('field_category') else 'rule',
@@ -437,7 +462,7 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
         'existing_event_topic_id': existing_event_id,
         'event_topic_name': event_name or None,
         'event_confidence': confidence,
-        'entities': entities[:15],
+        'entities': entities[:50],
         'named_infrastructure_enriched': True,
     }
     with get_conn() as conn:
@@ -471,9 +496,8 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                         event_name = _fallback_event_name(article.get('title') or '')
                     log.warning('Rejected existing event match: article_id=%s proposed_topic_id=%s topic=%r article=%r',
                                 article_id, existing_event_id, candidate.get('name'), article.get('title'))
-            if event_topic_id is None and event_name and confidence >= 0.55:
-                parent_id = category_id if category_id in category_ids else None
-                event_topic_id = _upsert_event_topic(conn, event_name, confidence, parent_id)
+            if event_topic_id is None and event_name and (confidence >= 0.55 or topic_label_fallback):
+                event_topic_id = _upsert_event_topic(conn, event_name, max(0.55, confidence), None)
             # Replace machine-generated event assignments so one article is not attached to
             # several conflicting event topics. Preserve admin-maintained article associations.
             with conn.cursor() as cur:
@@ -504,7 +528,7 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                                    WHERE ae.entity_id=e.entity_id AND ae.article_id=%s
                                      AND upper(e.entity_type)='PERSON' AND (norm_name(e.canonical_name)=ANY(%s) OR EXISTS (SELECT 1 FROM entity_aliases xa WHERE xa.entity_id=e.entity_id AND xa.normalized_alias=ANY(%s)))""",
                                 (article_id, list(suppressed_person_names), list(suppressed_person_names)))
-                for entity in entities[:15]:
+                for entity in entities[:50]:
                     if not isinstance(entity, dict):
                         continue
                     entity_name = entity.get('name') or entity.get('canonical_name')
@@ -547,7 +571,8 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                WHERE is_excluded=false
                                  AND ((coalesce(published_at,collected_at) >= now()-interval '30 days'
                                        AND (coalesce(ai_classification->>'entity_quality_rules_v075_enriched','false') <> 'true'
-                                            OR coalesce(ai_classification->>'field_category_rules_v075_enriched','false') <> 'true'))
+                                            OR coalesce(ai_classification->>'field_category_rules_v075_enriched','false') <> 'true'
+                                            OR coalesce(ai_classification->>'named_proper_nouns_v076_enriched','false') <> 'true'))
                                       OR field_category IS NULL)
                                ORDER BY coalesce(published_at,collected_at) DESC
                                LIMIT %s""", (limit,))
@@ -559,9 +584,12 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
             title = row.get('title') or ''
             summary = row.get('summary') or ''
             content_text = row.get('content_text') or ''
-            all_text = normalize_space('. '.join((title, summary, content_text)))[:20000]
-            infra = extract_named_infrastructure_entities(all_text)[:15]
+            # Entity evidence is scoped to title + summary, as specified for Radar.
+            # The article body is retained for general data quality, not entity invention.
+            all_text = normalize_space('. '.join((title, summary)))[:20000]
+            infra = extract_named_infrastructure_entities(all_text)[:50]
             named_people = extract_named_person_entities(all_text)
+            proper_nouns = extract_named_proper_noun_entities(all_text)
             suppress = set()
             for item in infra:
                 suffix = item.get('person_suffix')
@@ -656,6 +684,33 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                 recovered_entities.append({'name': person_name, 'type': 'PERSON', 'aliases': person.get('aliases') or []})
                             recovered_norms.add(norm_name(person_name))
 
+                        # Recover proper names missed by the model/NER, constrained to title + summary.
+                        # Explicit PERSON recovery is authoritative, so don't create a second
+                        # UNKNOWN/ORG row for the same person surface form.
+                        named_people_norms = {norm_name(str(x.get('name') or '')) for x in named_people if x.get('name')}
+                        for named in proper_nouns:
+                            named_name = str(named.get('name') or '').strip()
+                            named_type = str(named.get('type') or 'UNKNOWN').upper().strip()
+                            if not named_name or norm_name(named_name) in named_people_norms:
+                                continue
+                            if not is_grounded_entity(named_name, named.get('aliases') or [], all_text, named_type):
+                                continue
+                            named_id = _upsert_entity(conn, named_name, named_type, named.get('aliases') or [])
+                            if not named_id:
+                                continue
+                            cur.execute("SELECT 1 FROM article_entities WHERE article_id=%s AND entity_id=%s AND mention_text=%s", (article_id, named_id, named_name))
+                            was_missing = cur.fetchone() is None
+                            cur.execute("""INSERT INTO article_entities(article_id,entity_id,mention_text,confidence)
+                                           VALUES(%s,%s,%s,0.78) ON CONFLICT(article_id,entity_id,mention_text) DO UPDATE
+                                           SET confidence=GREATEST(article_entities.confidence,excluded.confidence)""",
+                                        (article_id, named_id, named_name))
+                            if norm_name(named_name) not in recovered_norms:
+                                recovered_entities.append({'name': named_name, 'type': named_type, 'aliases': named.get('aliases') or []})
+                                recovered_norms.add(norm_name(named_name))
+                            if was_missing:
+                                stats['entities_added'] += 1
+                                changed = True
+
                         # Save a deterministic editorial field for historical articles, too.
                         existing_field = normalize_field_category(classification.get('field_category'), title, summary)
                         classification['field_category'] = existing_field
@@ -673,8 +728,9 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                 continue
                             if all(norm_name(ename) != norm_name(str(old.get('name') or old.get('canonical_name') or '')) for old in ordered_entities):
                                 ordered_entities.append(entity)
-                        classification['entities'] = ordered_entities[:15]
+                        classification['entities'] = ordered_entities[:50]
                         classification['named_entity_rules_v073_enriched'] = True
+                        classification['named_proper_nouns_v076_enriched'] = True
                         classification['entity_quality_rules_v075_enriched'] = True
                         classification['entity_quality_rules_v075_enriched_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                         cur.execute("""UPDATE news_articles SET ai_classification=%s::jsonb,field_category=%s,updated_at=now()
@@ -693,6 +749,7 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                        || jsonb_build_object('entity_quality_rules_v075_enriched',true,
                                                             'field_category',%s,
                                                             'field_category_rules_v075_enriched',true,
+                                                            'named_proper_nouns_v076_enriched',true,
                                                             'entity_quality_rules_v075_error','row processing failed'),
                                        field_category=coalesce(field_category,%s),updated_at=now() WHERE article_id=%s""", (fallback_field, fallback_field, article_id))
                 except Exception:
@@ -768,42 +825,18 @@ def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[
         return stats
     category_ids: set[int] = set()  # fields are stored on ai_classification; never create category Topics
     started = time.monotonic()
-    classification_started_at = datetime.now(timezone.utc)
-    # Expensive 60-day article/topic aggregation is executed once per run, not once per
-    # OpenAI batch. The former repeated the same large aggregate up to six times per job.
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""select t.topic_id,t.name,t.description,t.keywords,
-                              coalesce(x.article_count,0) as article_count,
-                              coalesce(x.sample_titles,ARRAY[]::text[]) as sample_titles
-                       from topics t left join (
-                         select at.topic_id,count(*)::int as article_count,
-                                (array_agg(a.title order by coalesce(a.published_at,a.collected_at) desc))[1:4] as sample_titles
-                         from article_topics at join news_articles a on a.article_id=at.article_id
-                         where coalesce(a.published_at,a.collected_at)>=now()-interval '60 days'
-                           and a.is_excluded=false and at.assignment_method <> 'admin'
-                         group by at.topic_id
-                       ) x on x.topic_id=t.topic_id
-                       where t.status='active' and t.topic_type='event'
-                       order by x.article_count desc,t.updated_at desc limit 160""")
-        base_event_rows = cur.fetchall()
-    # Old broad category labels may remain from earlier releases; do not send them to GenAI
-    # as candidate event topics, and never let their IDs seed new event assignments.
-    base_event_rows = [r for r in base_event_rows if not is_broad_field_topic(r.get('name'))]
-    base_event_topics = {int(r['topic_id']): r for r in base_event_rows}
-    recently_updated_event_topics: dict[int, dict] = {}
+    # Topic reconciliation is a separate scheduled workflow. Do not load hundreds of
+    # existing topics into each ingestion prompt; generate a specific article label here,
+    # then let the reconciliation workflow merge equivalent labels later.
     for start in range(0, len(articles), batch_size):
         batch_rows = articles[start:start + batch_size]
         prompt_rows = [{'article_id': int(a['article_id']), 'title': a['title'][:600],
                         'summary': (a['summary'] or '')[:1200],
                         'content_excerpt': (a.get('content_text') or '')[:1200],
                         'language': a.get('language') or 'vi'} for a in batch_rows]
-        # Put topics created/updated in this run first, then fill with the one-time
-        # popularity-ranked catalog. Keep the prompt catalog capped at 160 rows.
-        fresh_rows = sorted(recently_updated_event_topics.values(),
-                            key=lambda r: str(r.get('updated_at') or ''), reverse=True)[:40]
-        fresh_ids = {int(r['topic_id']) for r in fresh_rows}
-        base_rows = [r for r in base_event_rows if int(r['topic_id']) not in fresh_ids]
-        batch_existing_events = fresh_rows + base_rows[:max(0, 160 - len(fresh_rows))]
+        # Existing topics are deliberately omitted. The independent reconciliation
+        # workflow is responsible for joining equivalent event labels after ingestion.
+        batch_existing_events = []
         batch_event_topics = {int(r['topic_id']): r for r in batch_existing_events}
         batch_started = time.monotonic()
         log.info('GenAI batch %s/%s started: articles=%s; existing_event_candidates=%s',
@@ -840,17 +873,6 @@ def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[
                                 [(f'{type(exc).__name__}: {str(exc)[:1200]}', r['article_id']) for r in batch_rows])
         finally:
             log.info('GenAI batch %s complete; elapsed=%.1fs', start // batch_size + 1, time.monotonic()-batch_started)
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""select topic_id,name,description,keywords,created_at,updated_at,
-                                      0::int as article_count,ARRAY[]::text[] as sample_titles
-                               from topics
-                               where status='active' and topic_type='event'
-                                 and updated_at >= %s
-                               order by updated_at desc limit 100""", (classification_started_at,))
-            touched = cur.fetchall()
-        for topic in touched:
-            if not is_broad_field_topic(topic.get('name')):
-                recently_updated_event_topics[int(topic['topic_id'])] = topic
     log.info('GenAI event normalization complete: selected=%s classified=%s events=%s entities=%s repaired_mismatches=%s failed=%s elapsed=%.1fs model=%s',
              stats['selected'], stats['classified'], stats['events_assigned'], stats['entities_assigned'], stats['repaired_mismatches'], stats['failed'], time.monotonic()-started, settings.openai_model)
     return stats

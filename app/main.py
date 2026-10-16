@@ -23,7 +23,7 @@ from .field_categories import FIELD_CATEGORIES, is_broad_field_topic
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.5',description='News Radar with structured named entities and topic-plus-entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.6',description='News Radar with structured named entities and topic-plus-entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -81,7 +81,7 @@ class TopicBody(BaseModel):
     name: str = Field(min_length=2,max_length=180)
     description: str = Field(default='',max_length=2000)
     keywords: list[str] = Field(default_factory=list,max_length=100)
-    topic_type: str = 'category'
+    topic_type: str = 'event'
     status: str = 'active'
 class EntityBody(BaseModel):
     canonical_name: str = Field(min_length=2,max_length=180)
@@ -116,7 +116,7 @@ def public_news_page(): return FileResponse('static/news.html')
 def public_following_page(): return FileResponse('static/following.html')
 
 @app.get('/health')
-def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.7.4'}
+def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':'0.7.6'}
 @app.get('/api/health/ready')
 def ready():
     try:
@@ -610,7 +610,7 @@ def public_daily_articles(
                               coalesce(a.field_category,'Chưa phân loại') AS field_category,
                               coalesce((SELECT json_agg(t.name ORDER BY t.name)
                                         FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                                        WHERE at.article_id=a.article_id AND t.status='active'), '[]'::json) AS topics,
+                                        WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topics,
                               coalesce((SELECT json_agg(json_build_object('id', t.topic_id, 'name', t.name) ORDER BY t.name)
                                         FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
                                         WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topic_refs,
@@ -798,7 +798,7 @@ def public_article_timeline(
                                             WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities,
                                   coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
                                             FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                                            WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
+                                            WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '') AS topics
                            FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id
                            WHERE a.timeline_id=%s AND a.is_excluded=false
                            ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
@@ -851,7 +851,7 @@ def public_topic_timeline(
                                             WHERE ae.article_id=a.article_id AND e.status='active'),'') AS entities,
                                   coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
                                             FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                                            WHERE at.article_id=a.article_id AND t.status='active'),'') AS topics
+                                            WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'') AS topics
                            FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id
                            WHERE a.timeline_id=%s AND a.is_excluded=false
                            ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
@@ -886,7 +886,7 @@ def public_entity_timeline(
                               s.name AS source_name,
                               coalesce((SELECT string_agg(t.name, ', ' ORDER BY t.name)
                                         FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                                        WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
+                                        WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '') AS topics
                        """ + from_sql + where_sql +
                        " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
                        (entity_id, page_size, (page - 1) * page_size))
@@ -943,11 +943,20 @@ def list_articles(
     q: str | None = None,
     source_id: int | None = None,
     excluded: bool | None = None,
+    field_category: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
 ):
-    """Return one page of articles plus total-count metadata."""
+    """Return one page of articles plus total-count metadata, including editorial field."""
     where=[]; vals=[]
+    chosen_field = (field_category or '').strip()
+    allowed_fields = set(FIELD_CATEGORIES) | {'Chưa phân loại'}
+    if chosen_field and chosen_field not in allowed_fields:
+        raise HTTPException(status_code=400, detail='Lĩnh vực không hợp lệ')
+    if chosen_field == 'Chưa phân loại':
+        where.append("(a.field_category IS NULL OR a.field_category='Chưa phân loại')")
+    elif chosen_field:
+        where.append('a.field_category=%s'); vals.append(chosen_field)
     if q:
         where.append('(a.title ilike %s or a.summary ilike %s or a.url ilike %s)')
         term=f'%{q[:150]}%'; vals.extend([term,term,term])
@@ -961,10 +970,10 @@ def list_articles(
     total = int((total_row or {}).get('total', 0))
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
-    sql="""select a.article_id,a.title,a.url,a.canonical_url,a.summary,left(a.content_text,500) as content_preview,a.author,a.language,a.published_at,a.collected_at,a.quality_score,a.is_excluded,a.exclude_reason,s.name as source_name,
-           coalesce((select string_agg(t.name,', ' order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id),'') as topics,
+    sql="""select a.article_id,a.title,a.url,a.canonical_url,a.summary,left(a.content_text,500) as content_preview,a.author,a.language,a.published_at,a.collected_at,a.quality_score,a.is_excluded,a.exclude_reason,s.name as source_name,coalesce(a.field_category,'Chưa phân loại') as field_category,
+           coalesce((select string_agg(t.name,', ' order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id and t.topic_type='event' and t.status='active'),'') as topics,
            coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id and e.status='active'),'') as entities,
-           coalesce((select json_agg(t.name order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id),'[]'::json) as topic_names,
+           coalesce((select json_agg(t.name order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id and t.topic_type='event' and t.status='active'),'[]'::json) as topic_names,
            coalesce((select json_agg(e.canonical_name order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id and e.status='active'),'[]'::json) as entity_names""" + from_sql + where_sql + ' order by a.collected_at desc limit %s offset %s'
     items = fetch_all(sql, vals + [page_size, (page - 1) * page_size])
     return {'items': items, 'pagination': pagination_meta(page, page_size, total)}
@@ -975,7 +984,8 @@ def get_article_classifications(article_id: int):
     if not article:
         raise HTTPException(status_code=404, detail='Article not found')
     topics = fetch_all("""select t.topic_id,t.name,t.topic_type from article_topics at
-                         join topics t on t.topic_id=at.topic_id where at.article_id=%s order by t.name""", (article_id,))
+                         join topics t on t.topic_id=at.topic_id where at.article_id=%s
+                           and t.topic_type='event' and t.status='active' order by t.name""", (article_id,))
     entities = fetch_all("""select distinct e.entity_id,e.canonical_name,e.entity_type from article_entities ae
                            join entities e on e.entity_id=ae.entity_id where ae.article_id=%s and e.status='active' order by e.canonical_name""", (article_id,))
     return {'article': article, 'topics': topics, 'entities': entities}
@@ -986,11 +996,13 @@ def patch_article_classifications(article_id: int, body: ArticleClassificationBo
     if not article:
         raise HTTPException(status_code=404, detail='Article not found')
     topic_names = list(dict.fromkeys(str(x).strip()[:180] for x in body.topic_names if str(x).strip()))
+    if any(is_broad_field_topic(name) for name in topic_names):
+        raise HTTPException(status_code=400, detail='Lĩnh vực không phải Topic. Hãy dùng thuộc tính Lĩnh vực của bài báo.')
     entity_names = list(dict.fromkeys(str(x).strip()[:180] for x in body.entity_names if str(x).strip() and should_track_entity(str(x).strip()[:180], 'UNKNOWN')))
     topic_ids: list[int] = []
     entity_records: list[tuple[int, str]] = []
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("select topic_id,name,slug,event_key,topic_type from topics where status='active'")
+        cur.execute("select topic_id,name,slug,event_key,topic_type from topics where status='active' and topic_type='event'")
         all_topics = cur.fetchall()
         by_topic_norm = {norm_name(t['name']): t for t in all_topics}
         by_slug = {t['slug']: t for t in all_topics}
@@ -1069,9 +1081,9 @@ def patch_article_classifications(article_id: int, body: ArticleClassificationBo
 
 @app.get('/api/topics/{topic_id}/timeline', dependencies=[Depends(require_admin)])
 def topic_timeline(topic_id: int, limit: int = Query(default=100, ge=1, le=300)):
-    topic = fetch_one("select topic_id,name,description,topic_type,parent_topic_id from topics where topic_id=%s", (topic_id,))
+    topic = fetch_one("select topic_id,name,description,topic_type,parent_topic_id from topics where topic_id=%s and topic_type='event' and status='active'", (topic_id,))
     if not topic:
-        raise HTTPException(status_code=404, detail='Topic not found')
+        raise HTTPException(status_code=404, detail='Active event Topic not found')
     rows = fetch_all("""select recent.article_id,recent.title,recent.url,recent.summary,recent.author,
                              recent.source_name,recent.published_at,recent.collected_at,recent.timeline_at,
                              coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name)
@@ -1115,7 +1127,7 @@ def list_topics(
     all_items: bool = Query(default=False, alias='all'),
 ):
     """Paginated topic catalog. `all=true` is reserved for the timeline picker."""
-    where=[]; vals=[]
+    where=["t.topic_type='event'", "t.status='active'", "lower(btrim(t.name)) <> ALL(%s::text[])"]; vals=[[label.casefold() for label in LEGACY_BROAD_TOPIC_LABELS]]
     if q:
         where.append('(t.name ilike %s or t.slug ilike %s or t.description ilike %s)')
         term=f'%{q[:150]}%'; vals.extend([term,term,term])
@@ -1135,7 +1147,8 @@ def list_topics(
 @app.post('/api/topics',dependencies=[Depends(require_admin)])
 def create_topic(body:TopicBody):
     if body.status not in {'active','archived'}: raise HTTPException(status_code=400,detail='status must be active or archived')
-    if body.topic_type not in {'category','event'}: raise HTTPException(status_code=400,detail='topic_type must be category or event')
+    if body.topic_type != 'event': raise HTTPException(status_code=400,detail='Topic chỉ dùng cho sự kiện cụ thể; lĩnh vực được lưu riêng trên bài báo.')
+    if is_broad_field_topic(body.name): raise HTTPException(status_code=400,detail='Tên này là lĩnh vực, không phải Topic sự kiện.')
     slug=slugify(body.name)
     row=fetch_one("""insert into topics(slug,name,description,keywords,topic_type,status,origin) values(%s,%s,%s,%s,%s,%s,'manual') returning *""",(slug,body.name.strip(),body.description, [x.strip() for x in body.keywords if x.strip()],body.topic_type,body.status))
     return row
@@ -1144,7 +1157,8 @@ def patch_topic(topic_id:int,patch:dict=Body(...)):
     allowed={'name','description','keywords','status','topic_type'}; fields={k:v for k,v in patch.items() if k in allowed}
     if not fields: raise HTTPException(status_code=400,detail='No allowed fields')
     if 'status' in fields and fields['status'] not in {'active','archived'}: raise HTTPException(status_code=400,detail='Invalid status')
-    if 'topic_type' in fields and fields['topic_type'] not in {'category','event'}: raise HTTPException(status_code=400,detail='topic_type must be category or event')
+    if 'topic_type' in fields and fields['topic_type'] != 'event': raise HTTPException(status_code=400,detail='Topic chỉ dùng cho sự kiện cụ thể; lĩnh vực được lưu riêng trên bài báo.')
+    if 'name' in fields and is_broad_field_topic(fields['name']): raise HTTPException(status_code=400,detail='Tên này là lĩnh vực, không phải Topic sự kiện.')
     if 'name' in fields: fields['slug']=slugify(fields['name'])
     sets=[]; vals=[]
     for k,v in fields.items(): sets.append(f'{k}=%s'); vals.append(v)
@@ -1158,9 +1172,12 @@ def approve_topic(candidate_id:int):
     candidate=fetch_one("select * from topic_candidates where candidate_id=%s",(candidate_id,))
     if not candidate: raise HTTPException(status_code=404,detail='Candidate not found')
     if candidate['status']!='pending': raise HTTPException(status_code=409,detail='Candidate is not pending')
+    candidate_type = candidate.get('candidate_type') or 'event'
+    if candidate_type != 'event' or is_broad_field_topic(candidate.get('suggested_name')):
+        fetch_one("update topic_candidates set status='rejected',last_seen_at=now() where candidate_id=%s returning candidate_id", (candidate_id,))
+        return {'candidate_id': candidate_id, 'status': 'rejected', 'reason': 'Lĩnh vực không được tạo thành Topic sự kiện.'}
     with get_conn() as conn, conn.cursor() as cur:
         slug=slugify(candidate['suggested_name'])
-        candidate_type = candidate.get('candidate_type') or 'event'
         cur.execute("""insert into topics(slug,name,description,keywords,topic_type,origin) values(%s,%s,%s,%s,%s,'discovered')
                        on conflict(slug) do update set name=excluded.name,topic_type=excluded.topic_type returning topic_id""",(slug,candidate['suggested_name'],'Discovered from recurring headline cluster',candidate['keywords'] or [],candidate_type))
         topic_id=cur.fetchone()['topic_id']
