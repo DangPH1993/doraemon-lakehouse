@@ -1,4 +1,4 @@
-name: Mini Lakehouse Topic Entity Reconciliation
+name: Mini Lakehouse Topic Entity Reconciliation + Entity Quality
 
 on:
   schedule:
@@ -26,7 +26,7 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Reconcile topics and entities linked to recent articles
+      - name: Validate discovered entities with GenAI, then reconcile equivalent topics/entities
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -37,6 +37,8 @@ jobs:
           RECONCILIATION_MAX_ENTITIES: "12000"
           RECONCILIATION_MAX_PAIRS_PER_TYPE: "80"
           RECONCILIATION_PAIRS_PER_REQUEST: "20"
+          RECONCILIATION_ENTITY_QUALITY_BATCH_SIZE: "25"
+          RECONCILIATION_ENTITY_QUALITY_MAX_PER_RUN: "500"
           RECONCILIATION_MERGE_CONFIDENCE: "0.88"
           PYTHONUNBUFFERED: "1"
         run: |
