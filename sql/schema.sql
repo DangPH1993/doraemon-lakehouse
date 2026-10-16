@@ -75,6 +75,8 @@ create table if not exists news_articles (
   summary text not null default '',
   content_text text not null default '',
   author text,
+  image_url text,
+  image_checked_at timestamptz,
   language text not null default 'en',
   published_at timestamptz,
   collected_at timestamptz not null default now(),
@@ -92,10 +94,13 @@ create table if not exists news_articles (
   timeline_id bigint,
   unique(source_id, canonical_url)
 );
+ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS image_url text;
+ALTER TABLE news_articles ADD COLUMN IF NOT EXISTS image_checked_at timestamptz;
 create index if not exists idx_news_articles_published on news_articles(published_at desc nulls last);
 create index if not exists idx_news_articles_collected on news_articles(collected_at desc);
 create index if not exists idx_news_articles_headline_hash on news_articles(headline_hash);
 create index if not exists idx_news_articles_source on news_articles(source_id, collected_at desc);
+create index if not exists idx_news_articles_image_backfill on news_articles ((coalesce(published_at,collected_at)) desc) where image_url is null and image_checked_at is null;
 create index if not exists idx_news_articles_field_category_published on news_articles(field_category,published_at desc) where is_excluded=false;
 create index if not exists idx_news_articles_ai_pending on news_articles (coalesce(published_at, collected_at) desc) where ai_classified_at is null and is_excluded=false;
 create index if not exists idx_news_articles_timeline_id on news_articles (timeline_id, published_at desc, article_id desc);
@@ -300,7 +305,7 @@ insert into topics(slug,name,description,keywords,origin) values
 on conflict(slug) do nothing;
 
 insert into data_model_catalog(table_name,model_type,description,grain) values
- ('news_articles','operational','Clean-layer news items with canonical URL and quality status','One record per source + canonical URL'),
+ ('news_articles','operational','Clean-layer news items with canonical URL, publisher-hosted image URL and quality status','One record per source + canonical URL'),
  ('raw_feed_items','operational','Raw parsed RSS entry payloads for traceability','One latest payload per source + entry key'),
  ('data_sources','dimension','Configured RSS source registry and sync status','One record per source'),
  ('topics','dimension','Approved topic taxonomy and matching keywords','One record per topic'),
