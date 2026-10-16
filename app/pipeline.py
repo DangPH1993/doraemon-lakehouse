@@ -26,6 +26,7 @@ from .field_categories import (
     classify_field_category, is_broad_field_topic, normalize_field_category,
     TOPIC_REQUIRED_FIELD_CATEGORIES, requires_event_topic,
 )
+from .article_images import extract_image_url, _lookup_open_graph_images, _IMAGE_BACKFILL_LIMIT_PER_RUN
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -74,6 +75,51 @@ def extract_feed_content(entry: dict) -> tuple[str,str]:
     content_text = clean_html(html)[:120000]
     summary = clean_html(summary_html)[:4000]
     return summary, content_text
+
+
+def backfill_article_image_urls(limit: int = _IMAGE_BACKFILL_LIMIT_PER_RUN) -> dict:
+    """Backfill image URLs for older rows, without downloading image files or rechecking forever."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT a.article_id, a.url, r.raw_payload
+                       FROM news_articles a
+                       LEFT JOIN raw_feed_items r ON r.raw_id=a.raw_id
+                       WHERE a.image_url IS NULL AND a.image_checked_at IS NULL
+                       ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC
+                       LIMIT %s""", (max(0, int(limit)),))
+        rows = cur.fetchall()
+    if not rows:
+        return {'checked': 0, 'from_rss': 0, 'from_og': 0, 'without_image': 0}
+
+    rss_found = 0
+    lookup_items = []
+    for row in rows:
+        payload = row.get('raw_payload') or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = {}
+        rss_url = extract_image_url(payload if isinstance(payload, dict) else {}, row.get('url'))
+        item = {'article_id': row['article_id'], 'raw_url': row['url'], 'image_url': rss_url,
+                'image_source': 'rss' if rss_url else None, 'image_lookup_attempted': False}
+        if rss_url:
+            rss_found += 1
+        lookup_items.append(item)
+    og_attempts, og_found = _lookup_open_graph_images(lookup_items, len(lookup_items))
+
+    with get_conn() as conn, conn.cursor() as cur:
+        for item in lookup_items:
+            # Every row in this bounded historical batch has either been resolved from RSS
+            # metadata or had a page lookup attempt. Mark it checked to avoid a request loop.
+            cur.execute("""UPDATE news_articles
+                           SET image_url=%s, image_checked_at=now()
+                           WHERE article_id=%s AND image_url IS NULL AND image_checked_at IS NULL""",
+                        (item.get('image_url'), item['article_id']))
+    without_image = sum(1 for item in lookup_items if not item.get('image_url'))
+    stats = {'checked': len(rows), 'from_rss': rss_found, 'from_og': og_found,
+             'without_image': without_image}
+    log.info('Article image URL backfill complete: %s', stats)
+    return stats
 
 def add_quality_issue(conn, article_id, source_id, issue_type, severity, details):
     with conn.cursor() as cur:
@@ -363,7 +409,8 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
     result = {'seen': 0, 'inserted': 0, 'updated': 0, 'skipped_existing': 0,
               'skipped_outside_window': 0, 'skipped_undated': 0,
               'feed_not_modified': False, 'entity_mentions': 0, 'new_entities': 0,
-              'event_topics_assigned': 0, 'quality_issues': 0, 'error': None}
+              'event_topics_assigned': 0, 'quality_issues': 0, 'image_urls_from_rss': 0,
+              'image_urls_from_og': 0, 'image_lookup_failed': 0, 'error': None}
     resp = requests.get(source['feed_url'], timeout=(10, settings.request_timeout_seconds),
                         headers=conditional_feed_headers(source))
     if resp.status_code == 304:
@@ -413,9 +460,12 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
         entry_key = external_id or canon or hash_text(title)
         payload = {str(k): entry.get(k) for k in entry.keys()}
         payload = json.loads(json.dumps(payload, default=str))
+        image_url = extract_image_url(entry, raw_url)
         prepared.append({'title':title,'raw_url':raw_url,'canonical_url':canon,'published_at':pub_date,
                          'summary':summary,'content_text':content_text,'author':author,
-                         'external_id':external_id,'entry_key':entry_key,'payload':payload})
+                         'external_id':external_id,'entry_key':entry_key,'payload':payload,
+                         'image_url':image_url,'image_source':'rss' if image_url else None,
+                         'image_lookup_attempted':False})
 
     if not prepared:
         with get_conn() as conn, conn.cursor() as cur:
@@ -432,6 +482,22 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
         cur.execute("select canonical_url from news_articles where source_id=%s and canonical_url = any(%s)",
                     (source['source_id'], urls))
         known_urls = {row['canonical_url'] for row in cur.fetchall()}
+
+    # Resolve missing publisher image metadata only for genuinely new articles. This is
+    # bounded per source and concurrent so an RSS entry without an image cannot stall the
+    # ingestion loop indefinitely.
+    new_canonical_urls = set()
+    new_items_for_images = []
+    for item in prepared:
+        canonical = item['canonical_url']
+        if canonical not in known_urls and canonical not in new_canonical_urls:
+            new_canonical_urls.add(canonical)
+            if not item.get('image_url'):
+                new_items_for_images.append(item)
+    og_attempts, og_found = _lookup_open_graph_images(new_items_for_images, _IMAGE_OG_FALLBACK_LIMIT_PER_SOURCE)
+    if len(new_items_for_images) > og_attempts:
+        log.info('Source %s: deferred %s Open Graph image lookup(s) to later pipeline runs',
+                 source['name'], len(new_items_for_images) - og_attempts)
 
     with get_conn() as conn:
         for processed_index, item in enumerate(prepared, start=1):
@@ -459,14 +525,17 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
             if len(content_text) < 80: quality -= 20
             if not author: quality -= 5
             with conn.cursor() as cur:
-                cur.execute("""insert into news_articles(source_id,raw_id,external_id,url,canonical_url,title,summary,content_text,author,language,published_at,headline_hash,content_hash,is_excluded,exclude_reason,quality_score,field_category)
-                               values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                image_url = item.get('image_url')
+                image_check_done = bool(image_url or item.get('image_lookup_attempted'))
+                cur.execute("""insert into news_articles(source_id,raw_id,external_id,url,canonical_url,title,summary,content_text,author,language,published_at,headline_hash,content_hash,is_excluded,exclude_reason,quality_score,field_category,image_url,image_checked_at)
+                               values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CASE WHEN %s THEN now() ELSE NULL END)
                                on conflict(source_id,canonical_url) do nothing
                                returning article_id""",
                             (source['source_id'], raw_id, external_id, raw_url, canon, title, summary,
                              content_text, author, source.get('language') or 'vi', pub_date,
                              hash_text(title), hash_text(content_text) if content_text else None,
-                             excluded, reason, max(0, quality), classify_field_category(f'{title} {summary}')))
+                             excluded, reason, max(0, quality), classify_field_category(f'{title} {summary}'),
+                             image_url, image_check_done))
                 inserted_row = cur.fetchone()
             if not inserted_row:
                 result['skipped_existing'] += 1
@@ -477,6 +546,13 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
             with conn.cursor() as cur:
                 cur.execute("UPDATE news_articles SET timeline_id=article_id WHERE article_id=%s AND timeline_id IS NULL", (article_id,))
             result['inserted'] += 1
+            if image_url:
+                if item.get('image_source') == 'rss':
+                    result['image_urls_from_rss'] = result.get('image_urls_from_rss', 0) + 1
+                else:
+                    result['image_urls_from_og'] = result.get('image_urls_from_og', 0) + 1
+            elif item.get('image_lookup_attempted'):
+                result['image_lookup_failed'] = result.get('image_lookup_failed', 0) + 1
             if len(title) < 15:
                 add_quality_issue(conn, article_id, source['source_id'], 'short_title', 'warning',
                                   f'Title length is {len(title)} characters.')
@@ -510,7 +586,10 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
     log.info('Source %s: entries=%s, within_window=%s, inserted=%s, skipped_existing=%s, skipped_old=%s, skipped_undated=%s, event_topics=%s',
              source['name'], result['seen'], len(prepared), result['inserted'], result['skipped_existing'],
              result['skipped_outside_window'], result['skipped_undated'], result['event_topics_assigned'])
-    log.info('Source finished: %s; inserted=%s; elapsed=%.1fs', source['name'], result['inserted'], time.monotonic()-source_started)
+    log.info('Source finished: %s; inserted=%s; image_urls_from_rss=%s; image_urls_from_og=%s; image_lookup_failed=%s; elapsed=%.1fs',
+             source['name'], result['inserted'], result.get('image_urls_from_rss', 0),
+             result.get('image_urls_from_og', 0), result.get('image_lookup_failed', 0),
+             time.monotonic()-source_started)
     return result
 
 def discover_topic_candidates():
@@ -799,7 +878,7 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
         active_topics = load_active_topics(conn)
     if source_ids is not None:
         sources=[s for s in sources if s['source_id'] in source_ids]
-    totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'raw_rows_purged':0,'source_errors':[]}
+    totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'image_urls_from_rss':0,'image_urls_from_og':0,'image_lookup_failed':0,'article_images_backfilled':{},'raw_rows_purged':0,'source_errors':[]}
     log.info('Pipeline run %s started: sources=%s; active_topics=%s; active_entity_cache=%s; lookback_hours=%s; backfill_batch=%s',
              run_id, len(sources), len(active_topics), len(entity_lookup['entities_by_id']), settings.pipeline_lookback_hours,
              settings.event_topic_backfill_batch_size)
@@ -808,7 +887,7 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
             source_run_started = time.monotonic()
             try:
                 stats=process_source(source,rules,entity_lookup=entity_lookup,active_topics=active_topics)
-                for key in ('seen','inserted','updated','skipped_existing','skipped_outside_window','skipped_undated','feed_not_modified','entity_mentions','new_entities','event_topics_assigned','quality_issues'):
+                for key in ('seen','inserted','updated','skipped_existing','skipped_outside_window','skipped_undated','feed_not_modified','entity_mentions','new_entities','event_topics_assigned','quality_issues','image_urls_from_rss','image_urls_from_og','image_lookup_failed'):
                     mapkey={'seen':'entries_seen','inserted':'articles_inserted','updated':'articles_updated','skipped_existing':'entries_skipped_existing','skipped_outside_window':'entries_skipped_outside_window','skipped_undated':'entries_skipped_undated','feed_not_modified':'feeds_not_modified','new_entities':'new_entity_mentions'}.get(key,key)
                     totals[mapkey] += int(bool(stats[key])) if key == 'feed_not_modified' else stats[key]
                 log.info('Stage source complete: %s; elapsed=%.1fs', source['name'], time.monotonic()-source_run_started)
@@ -818,6 +897,14 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
                 totals['source_errors'].append({'source_id':source['source_id'],'name':source['name'],'error':msg})
                 with get_conn() as conn, conn.cursor() as cur:
                     cur.execute("update data_sources set last_run_at=now(),last_status='error',last_error=%s,updated_at=now() where source_id=%s",(msg,source['source_id']))
+        stage_started = time.monotonic()
+        try:
+            totals['article_images_backfilled'] = backfill_article_image_urls()
+            log.info('Stage article image URL discovery complete: %s; elapsed=%.1fs',
+                     totals['article_images_backfilled'], time.monotonic()-stage_started)
+        except Exception as exc:
+            totals['article_images_backfilled'] = {'error': f'{type(exc).__name__}: {str(exc)[:240]}'}
+            log.exception('Article image URL discovery failed non-blocking: %s', exc)
         stage_started = time.monotonic()
         if settings.openai_api_key:
             from .genai_events import classify_unprocessed_articles

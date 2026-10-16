@@ -601,7 +601,7 @@ def public_daily_articles(
     total = int((total_row or {}).get('total', 0))
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
-    items = fetch_all("""SELECT a.article_id, a.title, a.url, a.author, a.language,
+    items = fetch_all("""SELECT a.article_id, a.title, a.url, a.image_url, a.author, a.language,
                               left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
                               a.published_at, a.collected_at,
                               coalesce(a.published_at,a.collected_at) AS timeline_at,
@@ -670,7 +670,7 @@ def user_news_feed(user: dict = Depends(require_user)):
           WHERE ust.user_id=%s AND ust.timeline_type='entity' AND e.status='active'
         ), matched AS (
           SELECT f.follow_type, f.follow_id, f.follow_name, f.display_order,
-                 a.article_id, a.title, a.url, a.author, a.language,
+                 a.article_id, a.title, a.url, a.image_url, a.author, a.language,
                  left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
                  a.published_at, a.collected_at,
                  coalesce(a.published_at,a.collected_at) AS timeline_at,
@@ -681,7 +681,7 @@ def user_news_feed(user: dict = Depends(require_user)):
           JOIN data_sources s ON s.source_id=a.source_id
           UNION ALL
           SELECT f.follow_type, f.follow_id, f.follow_name, f.display_order,
-                 a.article_id, a.title, a.url, a.author, a.language,
+                 a.article_id, a.title, a.url, a.image_url, a.author, a.language,
                  left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
                  a.published_at, a.collected_at,
                  coalesce(a.published_at,a.collected_at) AS timeline_at,
@@ -699,7 +699,7 @@ def user_news_feed(user: dict = Depends(require_user)):
         ), grouped AS (
           SELECT follow_type, follow_id, max(total_count)::int AS total_count,
                  coalesce(jsonb_agg(jsonb_build_object(
-                   'article_id', article_id, 'title', title, 'url', url, 'author', author,
+                   'article_id', article_id, 'title', title, 'url', url, 'image_url', image_url, 'author', author,
                    'language', language, 'snippet', snippet, 'published_at', published_at,
                    'collected_at', collected_at, 'timeline_at', timeline_at,
                    'source_name', source_name,
@@ -778,7 +778,7 @@ def _public_direct_timeline_items(relation_table: str, relation_key: str, record
                 FROM {relation_table} rel
                 WHERE rel.{relation_key}=%s
             )
-            SELECT a.article_id, a.title, a.url, a.author, a.language,
+            SELECT a.article_id, a.title, a.url, a.image_url, a.author, a.language,
                    left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
                    a.published_at, a.collected_at,
                    coalesce(a.published_at,a.collected_at) AS timeline_at,
@@ -812,7 +812,7 @@ def public_article_timeline(
     UI links now open Timeline by explicit topic_id or entity_id. This endpoint remains for
     older clients during cache/deploy transitions but deliberately does not join other groups.
     """
-    anchor = fetch_one("""SELECT a.article_id, a.title, a.published_at, a.collected_at,
+    anchor = fetch_one("""SELECT a.article_id, a.title, a.image_url, a.published_at, a.collected_at,
                                 coalesce(a.published_at,a.collected_at) AS timeline_at
                          FROM news_articles a
                          WHERE a.article_id=%s AND a.is_excluded=false""", (article_id,))
