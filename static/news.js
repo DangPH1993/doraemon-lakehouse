@@ -55,7 +55,7 @@
         <div class="radar-row-main"><div class="radar-row-meta"><span>SỰ KIỆN</span><span>${num(topic.article_count)} bài</span><span>${num(topic.source_count)} nguồn</span>${growth ? `<span class="growth-badge ${growthClass}">${esc(growth)}</span>` : ''}</div>
           <h3>${esc(topic.topic_name)}</h3>${topic.description ? `<p class="radar-row-snippet">${esc(topic.description)}</p>` : ''}
         </div>
-        <div class="radar-row-actions"><button class="timeline-action primary" type="button" data-open-article-timeline="${Number(topic.anchor_article_id || 0)}" ${Number(topic.anchor_article_id || 0) < 1 ? 'disabled' : ''}>Xem timeline <span aria-hidden="true">↗</span></button>${followButtonHTML('topic', {id: topic.topic_id, name: topic.topic_name})}</div>
+        <div class="radar-row-actions"><button class="timeline-action primary" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.topic_id || 0)}" ${Number(topic.topic_id || 0) < 1 ? 'disabled' : ''}>Xem timeline <span aria-hidden="true">↗</span></button>${followButtonHTML('topic', {id: topic.topic_id, name: topic.topic_name})}</div>
       </article>`;
     }).join('');
     $('#hotTopicsFootnote').textContent = `Xếp hạng theo dữ liệu ${periodLabels[state.period].toLocaleLowerCase('vi-VN')} đã được thu thập và phân loại.`;
@@ -94,8 +94,8 @@
     const id = articleMode ? Number(anchor.article_id) : (data.topic ? Number(data.topic.topic_id) : Number(data.entity.entity_id));
     const name = data.timeline_name || (data.topic ? data.topic.name : data.entity ? data.entity.canonical_name : anchor.title) || 'Timeline';
     state.selectedTimeline = {type, id, name};
-    const modeText = data.mode === 'event_entity' ? 'Entity sự kiện' : 'Entity liên kết trong 48 giờ';
-    $('#timelineSelectionLabel').textContent = `${articleMode ? modeText : (type === 'topic' ? 'Sự kiện' : 'Đối tượng')} · ${name}`;
+    const modeText = data.mode === 'topic_id' ? 'Topic ID' : data.mode === 'entity_id' ? 'Entity ID' : 'Bài báo';
+    $('#timelineSelectionLabel').textContent = `${modeText} · ${name}`;
     $('#timelineContainer').innerHTML = timelineItemsHTML(data.items || [], data.mode || type);
     renderPagination('#timelinePagination', data.pagination, 'timeline');
   }
@@ -133,12 +133,12 @@
     const buttons = [];
     const articleId = Number(item.article_id || 0);
     topics.filter(x => Number(x.id) > 0).forEach(topic => {
-      buttons.push(`<span class="article-action-pair article-action-pair-compact"><button class="timeline-action article-topic-label" type="button" data-open-article-timeline="${articleId}" data-timeline-name="${esc(topic.name)}">Topic: ${esc(topic.name)}</button>${followButtonHTML('topic', topic, true)}</span>`);
+      buttons.push(`<span class="article-action-pair article-action-pair-compact"><button class="timeline-action article-topic-label" type="button" data-open-timeline="topic" data-timeline-id="${Number(topic.id)}" data-timeline-name="${esc(topic.name)}">Topic: ${esc(topic.name)}</button>${followButtonHTML('topic', topic, true)}</span>`);
     });
     entities.filter(x => Number(x.id) > 0).forEach(entity => {
       const isEvent = String(entity.type || '').toUpperCase() === 'EVENT';
       const label = isEvent ? 'Sự kiện' : 'Entity';
-      buttons.push(`<span class="article-action-pair article-action-pair-compact"><button class="timeline-action ${isEvent ? 'event-action' : 'entity-action'} article-topic-label" type="button" data-open-article-timeline="${articleId}" data-timeline-name="${esc(entity.name)}">${label}: ${esc(entity.name)}</button>${followButtonHTML('entity', entity, true)}</span>`);
+      buttons.push(`<span class="article-action-pair article-action-pair-compact"><button class="timeline-action ${isEvent ? 'event-action' : 'entity-action'} article-topic-label" type="button" data-open-timeline="entity" data-timeline-id="${Number(entity.id)}" data-timeline-name="${esc(entity.name)}">${label}: ${esc(entity.name)}</button>${followButtonHTML('entity', entity, true)}</span>`);
     });
     return buttons.length ? `<div class="article-follow-tags">${buttons.join('')}</div>` : '<div class="article-no-timeline">Chưa có tag topic/entity được phân loại.</div>';
   }
