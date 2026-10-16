@@ -1,0 +1,45 @@
+name: Mini Lakehouse Topic Entity Reconciliation
+
+on:
+  schedule:
+    - cron: "47 */3 * * *" # Every three hours UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mini-lakehouse-catalog-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Reconcile topics and entities linked to recent articles
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+          AI_REQUEST_TIMEOUT_SECONDS: "35"
+          RECONCILIATION_WINDOW_HOURS: "48"
+          RECONCILIATION_MAX_TOPICS: "5000"
+          RECONCILIATION_MAX_ENTITIES: "12000"
+          RECONCILIATION_MAX_PAIRS_PER_TYPE: "80"
+          RECONCILIATION_PAIRS_PER_REQUEST: "20"
+          RECONCILIATION_MERGE_CONFIDENCE: "0.88"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
+          if [ -z "$OPENAI_API_KEY" ]; then echo "Missing GitHub secret OPENAI_API_KEY"; exit 1; fi
+          python -m app.reconcile_catalog

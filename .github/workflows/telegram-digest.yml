@@ -1,0 +1,38 @@
+name: Mini Lakehouse Telegram Digest
+
+on:
+  schedule:
+    - cron: "7,37 * * * *" # Twice per hour UTC; independent from ingestion/reconciliation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mini-lakehouse-telegram-digest
+  cancel-in-progress: false
+
+jobs:
+  send-digests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Send Telegram digests from stored data only
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_DIGEST_MAX_ARTICLES: "12"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "Missing GitHub secret TELEGRAM_BOT_TOKEN"; exit 1; fi
+          python -m app.telegram_digest

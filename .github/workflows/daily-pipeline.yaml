@@ -1,16 +1,15 @@
-name: Mini Lakehouse Daily Pipeline
+name: Mini Lakehouse Ingestion
 
 on:
   schedule:
-    - cron: "47 * * * *" # Every hour at minute 47
-      timezone: "Asia/Ho_Chi_Minh"
+    - cron: "17 * * * *" # Hourly; GitHub cron is evaluated in UTC
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: mini-lakehouse-pipeline
+  group: mini-lakehouse-ingestion
   cancel-in-progress: false
 
 jobs:
@@ -36,12 +35,11 @@ jobs:
           echo "Configured schedule: $SCHEDULE_EXPRESSION"
           date -u
           TZ=Asia/Ho_Chi_Minh date
-      - name: Run ingestion, cleaning, FACT refresh and optional Telegram digest
+      - name: Run RSS ingestion, article classification and FACT refresh
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_DIGEST_MAX_ARTICLES: "12"
+          PYTHONUNBUFFERED: "1"
           OPENAI_MODEL: gpt-4.1-mini
           AI_CLASSIFICATION_BATCH_SIZE: "12"
           AI_CLASSIFICATION_RUN_LIMIT: "48"
@@ -55,7 +53,6 @@ jobs:
           EVENT_TOPIC_BACKFILL_BATCH_SIZE: "60"
           TOPIC_DISCOVERY_ARTICLE_LIMIT: "800"
           REQUEST_TIMEOUT_SECONDS: "25"
-          PYTHONUNBUFFERED: "1"
           TIMEZONE: Asia/Ho_Chi_Minh
         run: |
           if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
