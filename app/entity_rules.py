@@ -68,6 +68,51 @@ def _fold(value: str) -> str:
     return re.sub(r'\s+', ' ', value).strip().strip('-')
 
 
+_ENGLISH_MONTHS = (
+    'jan(?:uary)?', 'feb(?:ruary)?', 'mar(?:ch)?', 'apr(?:il)?', 'may', 'jun(?:e)?',
+    'jul(?:y)?', 'aug(?:ust)?', 'sep(?:t(?:ember)?)?', 'oct(?:ober)?',
+    'nov(?:ember)?', 'dec(?:ember)?',
+)
+_ENGLISH_MONTH_PATTERN = '(?:' + '|'.join(_ENGLISH_MONTHS) + ')'
+
+
+def is_numeric_or_date_entity(name: str) -> bool:
+    """Reject standalone numbers and date-like strings, without rejecting named IDs.
+
+    Examples rejected: ``100``, ``16.10``, ``2-11``, ``16/10/2026``,
+    ``ngày 16 tháng 10`` and ``October 16, 2026``. Named products/events such as
+    ``3M``, ``F-16``, ``7-Eleven`` and ``World Cup 2026`` remain eligible because
+    their surface form contains meaningful letters.
+    """
+    raw = normalize_space(str(name or '')).strip(' .,:;')
+    if not raw or not re.search(r'\d', raw):
+        return False
+
+    # Numeric values and numeric-only dates with punctuation (including locale-specific
+    # decimal/date separators) are not named entities.
+    compact = re.sub(r'[\s\W_]+', '', raw, flags=re.UNICODE)
+    if compact.isdigit():
+        return True
+
+    folded = _fold(raw)
+    # Vietnamese date fragments commonly found in news headlines and summaries.
+    if re.fullmatch(
+        r'(?:ngay\s*)?\d{1,2}(?:\s*[-/.]?\s*(?:thang\s*)?\d{1,2})'
+        r'(?:\s*[-/.]?\s*(?:nam\s*)?\d{2,4})?',
+        folded,
+    ):
+        return True
+    if re.fullmatch(r'ngay\s+\d{1,2}', folded):
+        return True
+    if re.fullmatch(r'thang\s+\d{1,2}(?:\s+nam\s+\d{4})?', folded):
+        return True
+
+    # English dates, e.g. ``Oct 16``, ``October 16, 2026`` or ``16 October 2026``.
+    month_first = rf'{_ENGLISH_MONTH_PATTERN}\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?'
+    day_first = rf'\d{{1,2}}(?:st|nd|rd|th)?\s+{_ENGLISH_MONTH_PATTERN}(?:\s+\d{{4}})?'
+    return bool(re.fullmatch(month_first, folded) or re.fullmatch(day_first, folded))
+
+
 _NON_ENTITY_FOLDED = {_fold(x) for x in _NON_ENTITY_PHRASES}
 _REGION_FOLDED = {_fold(x) for x in _BROAD_REGIONS}
 
@@ -97,6 +142,8 @@ def should_track_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
     normalized = norm_name(name)
     folded = _fold(normalized)
     if len(normalized) < 2 or len(normalized) > 180:
+        return False
+    if is_numeric_or_date_entity(name):
         return False
     if folded in _GENERIC_FOLDED or folded in _NON_ENTITY_FOLDED or folded in _REGION_FOLDED:
         return False

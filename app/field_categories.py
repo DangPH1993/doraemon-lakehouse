@@ -9,6 +9,17 @@ FIELD_CATEGORIES = (
     'Văn hóa - Giải trí', 'Môi trường', 'Ý kiến - Góc nhìn',
 )
 
+# Editorial fields that must always have at least one specific Topic timeline.
+# “Giải trí” is represented by the canonical field label “Văn hóa - Giải trí”.
+TOPIC_REQUIRED_FIELD_CATEGORIES = frozenset({
+    'Thời sự', 'Thế giới', 'Thể thao', 'Kinh doanh', 'Pháp luật', 'Văn hóa - Giải trí',
+})
+
+
+def requires_event_topic(field_category: str | None) -> bool:
+    """Whether an article's editorial field requires a specific Topic association."""
+    return normalize_field_category(field_category) in TOPIC_REQUIRED_FIELD_CATEGORIES
+
 def _fold(value: str) -> str:
     value = str(value or '').replace('đ', 'd').replace('Đ', 'D')
     value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode('ascii')
@@ -21,6 +32,7 @@ _CATEGORY_ALIASES.update({
     'van hoa du lich': 'Văn hóa - Giải trí',
     'van hoa va du lich': 'Văn hóa - Giải trí',
     'van hoa giai tri': 'Văn hóa - Giải trí',
+    'giai tri': 'Văn hóa - Giải trí',
     'cong nghe': 'Số hóa', 'cong nghe so': 'Số hóa', 'so hoa cong nghe': 'Số hóa',
     'y te': 'Sức khỏe', 'suc khoe khoa hoc': 'Sức khỏe',
     'chinh tri chinh sach': 'Thời sự', 'xa hoi doi song': 'Đời sống',

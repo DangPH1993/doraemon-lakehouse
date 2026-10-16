@@ -17,13 +17,16 @@ import requests
 from .config import settings
 from .db import get_conn
 from .processing import hash_text, norm_name, normalize_space, slugify
-from .entity_rules import should_track_entity, is_grounded_entity
+from .entity_rules import should_track_entity, is_grounded_entity, is_numeric_or_date_entity
 from .named_infrastructure import (
     augment_entities_with_named_infrastructure, extract_named_infrastructure_entities,
 )
 from .entity_resolution import entity_name_variants, resolve_entity_in_database
 from .entity_names import entity_normalized_key, named_head_and_tail
-from .field_categories import FIELD_CATEGORIES, classify_field_category, normalize_field_category, is_broad_field_topic
+from .field_categories import (
+    FIELD_CATEGORIES, classify_field_category, normalize_field_category,
+    is_broad_field_topic, requires_event_topic,
+)
 from .named_people import extract_named_person_entities
 from .named_proper_nouns import extract_named_proper_noun_entities
 
@@ -63,7 +66,7 @@ Phân tích TỪNG bài riêng biệt, trả về CHỈ JSON hợp lệ, không 
 
 Mục tiêu:
 1) field_category phải là ĐÚNG MỘT nhãn trong danh sách lĩnh vực cố định ở cuối prompt. Đây là trường phân loại biên tập của bài báo, KHÔNG tạo Topic trong database và KHÔNG dùng tên lĩnh vực làm event_topic_name.
-2) event_topic_name là NHÃN TOPIC mô tả khái quát nhất nội dung chính của BÀI BÁO, đủ cụ thể để phân biệt câu chuyện nhưng không phải lĩnh vực biên tập. Không dùng tên quá rộng như "Văn hóa - Giải trí", "Kinh doanh", "Thời sự", "Đời sống", "Văn hóa & du lịch". Luôn trả nhãn topic cho bài; nếu chưa đủ thông tin về sự kiện, dùng một nhãn ngắn dựa trên tiêu đề/mô tả thay vì để null. Không cần cố gộp topic với bài khác: pipeline đối soát riêng sẽ hợp nhất nhãn tương đương sau đó.
+2) event_topic_name là NHÃN TOPIC mô tả khái quát nhất nội dung chính của BÀI BÁO, đủ cụ thể để phân biệt câu chuyện nhưng không phải lĩnh vực biên tập. Không dùng tên quá rộng như "Văn hóa - Giải trí", "Kinh doanh", "Thời sự", "Đời sống", "Văn hóa & du lịch". Luôn trả nhãn topic cho bài; nếu chưa đủ thông tin về sự kiện, dùng một nhãn ngắn dựa trên tiêu đề/mô tả thay vì để null. ĐẶC BIỆT, bài thuộc các lĩnh vực Thời sự, Thế giới, Thể thao, Kinh doanh, Pháp luật hoặc Văn hóa - Giải trí BẮT BUỘC phải có topic cụ thể, không bao giờ để null/rỗng. Không cần cố gộp topic với bài khác: pipeline đối soát riêng sẽ hợp nhất nhãn tương đương sau đó.
 3) existing_event_topic_id có thể để null; không cần tìm topic hiện có trong danh mục. Pipeline đối soát định kỳ sẽ hợp nhất topic tương đương về cùng topic_id.
 4) Trích xuất TẤT CẢ danh từ riêng khác nhau xuất hiện trong TIÊU ĐỀ và TÓM TẮT: người, tổ chức, thương hiệu, sản phẩm/model, công trình, địa điểm cụ thể, giải đấu/vụ án/sự kiện cụ thể. Không chỉ chọn 1-3 entity nổi bật. Có thể dùng content_excerpt để phân biệt loại/ngữ cảnh, nhưng không thêm entity chỉ xuất hiện ngoài tiêu đề/tóm tắt.
 5) Không bỏ tên nằm trong cụm dài: "Hoa hậu Phan Thị Mơ" -> PERSON "Phan Thị Mơ"; "Đường Võ Nguyên Giáp", "Cao tốc Mỹ Thuận - Cần Thơ", "Cầu vượt Võ Văn Kiệt", "Siêu thị Big C" và "Bộ Công an" phải giữ đủ tên loại + tên riêng. Bổ sung các tên sản phẩm/tổ chức như "Hyundai Bayon 2027", "Santa Fe", "Intel", "CXMT", "Deep Blue Aerospace", "Starship", "SpaceX" khi được nhắc trong tiêu đề/tóm tắt.
@@ -143,13 +146,18 @@ def _upsert_event_topic(conn, name: str, confidence: float, category_topic_id: i
     base_slug = 'event-' + slugify(name)
     slug = base_slug[:180]
     with conn.cursor() as cur:
-        cur.execute('select topic_id from topics where event_key=%s or slug=%s limit 1', (event_key, slug))
+        cur.execute("""select topic_id,status from topics
+                       where topic_type='event' and (event_key=%s or slug=%s) limit 1""", (event_key, slug))
         row = cur.fetchone()
         if row:
+            if row.get('status') != 'active':
+                cur.execute("update topics set status='active',updated_at=now() where topic_id=%s", (row['topic_id'],))
             return row['topic_id']
-        cur.execute('select topic_id from topics where topic_type=\'event\' and lower(name)=lower(%s) limit 1', (name,))
+        cur.execute("select topic_id,status from topics where topic_type='event' and lower(name)=lower(%s) limit 1", (name,))
         row = cur.fetchone()
         if row:
+            if row.get('status') != 'active':
+                cur.execute("update topics set status='active',updated_at=now() where topic_id=%s", (row['topic_id'],))
             return row['topic_id']
         cur.execute('select topic_id from topics where slug=%s limit 1', (slug,))
         collision = cur.fetchone()
@@ -355,9 +363,19 @@ def _clearly_incompatible_assignment(article_title: str, event_title: str) -> bo
     return bool(article_families and event_families and article_families.isdisjoint(event_families))
 
 
-def _fallback_event_name(title: str) -> str:
-    # Preserve a specific factual headline when a model-proposed event ID is rejected.
-    return normalize_space(title)[:180]
+def _fallback_event_name(title: str, summary: str = '', article_id: int | None = None) -> str:
+    """Build a deterministic non-category Topic label when GenAI output is unusable."""
+    for raw in (title, summary):
+        candidate = normalize_space(str(raw or '')).strip(' .,:;|-')[:180]
+        if (candidate and len(norm_name(candidate)) >= 5
+                and not is_broad_field_topic(candidate)
+                and not is_numeric_or_date_entity(candidate)):
+            return candidate
+    # Real articles normally have a title. Keep the required relationship invariant even
+    # for malformed legacy rows with no useful headline/summary.
+    if article_id is not None:
+        return f'Bài báo {int(article_id)}'
+    return 'Tin bài chưa phân loại'
 
 
 def repair_obvious_event_mismatches(limit: int = 500) -> int:
@@ -399,6 +417,8 @@ def repair_obvious_event_mismatches(limit: int = 500) -> int:
 
 def _apply_classification(article: dict, result: dict, category_ids: set[int], event_topics: dict[int, dict]):
     article_id = int(article['article_id'])
+    field_category_value = normalize_field_category(result.get('field_category'), article.get('title') or '', article.get('summary') or '')
+    topic_required = requires_event_topic(field_category_value)
     try:
         category_id = result.get('category_topic_id')
         category_id = int(category_id) if category_id is not None else None
@@ -410,9 +430,12 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
     except (TypeError, ValueError):
         existing_event_id = None
     event_name = normalize_space(str(result.get('event_topic_name') or ''))[:180]
-    topic_label_fallback = not event_name or is_broad_field_topic(event_name)
+    topic_label_fallback = (
+        not event_name or len(norm_name(event_name)) < 5
+        or is_broad_field_topic(event_name) or is_numeric_or_date_entity(event_name)
+    )
     if topic_label_fallback:
-        event_name = _fallback_event_name(article.get('title') or '')
+        event_name = _fallback_event_name(article.get('title') or '', article.get('summary') or '', article_id)
     if is_broad_field_topic(event_name):
         event_name = ''
     try:
@@ -436,7 +459,6 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
         if norm_name(recovered_person['name']) not in existing_entity_names:
             entities.append(recovered_person)
             existing_entity_names.add(norm_name(recovered_person['name']))
-    field_category_value = normalize_field_category(result.get('field_category'), article.get('title') or '', article.get('summary') or '')
     filtered_entities = []
     article_text = normalize_space(' '.join(str(article.get(k) or '') for k in ('title', 'summary'))[:20000])
     for entity in entities:
@@ -493,11 +515,18 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
                 else:
                     canonical_existing = norm_name(candidate.get('name') or '')
                     if not event_name or norm_name(event_name) == canonical_existing:
-                        event_name = _fallback_event_name(article.get('title') or '')
+                        event_name = _fallback_event_name(article.get('title') or '', article.get('summary') or '', article_id)
                     log.warning('Rejected existing event match: article_id=%s proposed_topic_id=%s topic=%r article=%r',
                                 article_id, existing_event_id, candidate.get('name'), article.get('title'))
-            if event_topic_id is None and event_name and (confidence >= 0.55 or topic_label_fallback):
+            if event_topic_id is None and event_name and (confidence >= 0.55 or topic_label_fallback or topic_required):
                 event_topic_id = _upsert_event_topic(conn, event_name, max(0.55, confidence), None)
+            # Hard invariant: these editorial fields must never be saved without a specific
+            # event Topic relationship, even when model confidence is low or its label is bad.
+            if topic_required and event_topic_id is None:
+                event_name = _fallback_event_name(article.get('title') or '', article.get('summary') or '', article_id)
+                event_topic_id = _upsert_event_topic(conn, event_name, max(0.70, confidence), None)
+                if event_topic_id is None:
+                    raise RuntimeError(f'Required Topic could not be assigned for article_id={article_id}, field_category={field_category_value!r}')
             # Replace machine-generated event assignments so one article is not attached to
             # several conflicting event topics. Preserve admin-maintained article associations.
             with conn.cursor() as cur:

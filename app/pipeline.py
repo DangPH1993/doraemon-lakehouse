@@ -22,7 +22,10 @@ from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, add_entity_to_lookup,
                                 entity_name_variants, resolve_entity_in_lookup,
                                 resolve_entity_in_database, strip_person_title)
-from .field_categories import classify_field_category, is_broad_field_topic
+from .field_categories import (
+    classify_field_category, is_broad_field_topic, normalize_field_category,
+    TOPIC_REQUIRED_FIELD_CATEGORIES, requires_event_topic,
+)
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -252,6 +255,69 @@ def assign_event_topic(conn, article_id: int, title: str) -> bool:
                     (article_id, topic_id, event['confidence']))
         cur.execute("update news_articles set event_topic_scanned_at=now() where article_id=%s", (article_id,))
     return True
+
+
+def backfill_required_field_topics(limit: int | None = None) -> int:
+    """Ensure recent articles in required editorial fields have an active event Topic.
+
+    This deterministic safety net runs after GenAI classification. It also covers deployments
+    without an OpenAI key and articles whose GenAI request failed, using the article headline as
+    the initial specific topic label. Reconciliation can merge equivalent labels later.
+    """
+    limit = max(1, min(int(limit or settings.event_topic_backfill_batch_size), 2000))
+    # Include a few legacy display labels; normalize_field_category maps them to the
+    # canonical “Văn hóa - Giải trí” field while they are being backfilled.
+    required_fields = sorted(TOPIC_REQUIRED_FIELD_CATEGORIES | {
+        'Giải trí', 'Văn hóa & giải trí', 'Văn hóa và giải trí',
+    })
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT a.article_id,a.title,coalesce(a.summary,'') AS summary,a.field_category
+                           FROM news_articles a
+                           WHERE a.is_excluded=false
+                             AND a.field_category = ANY(%s)
+                             AND coalesce(a.published_at,a.collected_at)>=now()-interval '30 days'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM article_topics at
+                               JOIN topics t ON t.topic_id=at.topic_id
+                               WHERE at.article_id=a.article_id
+                                 AND t.topic_type='event' AND t.status='active'
+                             )
+                           ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
+                           LIMIT %s""", (required_fields, limit))
+            articles = cur.fetchall()
+
+        assigned = 0
+        # Local import avoids coupling RSS collection startup to the OpenAI client module.
+        from .genai_events import _fallback_event_name, _upsert_event_topic
+        for article in articles:
+            field_category = normalize_field_category(
+                article.get('field_category'), article.get('title') or '', article.get('summary') or ''
+            )
+            if not requires_event_topic(field_category):
+                continue
+            topic_name = _fallback_event_name(
+                article.get('title') or '', article.get('summary') or '', int(article['article_id'])
+            )
+            topic_id = _upsert_event_topic(conn, topic_name, 0.70, None)
+            if topic_id is None:
+                log.error('Required Topic fallback returned no topic: article_id=%s field=%s title=%r',
+                          article['article_id'], field_category, article.get('title'))
+                continue
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO article_topics(article_id,topic_id,confidence,assignment_method)
+                               VALUES(%s,%s,0.7000,'required_field_fallback')
+                               ON CONFLICT(article_id,topic_id) DO UPDATE SET
+                                 confidence=GREATEST(article_topics.confidence,excluded.confidence),
+                                 assignment_method=CASE WHEN article_topics.assignment_method='admin'
+                                                       THEN 'admin' ELSE excluded.assignment_method END""",
+                            (article['article_id'], topic_id))
+            assigned += 1
+            log.info('Assigned required-field Topic fallback: article_id=%s topic_id=%s field=%s title=%r',
+                     article['article_id'], topic_id, field_category, topic_name)
+    if assigned:
+        log.warning('Required-field Topic backfill assigned %s missing Topic(s).', assigned)
+    return assigned
 
 
 def backfill_unscanned_event_topics(limit: int | None = None) -> int:
@@ -771,6 +837,17 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
             totals['event_topics_backfilled']=backfill_unscanned_event_topics()
             log.info('Stage rule-based event backfill complete: assigned=%s; elapsed=%.1fs', totals['event_topics_backfilled'], time.monotonic()-stage_started)
             log.warning('OPENAI_API_KEY is not set; running deterministic event fallback. No topic candidate approval queue is used.')
+        # Strong invariant independent of AI availability: selected editorial fields must have
+        # a Topic even when GenAI is disabled, times out, or returns an unusable label.
+        stage_started = time.monotonic()
+        try:
+            totals['required_field_topics_backfilled'] = backfill_required_field_topics()
+            log.info('Stage required-field Topic enforcement complete: assigned=%s; elapsed=%.1fs',
+                     totals['required_field_topics_backfilled'], time.monotonic()-stage_started)
+        except Exception as exc:
+            totals['required_field_topics_backfilled'] = 0
+            totals['required_field_topics_backfill_error'] = f'{type(exc).__name__}: {str(exc)[:240]}'
+            log.exception('Required-field Topic enforcement failed non-blocking: %s', exc)
         # Backfill high-precision named infrastructure entities on recent already-classified
         # articles without re-calling GenAI. This repairs cases such as a named highway/bridge
         # being represented only by a PERSON mention (e.g. "Cầu vượt Võ Văn Kiệt").
