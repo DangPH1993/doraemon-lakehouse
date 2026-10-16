@@ -15,6 +15,23 @@
     try { const url = new URL(String(value || ''), window.location.origin); return ['http:', 'https:'].includes(url.protocol) ? esc(url.href) : '#'; }
     catch { return '#'; }
   };
+  const safeImageHref = (value) => {
+    try {
+      const url = new URL(String(value || ''));
+      return ['http:', 'https:'].includes(url.protocol) && url.hostname && !url.username && !url.password ? esc(url.href) : '';
+    } catch { return ''; }
+  };
+  function articleThumbnailHTML(item, className = 'article-thumbnail') {
+    const src = safeImageHref(item.image_url);
+    if (!src) return '';
+    return `<a class="article-image-link ${className}" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer" tabindex="-1" aria-hidden="true"><img class="article-thumbnail-img" src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="strict-origin-when-cross-origin"></a>`;
+  }
+  document.addEventListener('error', (event) => {
+    if (event.target && event.target.matches && event.target.matches('img.article-thumbnail-img')) {
+      const link = event.target.closest('.article-image-link');
+      if (link) { link.classList.add('image-failed'); const layout = link.closest('.article-media-layout, .timeline-card'); if (layout) layout.classList.remove('has-image'); }
+    }
+  }, true);
   function localDateText(value, withTime = false) {
     if (!value) return 'Chưa rõ thời gian';
     const date = new Date(value);
@@ -80,10 +97,11 @@
     if (!items.length) return '<div class="message-card"><strong>Chưa có bài báo được liên kết</strong>Những bài mới sẽ xuất hiện khi có entity chuẩn trùng khớp.</div>';
     return items.map(item => {
       const related = [item.entities ? `Entity: ${item.entities}` : '', item.topics ? `Nhãn: ${item.topics}` : ''].filter(Boolean).join(' · ');
+      const thumbnail = articleThumbnailHTML(item, 'timeline-thumbnail');
       return `<article class="timeline-entry">
         <div class="timeline-time">${esc(localDateText(item.timeline_at || item.published_at || item.collected_at, true))}</div>
         <div class="timeline-rail"><span class="timeline-dot"></span><span class="timeline-line"></span></div>
-        <div class="timeline-card"><div class="timeline-meta"><span>${esc(item.source_name)}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}</div>
+        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name)}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}</div></div>
       </article>`;
     }).join('');
   }
@@ -148,14 +166,15 @@
     const tags = (feedMode ? [] : (item.topics || []).filter(name => !followableTopicNames.has(String(name || '').toLocaleLowerCase('vi'))).map(name => ({name})))
       .slice(0, 6).map(tag => `<span class="article-tag">${esc(tag.name)}</span>`).join('');
     const fieldTag = item.field_category ? `<span class="field-category-badge">${esc(item.field_category)}</span>` : '';
+    const thumbnail = articleThumbnailHTML(item);
     return `<article class="radar-row article-row${feedMode ? ' feed-row' : ''}">
-      <div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span>${fieldTag}${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
+      <div class="article-media-layout${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span>${fieldTag}${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
         <h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>
         ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}
         ${tags ? `<div class="article-tags">${tags}</div>` : ''}
         ${articleActionsHTML(item, feedMode)}
         <div class="article-card-footer"><span></span><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a></div>
-      </div>
+      </div></div>
     </article>`;
   }
 

@@ -12,6 +12,21 @@
     try { const url = new URL(String(value || ''), window.location.origin); return ['http:','https:'].includes(url.protocol) ? esc(url.href) : '#'; }
     catch { return '#'; }
   };
+  const safeImageHref = value => {
+    try { const url = new URL(String(value || '')); return ['http:','https:'].includes(url.protocol) && url.hostname && !url.username && !url.password ? esc(url.href) : ''; }
+    catch { return ''; }
+  };
+  function articleThumbnailHTML(item) {
+    const src = safeImageHref(item.image_url);
+    if (!src) return '';
+    return `<a class="article-image-link article-thumbnail" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer" tabindex="-1" aria-hidden="true"><img class="article-thumbnail-img" src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="strict-origin-when-cross-origin"></a>`;
+  }
+  document.addEventListener('error', event => {
+    if (event.target && event.target.matches && event.target.matches('img.article-thumbnail-img')) {
+      const link = event.target.closest('.article-image-link');
+      if (link) { link.classList.add('image-failed'); const layout = link.closest('.article-media-layout, .timeline-card'); if (layout) layout.classList.remove('has-image'); }
+    }
+  }, true);
   function dateText(value) {
     if (!value) return 'Chưa rõ thời gian';
     const date = new Date(value);
@@ -33,12 +48,13 @@
     $('#followingArticles').innerHTML = items.map(item => {
       const related = type === 'topic' ? item.entities : item.topics;
       const relatedLabel = type === 'topic' ? 'Entity liên quan: ' : 'Topic liên quan: ';
+      const thumbnail = articleThumbnailHTML(item);
       return `<article class="radar-row article-row following-article-row">
-        <div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(dateText(item.timeline_at || item.published_at || item.collected_at))}</span></div>
+        <div class="article-media-layout${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(dateText(item.timeline_at || item.published_at || item.collected_at))}</span></div>
           <h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>
           ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}
           ${related ? `<p class="following-related">${relatedLabel}${esc(related)}</p>` : ''}
-        </div><div class="radar-row-end"><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a></div>
+        </div></div><div class="radar-row-end"><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a></div>
       </article>`;
     }).join('');
   }
