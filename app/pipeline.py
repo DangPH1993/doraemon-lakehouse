@@ -963,10 +963,22 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
         # purge RSS payloads to conserve the Supabase database quota.
         totals['raw_rows_purged'] = purge_raw_feed_items_after_fact_refresh()
         status='success' if not totals['source_errors'] else ('partial' if totals['articles_inserted']+totals['articles_updated']>0 else 'failed')
+        # Return the persisted pipeline status as part of the CLI result. Before v0.7.13,
+        # per-source errors could mark the DB run as failed while `python -m app.pipeline`
+        # still returned exit code 0, causing GitHub Actions to show a green check.
+        totals['status'] = status
         end=datetime.now(timezone.utc)
+        run_message = f"Completed in {(end-started).total_seconds():.1f}s; {len(totals['source_errors'])} source error(s)."
+        if totals['source_errors']:
+            # Put the first few concrete failures in the compact dashboard message as well as
+            # details JSON, so an admin can diagnose a red run without scrolling to JSON logs.
+            error_summary = ' | '.join(
+                f"{item.get('name')}: {item.get('error')}" for item in totals['source_errors'][:3]
+            )
+            run_message = (run_message + ' First errors: ' + error_summary)[:1000]
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""update pipeline_runs set status=%s,finished_at=now(),source_count=%s,entries_seen=%s,articles_inserted=%s,articles_updated=%s,entries_skipped_existing=%s,feeds_not_modified=%s,entities_found=%s,entity_candidates=%s,topic_candidates=%s,quality_issues=%s,message=%s,details=%s::jsonb where run_id=%s""",
-                (status,totals['sources'],totals['entries_seen'],totals['articles_inserted'],totals['articles_updated'],totals['entries_skipped_existing'],totals['feeds_not_modified'],totals['entity_mentions'],totals['new_entity_mentions'],totals['topic_candidates'],totals['quality_issues'],f"Completed in {(end-started).total_seconds():.1f}s; {len(totals['source_errors'])} source error(s).",json.dumps(totals,ensure_ascii=False),run_id))
+                (status,totals['sources'],totals['entries_seen'],totals['articles_inserted'],totals['articles_updated'],totals['entries_skipped_existing'],totals['feeds_not_modified'],totals['entities_found'],totals['new_entity_mentions'],totals['topic_candidates'],totals['quality_issues'],run_message,json.dumps(totals,ensure_ascii=False),run_id))
         log.info('Pipeline run %s finished in %.1fs: %s',run_id,time.monotonic()-run_clock,totals)
         return totals
     except Exception as exc:
@@ -1040,6 +1052,16 @@ def run_pipeline(trigger_type='scheduled', source_ids: list[int] | None = None) 
         lock_conn.close()
 
 if __name__ == '__main__':
+    import sys
     logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(name)s | %(message)s')
     result=run_pipeline('scheduled')
     print(json.dumps(result,ensure_ascii=False,indent=2))
+    # Make GitHub Actions accurately reflect a failed/partial ingestion run.
+    # Keep the full per-source exception details in the JSON output for diagnosis.
+    status = result.get('status')
+    if status in ('failed', 'partial'):
+        errors = result.get('source_errors') or []
+        print(f'PIPELINE_STATUS={status}; source_errors={len(errors)}', file=sys.stderr)
+        for item in errors:
+            print(f"SOURCE_ERROR source_id={item.get('source_id')} name={item.get('name')!r}: {item.get('error')}", file=sys.stderr)
+        sys.exit(1)
