@@ -236,44 +236,108 @@ body{background:#fff;color:#202124;font-size:14px}
 }
 
 
-/* v0.7.20: editorial-field and publication-date filters share one horizontal toolbar. */
+/* v0.7.21: compact horizontal filter toolbar; no editorial-field helper copy. */
 .field-filter-row{
-  display:grid;
-  grid-template-columns:max-content minmax(165px,190px) minmax(0,1fr);
+  display:flex !important;
+  flex-flow:row nowrap;
   align-items:center;
-  column-gap:10px;
-  row-gap:8px;
+  gap:10px;
+  width:100%;
+  box-sizing:border-box;
+  margin:0 0 14px;
+  padding:10px 12px;
+  background:#f8f9fa;
+  border:1px solid #e8eaed;
+  border-radius:10px;
+  color:#5f6368;
+  font-size:11px;
 }
-.field-filter-row>label[for="fieldCategoryFilter"]{grid-column:1;grid-row:1;white-space:nowrap}
-.field-filter-row>select{grid-column:2;grid-row:1;width:100%;min-width:0}
-.field-filter-help{display:none!important}
+.field-filter-row>label[for="fieldCategoryFilter"]{
+  flex:0 0 auto;
+  white-space:nowrap;
+  font-weight:750;
+  color:#344054;
+}
+.field-filter-row>select#fieldCategoryFilter{
+  flex:0 0 180px;
+  width:180px;
+  min-width:145px;
+  max-width:180px;
+  padding:8px 10px;
+  border:1px solid #d8dee4;
+  border-radius:8px;
+  background:#fff;
+  color:#202124;
+  font:inherit;
+}
+.field-filter-help,
+.field-filter-row .field-filter-help,
+.field-filter-row .field-help,
+.field-filter-row .filter-hint{display:none !important}
 .date-range-filter{
-  grid-column:3;grid-row:1;
-  display:grid;
-  grid-template-columns:max-content minmax(105px,1fr) max-content minmax(105px,1fr) max-content;
+  display:flex !important;
+  flex:1 1 auto;
+  flex-flow:row nowrap;
   align-items:center;
-  gap:8px;
-  width:100%;min-width:0;margin:0;padding:0;border:0;
+  justify-content:flex-start;
+  gap:7px;
+  width:auto;
+  min-width:0;
+  margin:0;
+  padding:0;
+  border:0;
+  background:transparent;
 }
-.date-range-filter label{font-size:10px;font-weight:750;color:#344054;white-space:nowrap}
-.date-range-filter input[type=date]{width:100%;min-width:0;max-width:100%;padding:8px 7px;border:1px solid #d8dee4;border-radius:8px;background:#fff;color:#202124;font:inherit;font-size:11px}
-.date-range-filter input[type=date]:focus{outline:2px solid #bfdbfe;outline-offset:1px;border-color:#93baf7}
-.date-filter-apply{border:1px solid #1a73e8;border-radius:8px;background:#1a73e8;color:#fff;padding:8px 11px;font:inherit;font-size:10px;font-weight:800;white-space:nowrap;cursor:pointer}
+.date-range-filter label{
+  flex:0 0 auto;
+  font-size:10px;
+  font-weight:750;
+  color:#344054;
+  white-space:nowrap;
+}
+.date-range-filter input[type="date"]{
+  flex:1 1 112px;
+  width:112px;
+  min-width:95px;
+  max-width:145px;
+  box-sizing:border-box;
+  padding:8px 7px;
+  border:1px solid #d8dee4;
+  border-radius:8px;
+  background:#fff;
+  color:#202124;
+  font:inherit;
+  font-size:11px;
+}
+.date-range-filter input[type="date"]:focus{outline:2px solid #bfdbfe;outline-offset:1px;border-color:#93baf7}
+.date-filter-apply{
+  flex:0 0 auto;
+  border:1px solid #1a73e8;
+  border-radius:8px;
+  background:#1a73e8;
+  color:#fff;
+  padding:8px 11px;
+  font:inherit;
+  font-size:10px;
+  font-weight:800;
+  white-space:nowrap;
+  cursor:pointer;
+}
 .date-filter-apply:hover{background:#155fc0;border-color:#155fc0}
-.date-filter-feedback{grid-column:1/-1;font-size:10px;line-height:1.45;color:#b45309;margin:0}
+.date-filter-feedback{flex:0 0 100%;width:100%;font-size:10px;line-height:1.45;color:#b45309;margin:0}
 .date-filter-feedback:empty{display:none}
-@media(max-width:850px){
-  .field-filter-row{grid-template-columns:max-content minmax(0,1fr);column-gap:9px;row-gap:10px}
-  .field-filter-row>label[for="fieldCategoryFilter"]{grid-column:1;grid-row:1}
-  .field-filter-row>select{grid-column:2;grid-row:1}
-  .date-range-filter{grid-column:1/-1;grid-row:2;grid-template-columns:max-content minmax(0,1fr) max-content minmax(0,1fr) max-content;gap:8px}
-  .date-filter-feedback{grid-column:1/-1;grid-row:3}
+@media(max-width:760px){
+  .field-filter-row{flex-wrap:wrap;gap:9px}
+  .field-filter-row>select#fieldCategoryFilter{flex:1 1 180px;width:auto;max-width:100%}
+  .date-range-filter{flex:1 1 100%;flex-wrap:wrap;gap:8px}
+  .date-range-filter input[type="date"]{flex:1 1 120px;max-width:none}
+  .date-filter-feedback{flex-basis:100%}
 }
-@media(max-width:560px){
-  .field-filter-row{padding:10px;grid-template-columns:minmax(0,1fr)}
-  .field-filter-row>label[for="fieldCategoryFilter"]{grid-column:1;grid-row:auto}
-  .field-filter-row>select{grid-column:1;grid-row:auto;width:100%}
-  .date-range-filter{grid-column:1;grid-row:auto;grid-template-columns:max-content minmax(0,1fr);gap:8px 9px}
-  .date-range-filter .date-filter-apply{grid-column:1/-1;justify-self:start;min-width:104px;margin-top:2px}
-  .date-filter-feedback{grid-column:1;grid-row:auto}
+@media(max-width:520px){
+  .field-filter-row{align-items:stretch;padding:10px}
+  .field-filter-row>label[for="fieldCategoryFilter"]{flex:1 0 100%}
+  .field-filter-row>select#fieldCategoryFilter{flex:1 0 100%;width:100%;min-width:0}
+  .date-range-filter{display:grid !important;grid-template-columns:max-content minmax(0,1fr);width:100%}
+  .date-range-filter input[type="date"]{width:100%;min-width:0;max-width:none}
+  .date-range-filter .date-filter-apply{grid-column:1/-1;justify-self:start;min-width:104px}
 }
