@@ -93,6 +93,7 @@ _HEADS = {
 # Named companies, outlets and institutions are proper entities too. The descriptor stays
 # in the canonical name so e.g. ``Siêu thị Big C`` is not collapsed into an unrelated person.
 _ORG_HEADS = {
+    'clb': 'CLB',
     'công an tỉnh': 'Công an tỉnh',
     'công an thành phố': 'Công an thành phố',
     'công an huyện': 'Công an huyện',
@@ -331,4 +332,4 @@ def augment_entities_with_named_infrastructure(
         seen.add(key)
         combined.append({'name': name, 'type': typ,
                          'aliases': entity.get('aliases') if isinstance(entity.get('aliases'), list) else []})
-    return combined[:15], suppress_names
+    return combined[:50], suppress_names

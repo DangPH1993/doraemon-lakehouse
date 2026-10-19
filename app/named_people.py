@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from .processing import normalize_space, norm_name
 
-_ROLE = re.compile(r'(?i)(?<!\w)(hoa hậu|á hậu|người mẫu|diễn viên|ca sĩ|rapper|tiktoker|tiktoker|nghệ sĩ|đạo diễn|nhà văn|nhà báo|mc|tỷ phú|tỉ phú|tổng thống|cựu tổng thống|thủ tướng|phó thủ tướng|bộ trưởng|chủ tịch|phó chủ tịch|giám đốc|ceo|đại sứ|nữ đại sứ|nam đại sứ|luật sư|bác sĩ|tiến sĩ|giáo sư|vận động viên|huấn luyện viên|hlv|cựu cầu thủ|cầu thủ|hoa khôi|nhà sáng lập|sáng lập viên|chuyên gia|ông|bà|ngài)\s+')
+_ROLE = re.compile(r'(?i)(?<!\w)(tiền đạo|tiền vệ|hậu vệ|thủ môn|hoa hậu|á hậu|người mẫu|diễn viên|ca sĩ|rapper|tiktoker|tiktoker|nghệ sĩ|đạo diễn|nhà văn|nhà báo|mc|tỷ phú|tỉ phú|tổng thống|cựu tổng thống|thủ tướng|phó thủ tướng|bộ trưởng|chủ tịch|phó chủ tịch|giám đốc|ceo|đại sứ|nữ đại sứ|nam đại sứ|luật sư|bác sĩ|tiến sĩ|giáo sư|vận động viên|huấn luyện viên|hlv|cựu cầu thủ|cầu thủ|hoa khôi|nhà sáng lập|sáng lập viên|chuyên gia|ông|bà|ngài)\s+')
 _TOKEN = re.compile(r"[^\W_]+(?:[.'’\-][^\W_]+)*", re.UNICODE)
 _CONTEXT = {'mỹ', 'hoa kỳ', 'việt nam', 'trung quốc', 'nga', 'anh', 'hàn quốc', 'nhật bản'}
 _NAME_PARTICLES = {'thị','văn','đức','ngọc','hữu','xuân','minh','quốc','thành','hoàng','kim','gia','bảo','tuấn','anh','mạnh','phúc','đình','công','thanh','khánh','phương','thu','thảo','diệu','trọng','như','bích','quỳnh','hải','trí','nhật'}

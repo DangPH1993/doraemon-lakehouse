@@ -443,17 +443,21 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
     except (TypeError, ValueError):
         confidence = 0.0
     confidence = max(0.0, min(1.0, confidence))
-    entities = result.get('entities') if isinstance(result.get('entities'), list) else []
+    model_entities = result.get('entities') if isinstance(result.get('entities'), list) else []
     entities, suppressed_person_names = augment_entities_with_named_infrastructure(
-        article.get('title') or '', article.get('summary') or '', entities, ''
+        article.get('title') or '', article.get('summary') or '', model_entities, ''
     )
     grounded_text = normalize_space(' '.join(str(article.get(k) or '') for k in ('title', 'summary'))[:20000])
     seen_entity_names = {norm_name(str((item or {}).get('name') or (item or {}).get('canonical_name') or '')) for item in entities if isinstance(item, dict)}
+    recovered_priority = []
     for recovered in extract_named_person_entities(grounded_text) + extract_named_proper_noun_entities(grounded_text):
         recovered_norm = norm_name(recovered.get('name') or '')
         if recovered_norm and recovered_norm not in seen_entity_names:
-            entities.append(recovered)
+            recovered_priority.append(recovered)
             seen_entity_names.add(recovered_norm)
+    # Prioritize independently recovered names ahead of model output so truncation never
+    # silently drops source-grounded proper nouns when the model returns many candidates.
+    entities = recovered_priority + entities
     existing_entity_names = {norm_name(str((e or {}).get('name') or (e or {}).get('canonical_name') or '')) for e in entities if isinstance(e, dict)}
     for recovered_person in extract_named_person_entities(grounded_text):
         if norm_name(recovered_person['name']) not in existing_entity_names:
@@ -601,7 +605,8 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                  AND ((coalesce(published_at,collected_at) >= now()-interval '30 days'
                                        AND (coalesce(ai_classification->>'entity_quality_rules_v075_enriched','false') <> 'true'
                                             OR coalesce(ai_classification->>'field_category_rules_v075_enriched','false') <> 'true'
-                                            OR coalesce(ai_classification->>'named_proper_nouns_v076_enriched','false') <> 'true'))
+                                            OR coalesce(ai_classification->>'named_proper_nouns_v076_enriched','false') <> 'true'
+                                            OR coalesce(ai_classification->>'named_proper_nouns_v0716_enriched','false') <> 'true'))
                                       OR field_category IS NULL)
                                ORDER BY coalesce(published_at,collected_at) DESC
                                LIMIT %s""", (limit,))
@@ -760,6 +765,7 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                         classification['entities'] = ordered_entities[:50]
                         classification['named_entity_rules_v073_enriched'] = True
                         classification['named_proper_nouns_v076_enriched'] = True
+                        classification['named_proper_nouns_v0716_enriched'] = True
                         classification['entity_quality_rules_v075_enriched'] = True
                         classification['entity_quality_rules_v075_enriched_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                         cur.execute("""UPDATE news_articles SET ai_classification=%s::jsonb,field_category=%s,updated_at=now()
@@ -813,7 +819,9 @@ def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[
     # Repair unmistakable old action-family mismatches before processing unclassified articles.
     stats['repaired_mismatches'] = repair_obvious_event_mismatches()
     limit = max(1, int(limit or settings.ai_classification_run_limit))
-    batch_size = max(1, min(20, int(settings.ai_classification_batch_size)))
+    # Smaller batches leave enough completion budget for all entity mentions after summaries
+    # are passed without the old 1,200-character truncation.
+    batch_size = max(1, min(10, int(settings.ai_classification_batch_size)))
     with get_conn() as conn, conn.cursor() as cur:
         # Only work on recent unclassified rows in the normal hourly schedule; the separate
         # backfill flag is required to process older backlog intentionally. The five-minute
@@ -860,7 +868,7 @@ def classify_unprocessed_articles(limit: int | None = None, since=None) -> dict[
     for start in range(0, len(articles), batch_size):
         batch_rows = articles[start:start + batch_size]
         prompt_rows = [{'article_id': int(a['article_id']), 'title': a['title'][:600],
-                        'summary': (a['summary'] or '')[:1200],
+                        'summary': (a['summary'] or '')[:4000],
                         'content_excerpt': (a.get('content_text') or '')[:1200],
                         'language': a.get('language') or 'vi'} for a in batch_rows]
         # Existing topics are deliberately omitted. The independent reconciliation
