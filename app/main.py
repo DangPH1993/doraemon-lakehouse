@@ -22,7 +22,7 @@ from .field_categories import FIELD_CATEGORIES, LEGACY_BROAD_TOPIC_LABELS, is_br
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.18',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.21',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -109,7 +109,9 @@ def pagination_meta(page: int, page_size: int, total: int) -> dict:
 @app.get('/')
 def index(): return FileResponse('static/index.html')
 @app.get('/news')
-def public_news_page(): return FileResponse('static/news.html')
+def public_news_page():
+    # Always deliver the newest HTML so outdated filter markup is not retained by browsers/CDNs.
+    return FileResponse('static/news.html', headers={'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'})
 
 @app.get('/news/following')
 def public_following_page(): return FileResponse('static/following.html')
