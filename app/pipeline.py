@@ -978,26 +978,12 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
             run_message = (run_message + ' First errors: ' + error_summary)[:1000]
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""update pipeline_runs set status=%s,finished_at=now(),source_count=%s,entries_seen=%s,articles_inserted=%s,articles_updated=%s,entries_skipped_existing=%s,feeds_not_modified=%s,entities_found=%s,entity_candidates=%s,topic_candidates=%s,quality_issues=%s,message=%s,details=%s::jsonb where run_id=%s""",
-                (status,totals['sources'],totals['entries_seen'],totals['articles_inserted'],totals['articles_updated'],totals['entries_skipped_existing'],totals['feeds_not_modified'],totals['entity_mentions'],totals['new_entity_mentions'],totals['topic_candidates'],totals['quality_issues'],run_message,json.dumps(totals,ensure_ascii=False),run_id))
+                (status,totals['sources'],totals['entries_seen'],totals['articles_inserted'],totals['articles_updated'],totals['entries_skipped_existing'],totals['feeds_not_modified'],totals['entities_found'],totals['new_entity_mentions'],totals['topic_candidates'],totals['quality_issues'],run_message,json.dumps(totals,ensure_ascii=False),run_id))
         log.info('Pipeline run %s finished in %.1fs: %s',run_id,time.monotonic()-run_clock,totals)
         return totals
     except Exception as exc:
-        # Preserve partial progress in the run catalog if a late stage (including the
-        # final status UPDATE) fails. Without these counters, the dashboard misleadingly
-        # shows zero rows even when RSS and FACT stages already completed.
-        failure_message = f'{type(exc).__name__}: {str(exc)[:700]}'
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""update pipeline_runs set status='failed',finished_at=now(),
-                           source_count=%s,entries_seen=%s,articles_inserted=%s,articles_updated=%s,
-                           entries_skipped_existing=%s,feeds_not_modified=%s,entities_found=%s,
-                           entity_candidates=%s,topic_candidates=%s,quality_issues=%s,
-                           message=%s,details=%s::jsonb where run_id=%s""",
-                (totals.get('sources',0),totals.get('entries_seen',0),
-                 totals.get('articles_inserted',0),totals.get('articles_updated',0),
-                 totals.get('entries_skipped_existing',0),totals.get('feeds_not_modified',0),
-                 totals.get('entity_mentions',0),totals.get('new_entity_mentions',0),
-                 totals.get('topic_candidates',0),totals.get('quality_issues',0),
-                 failure_message,json.dumps(totals,ensure_ascii=False),run_id))
+            cur.execute("update pipeline_runs set status='failed',finished_at=now(),message=%s,details=%s::jsonb where run_id=%s",(f'{type(exc).__name__}: {str(exc)[:700]}',json.dumps(totals,ensure_ascii=False),run_id))
         raise
 
 
