@@ -212,12 +212,10 @@ body{background:#fff;color:#202124;font-size:14px}
 @media(max-width:640px){.article-row{grid-template-columns:minmax(0,1fr)!important}.article-follow-tags{gap:4px}.article-follow-tags .article-action-pair-compact{max-width:100%}.article-row .article-card-footer{margin-top:5px}}
 
 /* v0.7.5: editorial field taxonomy is separate from event topics. */
-.field-filter-row{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:0 0 14px;padding:10px 12px;background:#f8f9fa;border:1px solid #e8eaed;border-radius:10px;color:#5f6368;font-size:11px}
+.field-filter-row{margin:0 0 14px;padding:10px 12px;background:#f8f9fa;border:1px solid #e8eaed;border-radius:10px;color:#5f6368;font-size:11px}
 .field-filter-row label{font-weight:750;color:#344054}
-.field-filter-row select{min-width:190px;max-width:100%;padding:8px 10px;border:1px solid #d8dee4;border-radius:8px;background:#fff;color:#202124;font:inherit}
-.field-filter-help{font-size:10px;color:#7b858d}
+.field-filter-row select{max-width:100%;padding:8px 10px;border:1px solid #d8dee4;border-radius:8px;background:#fff;color:#202124;font:inherit}
 .field-category-badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 7px;background:#eaf2ff;color:#2457a7;font-size:9px;font-weight:750}
-@media(max-width:640px){.field-filter-row{align-items:stretch;flex-direction:column}.field-filter-row select{width:100%;min-width:0}}
 
 
 /* v0.7.12: publisher-hosted article thumbnails (URL-only; no image mirroring). */
@@ -238,32 +236,44 @@ body{background:#fff;color:#202124;font-size:14px}
 }
 
 
-/* v0.7.19: aligned field and publication-date filters in distinct rows. */
-.field-filter-row{display:grid;grid-template-columns:max-content minmax(190px,220px) minmax(0,1fr);align-items:center;column-gap:10px;row-gap:11px}
-.field-filter-row>label{grid-column:1;grid-row:1}
-.field-filter-row>select{grid-column:2;grid-row:1;width:100%;min-width:0}
-.field-filter-help{grid-column:3;grid-row:1;min-width:0;line-height:1.55}
-.date-range-filter{grid-column:1/-1;display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:9px;width:100%;min-width:0;margin:0;padding:10px 0 0;border:0;border-top:1px solid #e1e5e9}
-.date-range-filter label{font-size:10px;font-weight:750;color:#344054;white-space:nowrap}
-.date-range-filter input[type=date]{width:142px;max-width:100%;padding:8px 9px;border:1px solid #d8dee4;border-radius:8px;background:#fff;color:#202124;font:inherit;font-size:11px}
-.date-range-filter input[type=date]:focus{outline:2px solid #bfdbfe;outline-offset:1px;border-color:#93baf7}
-.date-filter-apply{border:1px solid #1a73e8;border-radius:8px;background:#1a73e8;color:#fff;padding:8px 12px;font:inherit;font-size:10px;font-weight:800;white-space:nowrap;cursor:pointer}
-.date-filter-apply:hover{background:#155fc0;border-color:#155fc0}
-.date-filter-feedback{grid-column:1/-1;font-size:10px;line-height:1.45;color:#b45309;margin-top:-5px}
-@media(max-width:760px){
-  .field-filter-row{grid-template-columns:max-content minmax(0,1fr);align-items:center;column-gap:9px;row-gap:10px}
-  .field-filter-row>label{grid-column:1;grid-row:1}
-  .field-filter-row>select{grid-column:2;grid-row:1}
-  .field-filter-help{grid-column:1/-1;grid-row:2}
-  .date-range-filter{grid-row:3;display:grid;grid-template-columns:64px minmax(0,1fr);gap:8px 9px;padding-top:11px}
-  .date-range-filter label{width:auto}
-  .date-range-filter input[type=date]{width:100%;min-width:0}
-  .date-range-filter .date-filter-apply{grid-column:1/-1;width:auto;justify-self:start;min-width:104px;margin:2px 0 0}
-  .date-filter-feedback{grid-column:1/-1;margin-top:0}
+/* v0.7.20: editorial-field and publication-date filters share one horizontal toolbar. */
+.field-filter-row{
+  display:grid;
+  grid-template-columns:max-content minmax(165px,190px) minmax(0,1fr);
+  align-items:center;
+  column-gap:10px;
+  row-gap:8px;
 }
-@media(max-width:400px){
-  .field-filter-row{padding:10px}
-  .field-filter-row>label{font-size:10px}
-  .field-filter-row>select{font-size:10px}
-  .date-range-filter{grid-template-columns:57px minmax(0,1fr);gap:8px}
+.field-filter-row>label[for="fieldCategoryFilter"]{grid-column:1;grid-row:1;white-space:nowrap}
+.field-filter-row>select{grid-column:2;grid-row:1;width:100%;min-width:0}
+.field-filter-help{display:none!important}
+.date-range-filter{
+  grid-column:3;grid-row:1;
+  display:grid;
+  grid-template-columns:max-content minmax(105px,1fr) max-content minmax(105px,1fr) max-content;
+  align-items:center;
+  gap:8px;
+  width:100%;min-width:0;margin:0;padding:0;border:0;
+}
+.date-range-filter label{font-size:10px;font-weight:750;color:#344054;white-space:nowrap}
+.date-range-filter input[type=date]{width:100%;min-width:0;max-width:100%;padding:8px 7px;border:1px solid #d8dee4;border-radius:8px;background:#fff;color:#202124;font:inherit;font-size:11px}
+.date-range-filter input[type=date]:focus{outline:2px solid #bfdbfe;outline-offset:1px;border-color:#93baf7}
+.date-filter-apply{border:1px solid #1a73e8;border-radius:8px;background:#1a73e8;color:#fff;padding:8px 11px;font:inherit;font-size:10px;font-weight:800;white-space:nowrap;cursor:pointer}
+.date-filter-apply:hover{background:#155fc0;border-color:#155fc0}
+.date-filter-feedback{grid-column:1/-1;font-size:10px;line-height:1.45;color:#b45309;margin:0}
+.date-filter-feedback:empty{display:none}
+@media(max-width:850px){
+  .field-filter-row{grid-template-columns:max-content minmax(0,1fr);column-gap:9px;row-gap:10px}
+  .field-filter-row>label[for="fieldCategoryFilter"]{grid-column:1;grid-row:1}
+  .field-filter-row>select{grid-column:2;grid-row:1}
+  .date-range-filter{grid-column:1/-1;grid-row:2;grid-template-columns:max-content minmax(0,1fr) max-content minmax(0,1fr) max-content;gap:8px}
+  .date-filter-feedback{grid-column:1/-1;grid-row:3}
+}
+@media(max-width:560px){
+  .field-filter-row{padding:10px;grid-template-columns:minmax(0,1fr)}
+  .field-filter-row>label[for="fieldCategoryFilter"]{grid-column:1;grid-row:auto}
+  .field-filter-row>select{grid-column:1;grid-row:auto;width:100%}
+  .date-range-filter{grid-column:1;grid-row:auto;grid-template-columns:max-content minmax(0,1fr);gap:8px 9px}
+  .date-range-filter .date-filter-apply{grid-column:1/-1;justify-self:start;min-width:104px;margin-top:2px}
+  .date-filter-feedback{grid-column:1;grid-row:auto}
 }
