@@ -367,6 +367,78 @@ def backfill_required_field_topics(limit: int | None = None) -> int:
     return assigned
 
 
+def backfill_missing_event_topics(limit: int | None = None) -> int:
+    """Ensure every recent, included article has a specific active event Topic.
+
+    GenAI classification remains the primary topic producer. This repair stage covers
+    rows left topicless by earlier versions, transient classification failures, or a
+    field-category value that did not match the required-field list. It first reuses a
+    grounded topic label already stored in ai_classification; only then does it fall back
+    to the article title/summary. Editorial field names are never used as Topics.
+    """
+    limit = max(1, min(int(limit or settings.event_topic_backfill_batch_size), 2000))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT a.article_id,a.title,coalesce(a.summary,'') AS summary,
+                                      coalesce(a.ai_classification->>'event_topic_name','') AS stored_topic
+                           FROM news_articles a
+                           WHERE a.is_excluded=false
+                             AND coalesce(a.published_at,a.collected_at)>=now()-interval '30 days'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM article_topics at
+                               JOIN topics t ON t.topic_id=at.topic_id
+                               WHERE at.article_id=a.article_id
+                                 AND t.topic_type='event' AND t.status='active'
+                             )
+                           ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
+                           LIMIT %s""", (limit,))
+            articles = cur.fetchall()
+
+        from .genai_events import _fallback_event_name, _upsert_event_topic
+        assigned = 0
+        for article in articles:
+            article_id = int(article['article_id'])
+            stored_topic = normalize_space(article.get('stored_topic') or '')[:180]
+            if (not stored_topic or is_broad_field_topic(stored_topic)
+                    or len(norm_name(stored_topic)) < 5):
+                topic_name = _fallback_event_name(
+                    article.get('title') or '', article.get('summary') or '', article_id
+                )
+            else:
+                topic_name = stored_topic
+            try:
+                # Savepoint lets a malformed article fail without discarding other repairs.
+                with conn.transaction():
+                    topic_id = _upsert_event_topic(conn, topic_name, 0.70, None)
+                    if topic_id is None:
+                        topic_name = _fallback_event_name(
+                            article.get('title') or '', article.get('summary') or '', article_id
+                        )
+                        topic_id = _upsert_event_topic(conn, topic_name, 0.70, None)
+                    if topic_id is None:
+                        log.error('Missing-Topic backfill could not create topic: article_id=%s title=%r',
+                                  article_id, article.get('title'))
+                        continue
+                    with conn.cursor() as cur:
+                        cur.execute("""INSERT INTO article_topics(article_id,topic_id,confidence,assignment_method)
+                                       VALUES(%s,%s,0.7000,'missing_topic_fallback')
+                                       ON CONFLICT(article_id,topic_id) DO UPDATE SET
+                                         confidence=GREATEST(article_topics.confidence,excluded.confidence),
+                                         assignment_method=CASE WHEN article_topics.assignment_method='admin'
+                                                               THEN 'admin' ELSE excluded.assignment_method END""",
+                                    (article_id, topic_id))
+                        cur.execute("UPDATE news_articles SET event_topic_scanned_at=coalesce(event_topic_scanned_at,now()), updated_at=now() WHERE article_id=%s",
+                                    (article_id,))
+                assigned += 1
+                log.info('Assigned missing Topic fallback: article_id=%s topic_id=%s title=%r',
+                         article_id, topic_id, article.get('title'))
+            except Exception as exc:
+                log.exception('Missing-Topic backfill failed for article_id=%s: %s', article_id, exc)
+    if assigned:
+        log.warning('Missing-Topic backfill assigned %s Topic(s) to recent articles.', assigned)
+    return assigned
+
+
 def backfill_unscanned_event_topics(limit: int | None = None) -> int:
     """Backfill a bounded batch of recent articles; remaining rows continue next run."""
     if limit is None:
@@ -936,6 +1008,17 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
             totals['required_field_topics_backfilled'] = 0
             totals['required_field_topics_backfill_error'] = f'{type(exc).__name__}: {str(exc)[:240]}'
             log.exception('Required-field Topic enforcement failed non-blocking: %s', exc)
+        # Universal safety net: every recent clean article should have a Topic, even when
+        # its editorial field is not in the old required-field list or prior AI state is stale.
+        stage_started = time.monotonic()
+        try:
+            totals['missing_event_topics_backfilled'] = backfill_missing_event_topics()
+            log.info('Stage universal missing-Topic repair complete: assigned=%s; elapsed=%.1fs',
+                     totals['missing_event_topics_backfilled'], time.monotonic()-stage_started)
+        except Exception as exc:
+            totals['missing_event_topics_backfilled'] = 0
+            totals['missing_event_topics_backfill_error'] = f'{type(exc).__name__}: {str(exc)[:240]}'
+            log.exception('Universal missing-Topic repair failed non-blocking: %s', exc)
         # Backfill high-precision named infrastructure entities on recent already-classified
         # articles without re-calling GenAI. This repairs cases such as a named highway/bridge
         # being represented only by a PERSON mention (e.g. "Cầu vượt Võ Văn Kiệt").
