@@ -22,7 +22,7 @@ from .field_categories import FIELD_CATEGORIES, LEGACY_BROAD_TOPIC_LABELS, is_br
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.17',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.18',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -531,10 +531,12 @@ def public_hot_topics(
 def public_daily_articles(
     q: str | None = Query(default=None, max_length=150),
     field_category: str | None = Query(default=None, max_length=60),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
 ):
-    """Public daily article list, or a global search across all non-excluded stored articles when q is set."""
+    """List daily articles or search stored articles, optionally bounded by Vietnam-local publication dates."""
     local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
     today = (local or {}).get('today')
     if today is None:
@@ -545,6 +547,21 @@ def public_daily_articles(
     allowed_fields = set(FIELD_CATEGORIES) | {'Chưa phân loại'}
     if chosen_field and chosen_field not in allowed_fields:
         raise HTTPException(status_code=400, detail='Lĩnh vực không hợp lệ')
+
+    # The public headlines list defaults to today in the configured Vietnam timezone.
+    # Explicit dates also work with search requests, and bounds are inclusive. If only
+    # one bound is supplied, interpret it as a single-day filter.
+    effective_date_from = date_from
+    effective_date_to = date_to
+    if effective_date_from is None and effective_date_to is None and not query:
+        effective_date_from = effective_date_to = today
+    elif effective_date_from is None and effective_date_to is not None:
+        effective_date_from = effective_date_to
+    elif effective_date_to is None and effective_date_from is not None:
+        effective_date_to = effective_date_from
+    if effective_date_from is not None and effective_date_to is not None and effective_date_from > effective_date_to:
+        raise HTTPException(status_code=400, detail='Ngày bắt đầu không được sau ngày kết thúc')
+
     where = ["a.is_excluded=false"]
     vals: list = []
     if chosen_field == 'Chưa phân loại':
@@ -554,9 +571,8 @@ def public_daily_articles(
         vals.append(chosen_field)
     if query:
         term = f"%{query}%"
-        # A search query intentionally has no publication-date predicate: search the
-        # entire stored article archive, not just today's list or followed items.
-        # Excluded/low-quality records remain hidden from public results.
+        # A search query spans the stored archive unless the caller explicitly supplies
+        # date bounds. Excluded/low-quality records remain hidden from public results.
         where.append("""(
             a.title ILIKE %s
             OR a.summary ILIKE %s
@@ -591,9 +607,9 @@ def public_daily_articles(
             )
         )""")
         vals.extend([term] * 11)
-    else:
-        where.append("(coalesce(a.published_at,a.collected_at) at time zone %s)::date=%s")
-        vals.extend([settings.timezone, today])
+    if effective_date_from is not None and effective_date_to is not None:
+        where.append("(coalesce(a.published_at,a.collected_at) at time zone %s)::date BETWEEN %s AND %s")
+        vals.extend([settings.timezone, effective_date_from, effective_date_to])
 
     from_sql = " FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id"
     where_sql = " WHERE " + " AND ".join(where)
@@ -647,7 +663,10 @@ def public_daily_articles(
                        """ + from_sql + where_sql +
                        " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
                        vals + [page_size, (page - 1) * page_size])
-    return {'date': today, 'query': query or None, 'field_category': chosen_field or None,
+    return {'date': today,
+            'date_from': effective_date_from.isoformat() if effective_date_from else None,
+            'date_to': effective_date_to.isoformat() if effective_date_to else None,
+            'query': query or None, 'field_category': chosen_field or None,
             'field_categories': [*FIELD_CATEGORIES, 'Chưa phân loại'], 'items': items,
             'pagination': pagination_meta(page, page_size, total)}
 
