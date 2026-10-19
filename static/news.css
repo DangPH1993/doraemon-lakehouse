@@ -236,3 +236,14 @@ body{background:#fff;color:#202124;font-size:14px}
   .timeline-card.has-image{grid-template-columns:76px minmax(0,1fr);gap:9px}
   .timeline-thumbnail{max-width:76px;border-radius:7px}
 }
+
+
+/* v0.7.18: inclusive publication-date range filter for daily headlines. */
+.date-range-filter{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-left:auto;padding-left:10px;border-left:1px solid #e1e5e9}
+.date-range-filter label{font-size:10px;font-weight:750;color:#344054;white-space:nowrap}
+.date-range-filter input[type=date]{width:142px;max-width:100%;padding:8px 9px;border:1px solid #d8dee4;border-radius:8px;background:#fff;color:#202124;font:inherit;font-size:11px}
+.date-range-filter input[type=date]:focus{outline:2px solid #bfdbfe;outline-offset:1px;border-color:#93baf7}
+.date-filter-apply{border:1px solid #1a73e8;border-radius:8px;background:#1a73e8;color:#fff;padding:8px 12px;font:inherit;font-size:10px;font-weight:800;white-space:nowrap;cursor:pointer}
+.date-filter-apply:hover{background:#155fc0;border-color:#155fc0}
+.date-filter-feedback{flex-basis:100%;font-size:10px;color:#b45309}
+@media(max-width:640px){.date-range-filter{margin-left:0;padding:10px 0 0;border-left:0;border-top:1px solid #e1e5e9;width:100%;gap:7px}.date-range-filter label{width:58px}.date-range-filter input[type=date]{width:calc(100% - 75px);flex:1;min-width:0}.date-range-filter .date-filter-apply{margin-left:auto;width:100%;margin-top:2px}}

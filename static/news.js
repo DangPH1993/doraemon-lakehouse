@@ -1,13 +1,26 @@
 (() => {
   'use strict';
   const $ = (selector) => document.querySelector(selector);
+  function todayInVietnam() {
+    const parts = new Intl.DateTimeFormat('en-GB', {timeZone:'Asia/Ho_Chi_Minh', year:'numeric', month:'2-digit', day:'2-digit'}).formatToParts(new Date());
+    const values = Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  }
+  function formatDateInput(value) {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return match ? `${match[3]}/${match[2]}/${match[1]}` : String(value || '');
+  }
   const MAX_SAVED_TIMELINES = 10;
+  const initialToday = todayInVietnam();
   const state = {
     period: 'day', selectedTimeline: null, timelinePage: 1, articlePage: 1, searchPage: 1,
     articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '', fieldCategory: '',
+    dateFrom: initialToday, dateTo: initialToday,
     user: null, savedTimelines: [], picked: new Set(), followMeta: new Map(),
     pendingFollow: null, followSaving: false, authMode: 'login', telegram: null
   };
+  $('#articleDateFrom').value = initialToday;
+  $('#articleDateTo').value = initialToday;
   const periodLabels = {day: 'Hôm nay', week: 'Tuần này', month: 'Tháng này'};
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const num = (value) => new Intl.NumberFormat('vi-VN').format(Number(value || 0));
@@ -188,11 +201,21 @@
     $('#articlePagination').innerHTML = '';
     const params = new URLSearchParams({page:String(page), page_size:String(state.articlePageSize)});
     if (state.fieldCategory) params.set('field_category', state.fieldCategory);
+    if (state.dateFrom) params.set('date_from', state.dateFrom);
+    if (state.dateTo) params.set('date_to', state.dateTo);
     try {
       const data = await getJSON(`/api/public/news/articles?${params.toString()}`);
-      renderArticleList('#dailyArticles', data.items || [], false, 'Chưa có bài báo hôm nay', 'Chưa có bài nào được xuất bản hoặc thu thập trong ngày hôm nay.');
+      state.dateFrom = data.date_from || state.dateFrom;
+      state.dateTo = data.date_to || state.dateTo;
+      $('#articleDateFrom').value = state.dateFrom;
+      $('#articleDateTo').value = state.dateTo;
+      const fromLabel = formatDateInput(state.dateFrom);
+      const toLabel = formatDateInput(state.dateTo);
+      const rangeDescription = fromLabel === toLabel ? fromLabel : `${fromLabel} đến ${toLabel}`;
+      renderArticleList('#dailyArticles', data.items || [], false, 'Chưa có bài báo trong khoảng ngày đã chọn', `Không có bài nào từ ${fromLabel} đến ${toLabel}, theo giờ Việt Nam.`);
       renderPagination('#articlePagination', data.pagination, 'articles');
-      $('#articleDateLabel').textContent = `${num(data.pagination.total)} bài được xuất bản hôm nay, theo giờ Việt Nam.`;
+      $('#articleDateLabel').textContent = `${num(data.pagination.total)} bài từ ${rangeDescription}, theo giờ Việt Nam.`;
+      setFeedback('#articleDateFilterFeedback', '');
       syncFollowButtons();
     } catch (error) {
       setMessage('#dailyArticles', 'Không tải được bài báo', error.message, true);
@@ -533,6 +556,15 @@
     state.fieldCategory = String(event.target.value || '');
     await loadArticles(1);
     if (state.searchQuery) await loadSearchResults(1);
+  });
+  $('#articleDateFilterForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const from = String($('#articleDateFrom').value || '').trim();
+    const to = String($('#articleDateTo').value || '').trim();
+    if (!from || !to) { setFeedback('#articleDateFilterFeedback', 'Vui lòng chọn cả ngày bắt đầu và ngày kết thúc.'); return; }
+    if (from > to) { setFeedback('#articleDateFilterFeedback', 'Ngày bắt đầu không được sau ngày kết thúc.'); return; }
+    state.dateFrom = from; state.dateTo = to;
+    await loadArticles(1);
   });
   $('#radarSearchForm').addEventListener('submit', async event => {
     event.preventDefault(); state.searchQuery = $('#radarSearch').value.trim();
