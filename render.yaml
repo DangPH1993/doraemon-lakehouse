@@ -27,3 +27,14 @@ services:
         generateValue: true
       - key: CORS_ORIGINS
         value: http://localhost:8000
+
+      - key: CLOUDFLARE_LAKEHOUSE_ENABLED
+        value: "false"
+      - key: CLOUDFLARE_LAKEHOUSE_READS
+        value: "false"
+      - key: CLOUDFLARE_R2_WAREHOUSE
+        sync: false
+      - key: CLOUDFLARE_R2_CATALOG_URI
+        sync: false
+      - key: CLOUDFLARE_R2_READ_TOKEN
+        sync: false
