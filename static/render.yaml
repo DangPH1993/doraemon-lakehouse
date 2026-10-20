@@ -1,0 +1,50 @@
+services:
+  - type: web
+    name: doraemon-mini-lakehouse
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: AI_CLASSIFICATION_BATCH_SIZE
+        value: "12"
+      - key: AI_CLASSIFICATION_RUN_LIMIT
+        value: "72"
+      - key: AI_REQUEST_TIMEOUT_SECONDS
+        value: "35"
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: http://localhost:8000
+
+      - key: CLOUDFLARE_LAKEHOUSE_ENABLED
+        value: "false"
+      - key: CLOUDFLARE_LAKEHOUSE_READS
+        value: "false"
+      - key: CLOUDFLARE_R2_WAREHOUSE
+        sync: false
+      - key: CLOUDFLARE_R2_CATALOG_URI
+        sync: false
+      - key: CLOUDFLARE_R2_READ_TOKEN
+        sync: false
+      - key: CLOUDFLARE_R2_RAW_ENABLED
+        value: "false"
+      - key: CLOUDFLARE_R2_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_R2_RAW_BUCKET
+        sync: false
+      - key: CLOUDFLARE_R2_S3_ACCESS_KEY_ID
+        sync: false
+      - key: CLOUDFLARE_R2_S3_SECRET_ACCESS_KEY
+        sync: false
