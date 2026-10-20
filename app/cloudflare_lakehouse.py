@@ -224,11 +224,11 @@ def _register_table(table_name: str, columns: list[dict], status: str, row_count
 def bootstrap() -> dict:
     """Take a consistent PostgreSQL snapshot and seed all clean tables into Iceberg.
 
-    A repeatable-read transaction briefly locks every tracked source table against writes,
-    captures all rows plus the outbox high-water mark, and releases the locks before the
-    remote Iceberg writes begin. Baseline events use that high-water ID, so stale outbox
-    events captured before the snapshot cannot overwrite newer baseline values. This is
-    safe to rerun before any destructive PostgreSQL archival has happened.
+    Each Iceberg table is committed in bounded batches. Progress is checkpointed in
+    PostgreSQL after every committed batch so a cancelled GitHub Actions run can resume
+    the same snapshot without restarting a large Article table from zero. Resume is only
+    allowed when the transactional-outbox high-water mark, available tables and row counts
+    still match; otherwise the prior partial target is rebuilt from the new snapshot.
     """
     if not configured():
         raise LakehouseNotReady("Cloudflare R2 Catalog environment variables are missing")
@@ -247,14 +247,13 @@ def bootstrap() -> dict:
             "Bootstrap is disabled after PostgreSQL archival. Restore/rehydrate the archived data first."
         )
 
+    previous_progress = _get_state("bootstrap_progress") or {}
     snapshot_rows: dict[str, list[dict]] = {}
     columns_by_table: dict[str, list[dict]] = {}
     with get_conn() as pg:
         with pg.cursor() as cur:
-            # Take every relation lock in a single statement. Once it succeeds, no write to
-            # any tracked source table can commit until the snapshot is captured; READ
-            # COMMITTED queries below therefore observe the same stable rows without holding
-            # a long-lived MVCC snapshot across the remote Iceberg copy.
+            # Take every relation lock in one statement and capture the snapshot + watermark
+            # before releasing the locks. Remote Iceberg I/O happens after those locks are gone.
             lock_targets = ", ".join(f'public."{name}"' for name in available)
             cur.execute(f"LOCK TABLE {lock_targets} IN SHARE MODE")
             cur.execute("SELECT coalesce(max(outbox_id),0)::bigint AS high_water FROM lakehouse_outbox")
@@ -268,46 +267,178 @@ def bootstrap() -> dict:
                 cur.execute(f'SELECT * FROM public."{table_name}"')
                 snapshot_rows[table_name] = [dict(row) for row in cur.fetchall()]
 
+    row_counts = {name: len(snapshot_rows[name]) for name in available}
+    can_resume = (
+        previous_progress.get("status") == "running"
+        and int(previous_progress.get("outbox_high_water", -1)) == snapshot_watermark
+        and previous_progress.get("table_row_counts") == row_counts
+        and previous_progress.get("source_tables") == available
+    )
+    if can_resume:
+        progress = previous_progress
+        progress.setdefault("completed_tables", [])
+        progress.setdefault("tables", {})
+        log.info(
+            "Cloudflare Lakehouse bootstrap: resuming snapshot watermark=%s completed_tables=%s",
+            snapshot_watermark, len(progress["completed_tables"]),
+        )
+    else:
+        progress = {
+            "status": "running",
+            "outbox_high_water": snapshot_watermark,
+            "source_tables": available,
+            "table_row_counts": row_counts,
+            "completed_tables": [],
+            "tables": {},
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _set_state("bootstrap_progress", progress)
+        log.info(
+            "Cloudflare Lakehouse bootstrap: starting new snapshot watermark=%s tables=%s total_rows=%s",
+            snapshot_watermark, len(available), sum(row_counts.values()),
+        )
+
+    batch_size = int(os.getenv("CLOUDFLARE_LAKEHOUSE_BOOTSTRAP_BATCH_SIZE", "2000"))
+    batch_size = max(100, min(batch_size, 10000))
     counts: dict[str, int] = {}
+
+    def save_progress() -> None:
+        progress["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _set_state("bootstrap_progress", progress)
+
     with catalog_connection() as con:
         for table_name in available:
             columns = columns_by_table[table_name]
-            rows = snapshot_rows[table_name]
+            # Stable key ordering makes partial batches resumable across runner restarts.
+            rows = sorted(
+                snapshot_rows[table_name],
+                key=lambda row: _record_key(table_name, row, TABLE_KEYS[table_name]),
+            )
+            expected_rows = len(rows)
             if not columns:
                 raise LakehouseNotReady(f"No column metadata found for source table {table_name}")
+
             target = _event_table(table_name)
             _ensure_event_table(con, table_name)
-            # Bootstrap rebuilds the Lakehouse snapshot from PostgreSQL. This is allowed
-            # only before archive_totals becomes nonzero; clear all prior partial/duplicate
-            # bootstrap data, then seed a consistent baseline for this table.
-            con.execute("BEGIN TRANSACTION")
-            try:
-                con.execute(f"DELETE FROM {target}")
-                con.executemany(
-                    f"INSERT INTO {target} VALUES (?, ?, 'UPSERT', ?, ?)",
-                    [(snapshot_watermark, _record_key(table_name, row, TABLE_KEYS[table_name]),
-                      _row_json(row), datetime.now(timezone.utc).isoformat()) for row in rows],
+            table_progress = progress.get("tables", {}).get(table_name, {})
+            is_marked_complete = (
+                can_resume
+                and table_name in progress.get("completed_tables", [])
+                and table_progress.get("status") == "complete"
+                and int(table_progress.get("expected_rows", -1)) == expected_rows
+            )
+            if is_marked_complete:
+                # The progress checkpoint is written only after the Iceberg batch commits
+                # and the PG registry marks this table complete.
+                counts[table_name] = expected_rows
+                log.info("Cloudflare Lakehouse bootstrap: table=%s already complete rows=%s; skipping",
+                         table_name, expected_rows)
+                continue
+
+            resume_from = 0
+            if can_resume and table_progress.get("status") == "running":
+                # Check the committed prefix rather than trusting a checkpoint count: the
+                # runner could have been cancelled between an Iceberg commit and PG update.
+                existing = con.execute(
+                    f"SELECT record_key FROM {target} WHERE event_id = ? AND operation = 'UPSERT'",
+                    [snapshot_watermark],
+                ).fetchall()
+                existing_keys = [str(item[0]) for item in existing]
+                existing_count = len(existing_keys)
+                total_count = int(con.execute(f"SELECT count(*) FROM {target}").fetchone()[0])
+                prefix_keys = [
+                    _record_key(table_name, row, TABLE_KEYS[table_name])
+                    for row in rows[:existing_count]
+                ] if existing_count <= expected_rows else []
+                if (
+                    total_count == existing_count
+                    and existing_count <= expected_rows
+                    and len(set(existing_keys)) == existing_count
+                    and set(existing_keys) == set(prefix_keys)
+                ):
+                    resume_from = existing_count
+                else:
+                    log.warning(
+                        "Cloudflare Lakehouse bootstrap: partial table=%s is not a valid resumable prefix; rebuilding",
+                        table_name,
+                    )
+
+            if resume_from == 0:
+                # Rebuild just this table when starting a fresh snapshot or when its
+                # partial prefix cannot be validated. Commit the empty table before batches.
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    con.execute(f"DELETE FROM {target}")
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
+
+            _register_table(table_name, columns, "running", expected_rows)
+            progress.setdefault("tables", {})[table_name] = {
+                "status": "running", "expected_rows": expected_rows,
+                "loaded_rows": resume_from, "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            save_progress()
+            log.info(
+                "Cloudflare Lakehouse bootstrap: table=%s starting rows=%s resume_from=%s batch_size=%s",
+                table_name, expected_rows, resume_from, batch_size,
+            )
+
+            for offset in range(resume_from, expected_rows, batch_size):
+                batch = rows[offset:offset + batch_size]
+                event_rows = [
+                    (snapshot_watermark,
+                     _record_key(table_name, row, TABLE_KEYS[table_name]),
+                     "UPSERT", _row_json(row), datetime.now(timezone.utc).isoformat())
+                    for row in batch
+                ]
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    con.executemany(
+                        f"INSERT INTO {target} VALUES (?, ?, ?, ?, ?)", event_rows,
+                    )
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
+
+                loaded_rows = offset + len(batch)
+                progress["tables"][table_name]["loaded_rows"] = loaded_rows
+                save_progress()
+                log.info(
+                    "Cloudflare Lakehouse bootstrap: table=%s progress=%s/%s",
+                    table_name, loaded_rows, expected_rows,
                 )
-                con.execute("COMMIT")
-            except Exception:
-                con.execute("ROLLBACK")
-                raise
-            _register_table(table_name, columns, "complete", len(rows))
-            counts[table_name] = len(rows)
-            log.info("Cloudflare Lakehouse bootstrap: table=%s rows=%s watermark=%s",
-                     table_name, len(rows), snapshot_watermark)
+
+            _register_table(table_name, columns, "complete", expected_rows)
+            progress["tables"][table_name] = {
+                "status": "complete", "expected_rows": expected_rows,
+                "loaded_rows": expected_rows, "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if table_name not in progress["completed_tables"]:
+                progress["completed_tables"].append(table_name)
+            counts[table_name] = expected_rows
+            save_progress()
+            log.info("Cloudflare Lakehouse bootstrap: table=%s complete rows=%s watermark=%s",
+                     table_name, expected_rows, snapshot_watermark)
 
     # All source rows at or before the snapshot watermark are already represented by the
-    # snapshot. Mark them handled so their older payloads cannot overwrite the baseline.
+    # snapshot. Mark them handled so stale payloads cannot overwrite the baseline.
     with get_conn() as pg, pg.cursor() as cur:
         cur.execute("""UPDATE lakehouse_outbox SET processed_at=coalesce(processed_at,now()),processing_error=NULL
                        WHERE outbox_id <= %s AND processed_at IS NULL""", (snapshot_watermark,))
         handled_outbox = int(cur.rowcount)
-    _set_state("bootstrap_snapshot", {
+    snapshot_state = {
         "status": "complete", "outbox_high_water": snapshot_watermark,
         "tables": counts, "total_rows": sum(counts.values()),
         "snapshot_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    _set_state("bootstrap_snapshot", snapshot_state)
+    progress["status"] = "complete"
+    progress["completed_at"] = datetime.now(timezone.utc).isoformat()
+    progress["outbox_rows_covered_by_snapshot"] = handled_outbox
+    save_progress()
     return {"status": "bootstrapped", "outbox_high_water": snapshot_watermark,
             "outbox_rows_covered_by_snapshot": handled_outbox,
             "tables": counts, "total_rows": sum(counts.values())}
