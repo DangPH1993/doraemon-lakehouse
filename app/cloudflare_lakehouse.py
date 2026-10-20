@@ -1,4 +1,4 @@
-"""Cloudflare R2 Data Catalog / Apache Iceberg adapter for Doraemon Lakehouse.
+"""Cloudflare Basin Catalog / Apache Iceberg adapter for Doraemon Lakehouse.
 
 PostgreSQL remains the operational write path for ingestion/reconciliation and user
 state. Changes to the selected analytical tables are captured in a transactional outbox
@@ -41,6 +41,15 @@ TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "fact_entity_daily": ("stat_date", "entity_id", "source_id"),
     "fact_source_daily": ("stat_date", "source_id"),
     "catalog_reconciliation_merges": ("object_type", "source_id"),
+}
+
+# With forward-only bootstrap, retain small operational dimensions but start article,
+# relationship and FACT history at the cutover watermark. These event tables are created
+# empty so CDC can populate them with future changes without importing historic rows.
+FORWARD_ONLY_SKIP_TABLES = {
+    "news_articles", "article_topics", "article_entities",
+    "fact_news_article", "fact_topic_daily", "fact_topic_trending",
+    "fact_entity_daily", "fact_source_daily",
 }
 
 
@@ -221,15 +230,20 @@ def _register_table(table_name: str, columns: list[dict], status: str, row_count
                     (table_name, list(TABLE_KEYS[table_name]), json.dumps(columns), status, row_count))
 
 
-def bootstrap() -> dict:
-    """Take a consistent PostgreSQL snapshot and seed all clean tables into Iceberg.
+def bootstrap(mode: str = "full") -> dict:
+    """Seed Iceberg from a consistent source snapshot.
 
-    Each Iceberg table is committed in bounded batches. Progress is checkpointed in
-    PostgreSQL after every committed batch so a cancelled GitHub Actions run can resume
-    the same snapshot without restarting a large Article table from zero. Resume is only
-    allowed when the transactional-outbox high-water mark, available tables and row counts
-    still match; otherwise the prior partial target is rebuilt from the new snapshot.
+    ``full`` imports current clean tables and facts. ``forward-only`` creates all tracked
+    Iceberg event tables but skips existing article, relationship and FACT rows; small
+    dimensions/catalogs are loaded so new incoming articles can still link to stable IDs.
+    Both modes checkpoint each Iceberg batch and cover all outbox events through the locked
+    snapshot watermark. In forward-only mode, Verify explicitly validates table readiness and
+    full parity only for tables whose historical baseline was imported.
     """
+    mode = str(mode or "full").strip().lower()
+    if mode not in {"full", "forward-only"}:
+        raise LakehouseNotReady("Bootstrap mode must be 'full' or 'forward-only'")
+    skipped_tables = sorted(FORWARD_ONLY_SKIP_TABLES) if mode == "forward-only" else []
     if not configured():
         raise LakehouseNotReady("Cloudflare R2 Catalog environment variables are missing")
     if not lakehouse_enabled():
@@ -264,12 +278,18 @@ def bootstrap() -> dict:
                                WHERE table_schema='public' AND table_name=%s
                                ORDER BY ordinal_position""", (table_name,))
                 columns_by_table[table_name] = [dict(row) for row in cur.fetchall()]
-                cur.execute(f'SELECT * FROM public."{table_name}"')
-                snapshot_rows[table_name] = [dict(row) for row in cur.fetchall()]
+                if mode == "forward-only" and table_name in FORWARD_ONLY_SKIP_TABLES:
+                    # Do not fetch historical payloads at all. Keeping the typed table
+                    # metadata is enough to create an empty Iceberg event table for CDC.
+                    snapshot_rows[table_name] = []
+                else:
+                    cur.execute(f'SELECT * FROM public."{table_name}"')
+                    snapshot_rows[table_name] = [dict(row) for row in cur.fetchall()]
 
     row_counts = {name: len(snapshot_rows[name]) for name in available}
     can_resume = (
         previous_progress.get("status") == "running"
+        and previous_progress.get("mode", "full") == mode
         and int(previous_progress.get("outbox_high_water", -1)) == snapshot_watermark
         and previous_progress.get("table_row_counts") == row_counts
         and previous_progress.get("source_tables") == available
@@ -285,6 +305,8 @@ def bootstrap() -> dict:
     else:
         progress = {
             "status": "running",
+            "mode": mode,
+            "skipped_historical_tables": skipped_tables,
             "outbox_high_water": snapshot_watermark,
             "source_tables": available,
             "table_row_counts": row_counts,
@@ -294,8 +316,8 @@ def bootstrap() -> dict:
         }
         _set_state("bootstrap_progress", progress)
         log.info(
-            "Cloudflare Lakehouse bootstrap: starting new snapshot watermark=%s tables=%s total_rows=%s",
-            snapshot_watermark, len(available), sum(row_counts.values()),
+            "Cloudflare Lakehouse bootstrap: starting mode=%s snapshot watermark=%s tables=%s rows_to_import=%s historical_tables_skipped=%s",
+            mode, snapshot_watermark, len(available), sum(row_counts.values()), skipped_tables,
         )
 
     batch_size = int(os.getenv("CLOUDFLARE_LAKEHOUSE_BOOTSTRAP_BATCH_SIZE", "2000"))
@@ -430,7 +452,8 @@ def bootstrap() -> dict:
                        WHERE outbox_id <= %s AND processed_at IS NULL""", (snapshot_watermark,))
         handled_outbox = int(cur.rowcount)
     snapshot_state = {
-        "status": "complete", "outbox_high_water": snapshot_watermark,
+        "status": "complete", "mode": mode, "skipped_historical_tables": skipped_tables,
+        "outbox_high_water": snapshot_watermark,
         "tables": counts, "total_rows": sum(counts.values()),
         "snapshot_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -439,7 +462,9 @@ def bootstrap() -> dict:
     progress["completed_at"] = datetime.now(timezone.utc).isoformat()
     progress["outbox_rows_covered_by_snapshot"] = handled_outbox
     save_progress()
-    return {"status": "bootstrapped", "outbox_high_water": snapshot_watermark,
+    return {"status": "bootstrapped", "mode": mode,
+            "skipped_historical_tables": skipped_tables,
+            "outbox_high_water": snapshot_watermark,
             "outbox_rows_covered_by_snapshot": handled_outbox,
             "tables": counts, "total_rows": sum(counts.values())}
 
@@ -784,7 +809,12 @@ def _increment_archive_totals_in_transaction(cur, deltas: dict[str, int]) -> Non
 
 
 def verify() -> dict:
-    """Verify full row counts against the Iceberg current-state views before archiving."""
+    """Verify Iceberg parity for a full baseline, or validate forward-only cutover.
+
+    A forward-only bootstrap intentionally skips historical Article/bridge/FACT rows. Those
+    tables are checked for successful creation and pending CDC is drained, but historical
+    row-count parity is not claimed for them. Archival remains prohibited in forward-only mode.
+    """
     sync_result = {"status": "synced", "events_synced": 0, "batches": 0}
     while True:
         batch = sync_pending(50000)
@@ -794,15 +824,32 @@ def verify() -> dict:
             break
     results: dict[str, dict] = {}
     archived_offsets = _get_state("archive_totals") or {}
+    snapshot = _get_state("bootstrap_snapshot") or {}
+    mode = str(snapshot.get("mode") or "full")
+    skipped_tables = set(snapshot.get("skipped_historical_tables") or []) if mode == "forward-only" else set()
     created: list[str] = []
     with catalog_connection(read_only=True) as con:
         created = create_current_views(con)
         for table_name in created:
+            # In forward-only mode, avoid rescanning large PostgreSQL history tables just to
+            # prove a mismatch we deliberately accepted. Future CDC populates these tables.
+            if table_name in skipped_tables:
+                iceberg_count = int(con.execute(f'SELECT count(*) FROM "{table_name}"').fetchone()[0])
+                results[table_name] = {
+                    "postgres": None,
+                    "intentional_archive_offset": 0,
+                    "expected_iceberg": None,
+                    "iceberg": iceberg_count,
+                    "match": None,
+                    "verification": "historical_baseline_skipped",
+                    "note": "Existing PostgreSQL history was intentionally not imported; future CDC is enabled.",
+                }
+                continue
             with get_conn() as pg, pg.cursor() as cur:
                 cur.execute(f'SELECT count(*)::bigint AS n FROM "{table_name}"')
                 postgres_count = int(cur.fetchone()["n"])
-            # Current relationship views map merged IDs to their canonical targets. Use
-            # the pre-remap current-state view for row-count equality during migration.
+            # Current relationship views map merged IDs to canonical targets. Count their
+            # raw versions for parity so normalization does not change cardinality.
             count_view = f'"{table_name}_raw"' if table_name in {
                 "article_topics", "article_entities", "fact_topic_daily", "fact_topic_trending", "fact_entity_daily"
             } else f'"{table_name}"'
@@ -816,24 +863,38 @@ def verify() -> dict:
                                    "intentional_archive_offset": intentional_archive_offset,
                                    "expected_iceberg": expected_iceberg_count,
                                    "iceberg": iceberg_count,
-                                   "match": expected_iceberg_count == iceberg_count}
+                                   "match": expected_iceberg_count == iceberg_count,
+                                   "verification": "row_count_parity"}
     required_tables = {
         "news_articles", "topics", "entities", "article_topics", "article_entities",
         "fact_news_article", "fact_topic_daily", "fact_topic_trending",
         "fact_entity_daily", "fact_source_daily",
     }
     missing_required = sorted(required_tables - set(created))
-    exact = not missing_required and all(item["match"] for item in results.values())
-    payload = {"status": "verified" if exact else "mismatch", "tables": results,
-               "required_tables_missing": missing_required,
-               "tables_checked": len(results), "sync": sync_result}
-    if exact:
+    parity_results = [item for name, item in results.items() if name not in skipped_tables]
+    exact = not missing_required and all(item["match"] is True for item in parity_results)
+    if exact and mode == "forward-only":
+        status_value = "verified_forward_only"
+    else:
+        status_value = "verified" if exact else "mismatch"
+    payload = {"status": status_value, "verification_mode": mode,
+               "historical_tables_skipped": sorted(skipped_tables),
+               "tables": results, "required_tables_missing": missing_required,
+               "tables_checked": len(results), "tables_checked_for_parity": len(parity_results),
+               "sync": sync_result}
+    if exact and mode == "full":
         payload["verified_at"] = datetime.now(timezone.utc).isoformat()
         _set_state("full_snapshot_verified", payload)
+    elif exact and mode == "forward-only":
+        payload["verified_at"] = datetime.now(timezone.utc).isoformat()
+        # Keep the full-verification marker explicitly non-verified so archive-apply cannot
+        # mistake a forward-only cutover for a complete historical Iceberg copy.
+        _set_state("full_snapshot_verified", {"status": "forward_only", "tables": results,
+                                                "verified_at": payload["verified_at"]})
+        _set_state("forward_only_verified", payload)
     else:
         _set_state("full_snapshot_verified", {"status": "mismatch", "tables": results})
     return payload
-
 
 def archive_old_data(cutoff_days: int = 90, apply: bool = False, batch_size: int = 500) -> dict:
     """Purge aged Article/FACT rows from PostgreSQL only after exact Iceberg verification.
@@ -1015,9 +1076,12 @@ def compact_event_tables(limit_tables: int | None = None) -> dict:
 
 def status() -> dict:
     state = _get_state("full_snapshot_verified")
+    forward_only_state = _get_state("forward_only_verified")
     archive = _get_state("last_archive")
     return {"enabled": lakehouse_enabled(), "reads_enabled": lakehouse_reads_enabled(),
             "read_configured": read_configured(), "write_configured": configured(),
             "configured": configured() or read_configured(),
             "pending_outbox": pending_count() if configured() else None,
-            "verification": state, "last_archive": archive}
+            "bootstrap_snapshot": _get_state("bootstrap_snapshot"),
+            "verification": state, "forward_only_verification": forward_only_state,
+            "last_archive": archive}

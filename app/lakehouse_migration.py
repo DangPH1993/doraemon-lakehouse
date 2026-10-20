@@ -1,7 +1,8 @@
 """Operator CLI for the Cloudflare R2 + Apache Iceberg cutover.
 
 Examples:
-  python -m app.lakehouse_migration bootstrap
+  python -m app.lakehouse_migration bootstrap --mode forward-only
+  python -m app.lakehouse_migration bootstrap --mode full
   python -m app.lakehouse_migration sync --limit 10000
   python -m app.lakehouse_migration verify
   python -m app.lakehouse_migration archive --cutoff-days 90          # dry-run
@@ -22,7 +23,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Doraemon Cloudflare Iceberg Lakehouse migration")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("bootstrap", help="Copy current clean core tables and FACTs into Iceberg")
+    boot = sub.add_parser("bootstrap", help="Seed Iceberg from a full or forward-only baseline")
+    boot.add_argument("--mode", choices=("full", "forward-only"), default="full",
+                      help="full imports historical rows; forward-only skips historical articles, links and FACTs")
     sync = sub.add_parser("sync", help="Append pending transactional outbox events to Iceberg")
     sync.add_argument("--limit", type=int, default=10000)
     sub.add_parser("verify", help="Compare PostgreSQL and Iceberg row counts before archiving")
@@ -36,7 +39,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "bootstrap":
-            result = lakehouse.bootstrap()
+            result = lakehouse.bootstrap(mode=args.mode)
         elif args.command == "sync":
             result = lakehouse.sync_pending(args.limit)
         elif args.command == "verify":
