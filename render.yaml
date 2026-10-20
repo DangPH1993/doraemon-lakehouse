@@ -38,3 +38,13 @@ services:
         sync: false
       - key: CLOUDFLARE_R2_READ_TOKEN
         sync: false
+      - key: CLOUDFLARE_R2_RAW_ENABLED
+        value: "false"
+      - key: CLOUDFLARE_R2_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_R2_RAW_BUCKET
+        sync: false
+      - key: CLOUDFLARE_R2_S3_ACCESS_KEY_ID
+        sync: false
+      - key: CLOUDFLARE_R2_S3_SECRET_ACCESS_KEY
+        sync: false
