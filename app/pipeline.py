@@ -29,6 +29,7 @@ from .field_categories import (
 from .article_images import (extract_image_url, _lookup_open_graph_images,
                               _IMAGE_BACKFILL_LIMIT_PER_RUN, _IMAGE_OG_FALLBACK_LIMIT_PER_SOURCE)
 from . import cloudflare_lakehouse as cf_lakehouse
+from . import cloudflare_raw as cf_raw
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -100,6 +101,13 @@ def backfill_article_image_urls(limit: int = _IMAGE_BACKFILL_LIMIT_PER_RUN) -> d
             try:
                 payload = json.loads(payload)
             except (TypeError, ValueError):
+                payload = {}
+        r2_key = cf_raw.referenced_object_key(payload)
+        if r2_key:
+            try:
+                payload = cf_raw.read_raw_entry(r2_key)
+            except Exception as exc:
+                log.warning('Could not read pending RSS raw entry from R2 for article_id=%s: %s', row['article_id'], exc)
                 payload = {}
         rss_url = extract_image_url(payload if isinstance(payload, dict) else {}, row.get('url'))
         item = {'article_id': row['article_id'], 'raw_url': row['url'], 'image_url': rss_url,
@@ -484,7 +492,7 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
               'skipped_outside_window': 0, 'skipped_undated': 0,
               'feed_not_modified': False, 'entity_mentions': 0, 'new_entities': 0,
               'event_topics_assigned': 0, 'quality_issues': 0, 'image_urls_from_rss': 0,
-              'image_urls_from_og': 0, 'image_lookup_failed': 0, 'error': None}
+              'image_urls_from_og': 0, 'image_lookup_failed': 0, 'raw_r2_uploaded': 0, 'error': None}
     resp = requests.get(source['feed_url'], timeout=(10, settings.request_timeout_seconds),
                         headers=conditional_feed_headers(source))
     if resp.status_code == 304:
@@ -588,6 +596,24 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
         log.info('Source %s: deferred %s Open Graph image lookup(s) to later pipeline runs',
                  source['name'], len(new_items_for_images) - og_attempts)
 
+    # Upload raw payloads before opening the long article-write transaction. This avoids
+    # holding PostgreSQL transaction resources while waiting for per-object R2 requests.
+    # URLs already in either the operational DB or Iceberg need no raw capture.
+    raw_store_enabled = cf_raw.raw_storage_enabled()
+    if raw_store_enabled:
+        queued_urls = set(known_urls)
+        for item in prepared:
+            canonical = item['canonical_url']
+            if canonical in queued_urls:
+                continue
+            queued_urls.add(canonical)
+            item['_r2_object_key'] = cf_raw.store_raw_entry(
+                source['source_id'], item['entry_key'], item['raw_url'], item['payload']
+            )
+            result['raw_r2_uploaded'] += 1
+        log.info('Source %s: uploaded %s temporary RSS payload(s) to Cloudflare R2',
+                 source['name'], result['raw_r2_uploaded'])
+
     with get_conn() as conn:
         for processed_index, item in enumerate(prepared, start=1):
             if processed_index == 1 or processed_index % 25 == 0:
@@ -601,12 +627,24 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
             title, raw_url, pub_date = item['title'], item['raw_url'], item['published_at']
             summary, content_text = item['summary'], item['content_text']
             author, external_id, entry_key, payload = item['author'], item['external_id'], item['entry_key'], item['payload']
+            # Keep the full RSS entry in Cloudflare R2 when temporary raw storage is enabled.
+            # PostgreSQL carries only a small object-key reference so the large JSON payload never
+            # consumes Supabase storage. Upload first; if the DB write later rolls back, the raw
+            # object remains available for retry and is overwritten on a retry.
+            raw_payload_to_store = (
+                cf_raw.raw_reference_payload(item['_r2_object_key'])
+                if raw_store_enabled else payload
+            )
+            if raw_store_enabled and not item.get('_r2_object_key'):
+                # This should only occur for a duplicate canonical URL skipped above. Fail
+                # closed rather than persisting the full payload into PostgreSQL by accident.
+                raise RuntimeError('Cloudflare R2 raw object key missing for a new RSS entry')
             with conn.cursor() as cur:
                 cur.execute("""insert into raw_feed_items(source_id,entry_key,item_url,raw_payload,fetched_at)
                                values(%s,%s,%s,%s::jsonb,now())
                                on conflict(source_id,entry_key) do update set item_url=excluded.item_url,raw_payload=excluded.raw_payload,fetched_at=now()
                                returning raw_id""",
-                            (source['source_id'], entry_key, raw_url, json.dumps(payload, ensure_ascii=False)))
+                            (source['source_id'], entry_key, raw_url, json.dumps(raw_payload_to_store, ensure_ascii=False)))
                 raw_id = cur.fetchone()['raw_id']
             excluded, reason = apply_cleaning_rules(title, canon, source['source_id'], rules)
             quality = 100
@@ -675,10 +713,10 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
     log.info('Source %s: entries=%s, within_window=%s, inserted=%s, skipped_existing=%s, skipped_old=%s, skipped_undated=%s, event_topics=%s',
              source['name'], result['seen'], len(prepared), result['inserted'], result['skipped_existing'],
              result['skipped_outside_window'], result['skipped_undated'], result['event_topics_assigned'])
-    log.info('Source finished: %s; inserted=%s; image_urls_from_rss=%s; image_urls_from_og=%s; image_lookup_failed=%s; elapsed=%.1fs',
-             source['name'], result['inserted'], result.get('image_urls_from_rss', 0),
-             result.get('image_urls_from_og', 0), result.get('image_lookup_failed', 0),
-             time.monotonic()-source_started)
+    log.info('Source finished: %s; inserted=%s; raw_r2_uploaded=%s; image_urls_from_rss=%s; image_urls_from_og=%s; image_lookup_failed=%s; elapsed=%.1fs',
+             source['name'], result['inserted'], result.get('raw_r2_uploaded', 0),
+             result.get('image_urls_from_rss', 0), result.get('image_urls_from_og', 0),
+             result.get('image_lookup_failed', 0), time.monotonic()-source_started)
     return result
 
 def discover_topic_candidates():
@@ -936,37 +974,60 @@ def refresh_topic_trending():
 
 
 def purge_raw_feed_items_after_fact_refresh() -> int:
-    """Delete processed RSS payloads only after every article has a base FACT row.
+    """Delete each raw payload after its clean article has a base FACT row.
 
-    news_articles is the durable clean layer and retains title/summary/url/classification.
-    raw_feed_items is transient ingestion payload; deleting it sets news_articles.raw_id to NULL.
-    If any article lacks fact_news_article, preserve all raw rows. Also preserve orphan raw rows
-    that have no clean article yet, so a failed/interrupted ingestion can be investigated/retried.
+    With Cloudflare raw storage enabled, full payloads live only in R2 and PostgreSQL keeps
+    a lightweight object-key reference. Each entry is independently eligible for cleanup once
+    its article has fact_news_article, so one unrelated incomplete article does not retain every
+    other raw payload. If an R2 deletion fails, the corresponding reference is kept for retry.
+    Orphan rows and raw rows without a clean Article + FACT are retained.
     """
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""select count(*)::int as missing
-                       from news_articles a
-                       left join fact_news_article f on f.article_id=a.article_id
-                       where f.article_id is null""")
-        missing = int(cur.fetchone()['missing'])
-        if missing:
-            log.warning('Raw payload cleanup skipped: %s article(s) have no fact_news_article row.', missing)
-            return 0
-        cur.execute("""delete from raw_feed_items r
+        cur.execute("""select count(*)::int as pending
+                       from raw_feed_items r
+                       where not exists (
+                         select 1 from news_articles a
+                         join fact_news_article f on f.article_id=a.article_id
+                         where a.raw_id=r.raw_id
+                       )""")
+        pending = int(cur.fetchone()['pending'])
+        if pending:
+            log.warning('Raw payload cleanup skipped for %s raw row(s) without a clean Article + FACT; eligible rows continue.', pending)
+        cur.execute("""select r.raw_id, r.raw_payload
+                       from raw_feed_items r
                        where exists (
                          select 1 from news_articles a
                          join fact_news_article f on f.article_id=a.article_id
                          where a.raw_id=r.raw_id
                        )
-                       and not exists (
-                         select 1 from news_articles a
-                         left join fact_news_article f on f.article_id=a.article_id
-                         where a.raw_id=r.raw_id and f.article_id is null
-                       )""")
-        deleted = max(0, cur.rowcount)
+                       order by r.raw_id""")
+        rows = cur.fetchall()
+
+    deletable_ids = []
+    remote_delete_failed = 0
+    for row in rows:
+        raw_id = int(row['raw_id'])
+        object_key = cf_raw.referenced_object_key(row.get('raw_payload'))
+        if object_key:
+            try:
+                cf_raw.delete_raw_object(object_key)
+            except Exception as exc:
+                remote_delete_failed += 1
+                log.error('Raw R2 cleanup failed for raw_id=%s object_key=%s: %s', raw_id, object_key, exc)
+                continue
+        deletable_ids.append(raw_id)
+
+    deleted = 0
+    with get_conn() as conn, conn.cursor() as cur:
+        if deletable_ids:
+            cur.execute("delete from raw_feed_items where raw_id = any(%s)", (deletable_ids,))
+            deleted = max(0, cur.rowcount)
         cur.execute("select count(*)::int as remaining from raw_feed_items")
         remaining = int(cur.fetchone()['remaining'])
-    log.info('Raw payload cleanup complete: deleted=%s processed row(s); remaining_unlinked_or_pending=%s; clean articles and FACT rows retained.', deleted, remaining)
+    log.info(
+        'Raw payload cleanup complete: deleted=%s processed row(s); r2_delete_failed=%s; pending_without_clean_fact=%s; remaining=%s.',
+        deleted, remote_delete_failed, pending, remaining
+    )
     return deleted
 
 
@@ -985,7 +1046,7 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
         active_topics = load_active_topics(conn)
     if source_ids is not None:
         sources=[s for s in sources if s['source_id'] in source_ids]
-    totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'image_urls_from_rss':0,'image_urls_from_og':0,'image_lookup_failed':0,'article_images_backfilled':{},'raw_rows_purged':0,'source_errors':[]}
+    totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'image_urls_from_rss':0,'image_urls_from_og':0,'image_lookup_failed':0,'article_images_backfilled':{},'raw_rows_purged':0,'raw_r2_uploaded':0,'source_errors':[]}
     log.info('Pipeline run %s started: sources=%s; active_topics=%s; active_entity_cache=%s; lookback_hours=%s; backfill_batch=%s',
              run_id, len(sources), len(active_topics), len(entity_lookup['entities_by_id']), settings.pipeline_lookback_hours,
              settings.event_topic_backfill_batch_size)
@@ -994,7 +1055,7 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
             source_run_started = time.monotonic()
             try:
                 stats=process_source(source,rules,entity_lookup=entity_lookup,active_topics=active_topics)
-                for key in ('seen','inserted','updated','skipped_existing','skipped_outside_window','skipped_undated','feed_not_modified','entity_mentions','new_entities','event_topics_assigned','quality_issues','image_urls_from_rss','image_urls_from_og','image_lookup_failed'):
+                for key in ('seen','inserted','updated','skipped_existing','skipped_outside_window','skipped_undated','feed_not_modified','entity_mentions','new_entities','event_topics_assigned','quality_issues','image_urls_from_rss','image_urls_from_og','image_lookup_failed','raw_r2_uploaded'):
                     mapkey={'seen':'entries_seen','inserted':'articles_inserted','updated':'articles_updated','skipped_existing':'entries_skipped_existing','skipped_outside_window':'entries_skipped_outside_window','skipped_undated':'entries_skipped_undated','feed_not_modified':'feeds_not_modified','new_entities':'new_entity_mentions'}.get(key,key)
                     totals[mapkey] += int(bool(stats[key])) if key == 'feed_not_modified' else stats[key]
                 log.info('Stage source complete: %s; elapsed=%.1fs', source['name'], time.monotonic()-source_run_started)

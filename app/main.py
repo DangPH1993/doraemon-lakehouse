@@ -24,7 +24,7 @@ from . import cloudflare_lakehouse as cf_lakehouse
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.0',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.1',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -1372,14 +1372,16 @@ def topic_timeline(topic_id: int, limit: int = Query(default=100, ge=1, le=300))
 def list_raw_items(q:str|None=None,source_id:int|None=None,limit:int=Query(default=100,ge=1,le=500)):
     where=[]; vals=[]
     if q:
-        where.append("(r.raw_payload->>'title' ilike %s or r.item_url ilike %s)")
+        where.append("(coalesce(r.raw_payload->>'title', a.title, '') ilike %s or r.item_url ilike %s)")
         term=f'%{q[:150]}%'; vals.extend([term,term])
     if source_id is not None: where.append('r.source_id=%s'); vals.append(source_id)
     sql="""select r.raw_id,r.entry_key,r.item_url,r.fetched_at,s.name as source_name,
-               coalesce(r.raw_payload->>'title','') as raw_title,
-               coalesce(r.raw_payload->>'published','') as raw_published,
-               coalesce(r.raw_payload->>'summary',r.raw_payload->>'description','') as raw_summary
-               from raw_feed_items r join data_sources s on s.source_id=r.source_id"""
+               coalesce(r.raw_payload->>'title',a.title,'') as raw_title,
+               coalesce(r.raw_payload->>'published',a.published_at::text,'') as raw_published,
+               coalesce(r.raw_payload->>'summary',r.raw_payload->>'description',a.summary,'') as raw_summary
+               from raw_feed_items r
+               join data_sources s on s.source_id=r.source_id
+               left join news_articles a on a.raw_id=r.raw_id"""
     if where: sql+=' where '+' and '.join(where)
     sql+=' order by r.fetched_at desc limit %s'; vals.append(limit)
     return fetch_all(sql,vals)
