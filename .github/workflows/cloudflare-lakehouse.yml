@@ -1,0 +1,107 @@
+name: Cloudflare Iceberg Lakehouse
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *" # CDC sync every 15 minutes UTC
+    - cron: "35 3 * * 0" # Compact event-history rows weekly, UTC Sunday
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Lakehouse action"
+        type: choice
+        options:
+          - sync
+          - bootstrap
+          - verify
+          - status
+          - compact
+          - archive-dry-run
+          - archive-apply
+        default: sync
+        required: true
+      cutoff_days:
+        description: "Archive cutoff; keep the most recent N days in PostgreSQL"
+        type: number
+        default: 90
+        required: true
+      archive_confirmation:
+        description: "For archive-apply only, enter ARCHIVE_VERIFIED_ICEBERG_DATA"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-lakehouse-iceberg-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-or-admin:
+    if: github.event_name == 'workflow_dispatch' || (vars.CLOUDFLARE_LAKEHOUSE_ENABLED == 'true' && vars.CLOUDFLARE_LAKEHOUSE_BOOTSTRAPPED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CLOUDFLARE_LAKEHOUSE_ENABLED: ${{ vars.CLOUDFLARE_LAKEHOUSE_ENABLED }}
+      CLOUDFLARE_LAKEHOUSE_READS: ${{ vars.CLOUDFLARE_LAKEHOUSE_READS }}
+      CLOUDFLARE_R2_WAREHOUSE: ${{ secrets.CLOUDFLARE_R2_WAREHOUSE }}
+      CLOUDFLARE_R2_CATALOG_URI: ${{ secrets.CLOUDFLARE_R2_CATALOG_URI }}
+      CLOUDFLARE_R2_READ_TOKEN: ${{ secrets.CLOUDFLARE_R2_READ_TOKEN }}
+      CLOUDFLARE_R2_TOKEN: ${{ secrets.CLOUDFLARE_R2_TOKEN }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Validate configuration
+        shell: bash
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
+          if [ -z "$CLOUDFLARE_R2_WAREHOUSE" ] || [ -z "$CLOUDFLARE_R2_CATALOG_URI" ] || [ -z "$CLOUDFLARE_R2_TOKEN" ] || [ -z "$CLOUDFLARE_R2_READ_TOKEN" ]; then
+            echo "Cloudflare Lakehouse is enabled but required R2 Data Catalog secrets are missing."
+            echo "Set CLOUDFLARE_R2_WAREHOUSE, CLOUDFLARE_R2_CATALOG_URI, CLOUDFLARE_R2_TOKEN and CLOUDFLARE_R2_READ_TOKEN."
+            exit 1
+          fi
+      - name: Run selected Lakehouse operation
+        shell: bash
+        env:
+          OPERATION: ${{ github.event.inputs.operation || (github.event.schedule == '35 3 * * 0' && 'compact') || 'sync' }}
+          CUTOFF_DAYS: ${{ github.event.inputs.cutoff_days || '90' }}
+          ARCHIVE_CONFIRMATION: ${{ github.event.inputs.archive_confirmation }}
+        run: |
+          case "$OPERATION" in
+            bootstrap)
+              echo "Bootstrap seeds full clean tables into Iceberg. Keep ingestion/reconciliation workflows paused while it runs."
+              python -m app.lakehouse_migration bootstrap
+              ;;
+            sync)
+              python -m app.lakehouse_migration sync --limit 50000
+              ;;
+            verify)
+              python -m app.lakehouse_migration verify
+              ;;
+            status)
+              python -m app.lakehouse_migration status
+              ;;
+            compact)
+              python -m app.lakehouse_migration compact
+              ;;
+            archive-dry-run)
+              python -m app.lakehouse_migration archive --cutoff-days "$CUTOFF_DAYS"
+              ;;
+            archive-apply)
+              if [ "$ARCHIVE_CONFIRMATION" != "ARCHIVE_VERIFIED_ICEBERG_DATA" ]; then
+                echo "Refusing archive: enter ARCHIVE_VERIFIED_ICEBERG_DATA in archive_confirmation after verify succeeds."
+                exit 1
+              fi
+              python -m app.lakehouse_migration archive --cutoff-days "$CUTOFF_DAYS" --apply
+              ;;
+            *) echo "Unknown operation: $OPERATION"; exit 2 ;;
+          esac
