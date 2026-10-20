@@ -1,0 +1,892 @@
+"""Cloudflare R2 Data Catalog / Apache Iceberg adapter for Doraemon Lakehouse.
+
+PostgreSQL remains the operational write path for ingestion/reconciliation and user
+state. Changes to the selected analytical tables are captured in a transactional outbox
+and appended to Iceberg event tables. Current-state views are reconstructed from the latest
+record version, so old Article/Topic/Entity/FACT rows remain queryable after hot data is
+purged from PostgreSQL.
+
+All access is opt-in. Set CLOUDFLARE_LAKEHOUSE_ENABLED=true only after applying migration
+018 and configuring the Cloudflare R2 Data Catalog credentials.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from contextlib import contextmanager
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Any
+
+from .db import get_conn
+
+log = logging.getLogger("mini-lakehouse.cloudflare")
+
+# Bronze/raw is intentionally excluded. These are the clean core tables, bridge tables,
+# dimensions and Gold facts needed by News Radar and the analysis layer.
+TABLE_KEYS: dict[str, tuple[str, ...]] = {
+    "data_sources": ("source_id",),
+    "news_articles": ("article_id",),
+    "topics": ("topic_id",),
+    "entities": ("entity_id",),
+    "topic_aliases": ("topic_alias_id",),
+    "entity_aliases": ("alias_id",),
+    "article_topics": ("article_id", "topic_id"),
+    "article_entities": ("article_id", "entity_id", "mention_text"),
+    "fact_news_article": ("article_id",),
+    "fact_topic_daily": ("stat_date", "topic_id", "source_id"),
+    "fact_topic_trending": ("period_type", "period_start", "topic_id"),
+    "fact_entity_daily": ("stat_date", "entity_id", "source_id"),
+    "fact_source_daily": ("stat_date", "source_id"),
+    "catalog_reconciliation_merges": ("object_type", "source_id"),
+}
+
+
+class LakehouseNotReady(RuntimeError):
+    pass
+
+
+def _flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, "true" if default else "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def lakehouse_enabled() -> bool:
+    return _flag("CLOUDFLARE_LAKEHOUSE_ENABLED")
+
+
+def lakehouse_reads_enabled() -> bool:
+    return lakehouse_enabled() and _flag("CLOUDFLARE_LAKEHOUSE_READS")
+
+
+def read_configured() -> bool:
+    # Render should have only a read-only token; never infer read permission from a writer secret.
+    return all(os.getenv(k, "").strip() for k in (
+        "CLOUDFLARE_R2_WAREHOUSE", "CLOUDFLARE_R2_CATALOG_URI", "CLOUDFLARE_R2_READ_TOKEN"
+    ))
+
+
+def configured() -> bool:
+    """Whether the process has the write credential required for bootstrap/sync/compact."""
+    return all(os.getenv(k, "").strip() for k in (
+        "CLOUDFLARE_R2_WAREHOUSE", "CLOUDFLARE_R2_CATALOG_URI", "CLOUDFLARE_R2_TOKEN"
+    ))
+
+
+def _duckdb():
+    try:
+        import duckdb
+    except ImportError as exc:
+        raise LakehouseNotReady("DuckDB dependency is not installed; redeploy requirements.txt") from exc
+    return duckdb
+
+
+def _sql_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _connect_catalog(read_only: bool = False):
+    token = os.getenv("CLOUDFLARE_R2_READ_TOKEN", "").strip() if read_only else os.getenv("CLOUDFLARE_R2_TOKEN", "").strip()
+    if not all(os.getenv(k, "").strip() for k in ("CLOUDFLARE_R2_WAREHOUSE", "CLOUDFLARE_R2_CATALOG_URI")) or not token:
+        if read_only:
+            raise LakehouseNotReady("Cloudflare read catalog is not configured. Set Warehouse, Catalog URI and CLOUDFLARE_R2_READ_TOKEN.")
+        raise LakehouseNotReady("Cloudflare write catalog is not configured. Set Warehouse, Catalog URI and CLOUDFLARE_R2_TOKEN.")
+    duckdb = _duckdb()
+    conn = duckdb.connect(database=":memory:")
+    try:
+        # LOAD is cheap on every request. Only download an extension on first use (or if
+        # the container's extension cache was cleared), rather than INSTALLing on each API call.
+        for extension in ("iceberg", "httpfs"):
+            try:
+                conn.execute(f"LOAD {extension}")
+            except Exception:
+                conn.execute(f"INSTALL {extension}")
+                conn.execute(f"LOAD {extension}")
+        conn.execute(
+            "CREATE SECRET doraemon_r2_iceberg_secret (TYPE ICEBERG, TOKEN "
+            + _sql_quote(token) + ")"
+        )
+        warehouse = os.environ["CLOUDFLARE_R2_WAREHOUSE"].strip()
+        endpoint = os.environ["CLOUDFLARE_R2_CATALOG_URI"].strip()
+        conn.execute(
+            "ATTACH " + _sql_quote(warehouse) + " AS cf_lakehouse "
+            "(TYPE ICEBERG, ENDPOINT " + _sql_quote(endpoint) + ")"
+        )
+        # The serving app uses a read-only token; namespace creation is a write operation.
+        # Bootstrap creates the namespace before read traffic is enabled.
+        if not read_only:
+            conn.execute("CREATE SCHEMA IF NOT EXISTS cf_lakehouse.doraemon")
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+@contextmanager
+def catalog_connection(read_only: bool = False):
+    conn = _connect_catalog(read_only=read_only)
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _json_default(value: Any):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, (set, tuple)):
+        return list(value)
+    raise TypeError(f"Cannot JSON encode {type(value).__name__}")
+
+
+def _row_json(value: Any) -> str:
+    if value is None:
+        return "{}"
+    if isinstance(value, str):
+        # psycopg may expose a jsonb column as the decoded dict, but tolerate strings too.
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), default=_json_default)
+        except (TypeError, ValueError):
+            pass
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=_json_default)
+
+
+def _record_key(table_name: str, row: dict, key_columns: tuple[str, ...] | list[str]) -> str:
+    # Match PostgreSQL jsonb::text formatting in lakehouse_record_key(): JSONB arrays
+    # include a single space after commas. Exact agreement is essential for CDC updates
+    # to supersede bootstrap records instead of creating duplicate logical rows.
+    return json.dumps([str(row.get(c, "")) if row.get(c) is not None else None for c in key_columns],
+                      ensure_ascii=False)
+
+
+def _event_table(table_name: str) -> str:
+    if table_name not in TABLE_KEYS:
+        raise ValueError(f"Unsupported Lakehouse table: {table_name}")
+    return f"cf_lakehouse.doraemon.{table_name}_events"
+
+
+def _ensure_event_table(conn, table_name: str) -> None:
+    table = _event_table(table_name)
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
+        event_id BIGINT,
+        record_key VARCHAR,
+        operation VARCHAR,
+        row_data VARCHAR,
+        event_at VARCHAR
+    )""")
+
+
+def _available_source_tables() -> list[str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT table_name FROM information_schema.tables
+                       WHERE table_schema='public' AND table_type='BASE TABLE'""")
+        names = {r["table_name"] for r in cur.fetchall()}
+    return [name for name in TABLE_KEYS if name in names]
+
+
+def _column_registry(table_name: str) -> list[dict]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT column_name,data_type,udt_name,is_nullable,ordinal_position
+                       FROM information_schema.columns
+                       WHERE table_schema='public' AND table_name=%s
+                       ORDER BY ordinal_position""", (table_name,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _register_table(table_name: str, columns: list[dict], status: str, row_count: int) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""INSERT INTO lakehouse_table_registry
+                       (table_name,primary_key_columns,columns_json,bootstrap_status,bootstrap_row_count,updated_at)
+                       VALUES(%s,%s,%s::jsonb,%s,%s,now())
+                       ON CONFLICT(table_name) DO UPDATE SET
+                         primary_key_columns=excluded.primary_key_columns,
+                         columns_json=excluded.columns_json,
+                         bootstrap_status=excluded.bootstrap_status,
+                         bootstrap_row_count=excluded.bootstrap_row_count,
+                         updated_at=now()""",
+                    (table_name, list(TABLE_KEYS[table_name]), json.dumps(columns), status, row_count))
+
+
+def bootstrap() -> dict:
+    """Take a consistent PostgreSQL snapshot and seed all clean tables into Iceberg.
+
+    A repeatable-read transaction briefly locks every tracked source table against writes,
+    captures all rows plus the outbox high-water mark, and releases the locks before the
+    remote Iceberg writes begin. Baseline events use that high-water ID, so stale outbox
+    events captured before the snapshot cannot overwrite newer baseline values. This is
+    safe to rerun before any destructive PostgreSQL archival has happened.
+    """
+    if not configured():
+        raise LakehouseNotReady("Cloudflare R2 Catalog environment variables are missing")
+    if not lakehouse_enabled():
+        raise LakehouseNotReady("Set CLOUDFLARE_LAKEHOUSE_ENABLED=true before bootstrap")
+    available = _available_source_tables()
+    if not available:
+        raise LakehouseNotReady("No clean source tables are available for bootstrap")
+
+    # A rebuild from PostgreSQL cannot reconstruct rows that have already been archived
+    # out of PostgreSQL; preserve the existing Iceberg archive instead of overwriting it.
+    archived_offsets = _get_state("archive_totals") or {}
+    archived_any = any(int(value or 0) > 0 for value in archived_offsets.values())
+    if archived_any:
+        raise LakehouseNotReady(
+            "Bootstrap is disabled after PostgreSQL archival. Restore/rehydrate the archived data first."
+        )
+
+    snapshot_rows: dict[str, list[dict]] = {}
+    columns_by_table: dict[str, list[dict]] = {}
+    with get_conn() as pg:
+        with pg.cursor() as cur:
+            # Take every relation lock in a single statement. Once it succeeds, no write to
+            # any tracked source table can commit until the snapshot is captured; READ
+            # COMMITTED queries below therefore observe the same stable rows without holding
+            # a long-lived MVCC snapshot across the remote Iceberg copy.
+            lock_targets = ", ".join(f'public."{name}"' for name in available)
+            cur.execute(f"LOCK TABLE {lock_targets} IN SHARE MODE")
+            cur.execute("SELECT coalesce(max(outbox_id),0)::bigint AS high_water FROM lakehouse_outbox")
+            snapshot_watermark = int(cur.fetchone()["high_water"])
+            for table_name in available:
+                cur.execute("""SELECT column_name,data_type,udt_name,is_nullable,ordinal_position
+                               FROM information_schema.columns
+                               WHERE table_schema='public' AND table_name=%s
+                               ORDER BY ordinal_position""", (table_name,))
+                columns_by_table[table_name] = [dict(row) for row in cur.fetchall()]
+                cur.execute(f'SELECT * FROM public."{table_name}"')
+                snapshot_rows[table_name] = [dict(row) for row in cur.fetchall()]
+
+    counts: dict[str, int] = {}
+    with catalog_connection() as con:
+        for table_name in available:
+            columns = columns_by_table[table_name]
+            rows = snapshot_rows[table_name]
+            if not columns:
+                raise LakehouseNotReady(f"No column metadata found for source table {table_name}")
+            target = _event_table(table_name)
+            _ensure_event_table(con, table_name)
+            # Bootstrap rebuilds the Lakehouse snapshot from PostgreSQL. This is allowed
+            # only before archive_totals becomes nonzero; clear all prior partial/duplicate
+            # bootstrap data, then seed a consistent baseline for this table.
+            con.execute("BEGIN TRANSACTION")
+            try:
+                con.execute(f"DELETE FROM {target}")
+                con.executemany(
+                    f"INSERT INTO {target} VALUES (?, ?, 'UPSERT', ?, ?)",
+                    [(snapshot_watermark, _record_key(table_name, row, TABLE_KEYS[table_name]),
+                      _row_json(row), datetime.now(timezone.utc).isoformat()) for row in rows],
+                )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+            _register_table(table_name, columns, "complete", len(rows))
+            counts[table_name] = len(rows)
+            log.info("Cloudflare Lakehouse bootstrap: table=%s rows=%s watermark=%s",
+                     table_name, len(rows), snapshot_watermark)
+
+    # All source rows at or before the snapshot watermark are already represented by the
+    # snapshot. Mark them handled so their older payloads cannot overwrite the baseline.
+    with get_conn() as pg, pg.cursor() as cur:
+        cur.execute("""UPDATE lakehouse_outbox SET processed_at=coalesce(processed_at,now()),processing_error=NULL
+                       WHERE outbox_id <= %s AND processed_at IS NULL""", (snapshot_watermark,))
+        handled_outbox = int(cur.rowcount)
+    _set_state("bootstrap_snapshot", {
+        "status": "complete", "outbox_high_water": snapshot_watermark,
+        "tables": counts, "total_rows": sum(counts.values()),
+        "snapshot_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"status": "bootstrapped", "outbox_high_water": snapshot_watermark,
+            "outbox_rows_covered_by_snapshot": handled_outbox,
+            "tables": counts, "total_rows": sum(counts.values())}
+
+def sync_pending(limit: int = 10000) -> dict:
+    """Append pending PostgreSQL outbox changes into Iceberg event tables.
+
+    Outbox rows are marked processed only after Iceberg accepted them. Retrying after a
+    network failure can append the same event id twice; the current-state view is idempotent
+    because both copies carry the same event id/key/payload.
+    """
+    if not configured() or not lakehouse_enabled():
+        raise LakehouseNotReady("Enable/configure Cloudflare Lakehouse before syncing")
+    limit = max(1, min(int(limit), 50000))
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT table_name,bootstrap_status FROM lakehouse_table_registry")
+        registry = {row["table_name"]: row["bootstrap_status"] for row in cur.fetchall()}
+        pending_tables = [t for t, status in registry.items() if status == "complete"]
+        if not pending_tables:
+            raise LakehouseNotReady("No completed bootstrap tables; run bootstrap first")
+        cur.execute("""SELECT outbox_id,table_name,operation,record_key,row_data,event_at
+                       FROM lakehouse_outbox
+                       WHERE processed_at IS NULL AND table_name=ANY(%s::text[])
+                       ORDER BY outbox_id
+                       LIMIT %s""", (pending_tables, limit))
+        rows = [dict(r) for r in cur.fetchall()]
+    if not rows:
+        return {"status": "up_to_date", "events_synced": 0, "tables": {}}
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["table_name"], []).append(row)
+    ids_by_table: dict[str, list[int]] = {}
+    with catalog_connection() as con:
+        for table_name, events in grouped.items():
+            _ensure_event_table(con, table_name)
+            target = _event_table(table_name)
+            con.execute("BEGIN TRANSACTION")
+            try:
+                con.executemany(
+                    f"INSERT INTO {target} VALUES (?, ?, ?, ?, ?)",
+                    [(int(e["outbox_id"]), str(e["record_key"]), str(e["operation"]),
+                      _row_json(e["row_data"]),
+                      e["event_at"].isoformat() if hasattr(e["event_at"], "isoformat") else str(e["event_at"]))
+                     for e in events],
+                )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+            ids_by_table[table_name] = [int(e["outbox_id"]) for e in events]
+    synced_ids = [int(row["outbox_id"]) for row in rows]
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE lakehouse_outbox SET processed_at=now(),processing_error=NULL
+                       WHERE outbox_id=ANY(%s::bigint[])""", (synced_ids,))
+        # The durable CDC history is in Iceberg. Keep a short PostgreSQL retry/audit window
+        # only, so the outbox itself does not become another growing storage table.
+        cur.execute("""WITH old_rows AS (
+                         SELECT outbox_id FROM lakehouse_outbox
+                         WHERE processed_at < now()-interval '7 days'
+                         ORDER BY outbox_id LIMIT 20000
+                       ) DELETE FROM lakehouse_outbox o USING old_rows x WHERE o.outbox_id=x.outbox_id""")
+    per_table = {name: len(items) for name, items in grouped.items()}
+    log.info("Cloudflare Lakehouse CDC sync: events=%s tables=%s", len(rows), per_table)
+    return {"status": "synced", "events_synced": len(synced_ids), "tables": per_table}
+
+
+def pending_count() -> int:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*)::bigint AS n FROM lakehouse_outbox WHERE processed_at IS NULL")
+        return int(cur.fetchone()["n"])
+
+
+def _duck_type(column: dict) -> str:
+    data_type = str(column.get("data_type") or "").lower()
+    udt = str(column.get("udt_name") or "").lower()
+    if data_type in {"json", "jsonb"} or udt in {"json", "jsonb"}:
+        return "JSON"
+    if data_type == "array":
+        return "VARCHAR[]" if udt in {"_text", "_varchar", "_bpchar"} else "JSON"
+    if data_type in {"character varying", "character", "text", "name"}:
+        return "VARCHAR"
+    if data_type == "boolean":
+        return "BOOLEAN"
+    if data_type in {"smallint"}:
+        return "SMALLINT"
+    if data_type in {"integer"}:
+        return "INTEGER"
+    if data_type in {"bigint"}:
+        return "BIGINT"
+    if data_type in {"numeric", "decimal"}:
+        return "DECIMAL(38,10)"
+    if data_type in {"real"}:
+        return "REAL"
+    if data_type in {"double precision"}:
+        return "DOUBLE"
+    if data_type == "date":
+        return "DATE"
+    if data_type == "timestamp with time zone":
+        return "TIMESTAMPTZ"
+    if data_type == "timestamp without time zone":
+        return "TIMESTAMP"
+    if data_type == "uuid":
+        return "VARCHAR"
+    return "VARCHAR"
+
+
+def _column_expression(column: dict) -> str:
+    name = str(column["column_name"])
+    q_name = '"' + name.replace('"', '""') + '"'
+    path = "$." + name
+    path_lit = _sql_quote(path)
+    typ = _duck_type(column)
+    if typ == "JSON":
+        expr = f"try_cast(json_extract(row_data, {path_lit}) AS JSON)"
+    elif typ.endswith("[]") or typ == "JSON":
+        expr = f"try_cast(json_extract(row_data, {path_lit}) AS {typ})"
+    else:
+        expr = f"try_cast(json_extract_string(row_data, {path_lit}) AS {typ})"
+    return f"{expr} AS {q_name}"
+
+
+def create_current_views(con, table_names: list[str] | None = None) -> list[str]:
+    """Create typed temporary views for selected bootstrapped tables in this session.
+
+    For normal API requests, only views referenced by the SQL are created. For migration
+    verification, omitting `table_names` selects every table actually bootstrapped in the
+    registry (older databases may not have every optional table yet).
+    """
+    requested = None if table_names is None else set(table_names)
+    if requested is not None:
+        unknown = requested - set(TABLE_KEYS)
+        if unknown:
+            raise LakehouseNotReady(f"Unsupported Iceberg view(s) requested: {sorted(unknown)}")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT table_name,columns_json,bootstrap_status FROM lakehouse_table_registry
+                       WHERE bootstrap_status='complete'""")
+        registry_rows = [dict(row) for row in cur.fetchall()]
+    registered = {row['table_name'] for row in registry_rows}
+    if requested is None:
+        requested = set(registered)
+    missing = requested - registered
+    if missing:
+        raise LakehouseNotReady(f"Iceberg table(s) not bootstrapped: {sorted(missing)}")
+    selected = set(requested)
+    # Merge map is an optional dependency for preserving canonical IDs across older links.
+    # If catalog reconciliation has not been deployed, relations can still be read as-is.
+    if selected.intersection({
+        'article_topics', 'article_entities', 'fact_topic_daily',
+        'fact_topic_trending', 'fact_entity_daily'
+    }) and 'catalog_reconciliation_merges' in registered:
+        selected.add('catalog_reconciliation_merges')
+    rows = [row for row in registry_rows if row['table_name'] in selected]
+    rows.sort(key=lambda item: (item['table_name'] == 'catalog_reconciliation_merges', item['table_name']))
+    created = []
+    for row in rows:
+        table_name = row["table_name"]
+        try:
+            columns = row["columns_json"]
+            if isinstance(columns, str):
+                columns = json.loads(columns)
+            projections = ", ".join(_column_expression(c) for c in columns)
+            event_table = _event_table(table_name)
+            view_name = '"' + table_name.replace('"', '""') + '"'
+            con.execute(f"""CREATE OR REPLACE TEMP VIEW {view_name} AS
+                WITH ranked AS (
+                  SELECT record_key,operation,row_data,event_id,
+                         row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
+                  FROM {event_table}
+                )
+                SELECT {projections}
+                FROM ranked WHERE rn=1 AND operation <> 'DELETE'""")
+            created.append(table_name)
+        except Exception as exc:
+            raise LakehouseNotReady(f"Could not construct current-state view for {table_name}: {exc}") from exc
+    if "catalog_reconciliation_merges" in created:
+        for table_name, fk, object_type in (
+            ("article_topics", "topic_id", "topic"),
+            ("article_entities", "entity_id", "entity"),
+        ):
+            if table_name not in created:
+                continue
+            view = f'"{table_name}_raw"'
+            con.execute(f'CREATE OR REPLACE TEMP VIEW {view} AS SELECT * FROM "{table_name}"')
+            if table_name == "article_topics":
+                con.execute(f"""CREATE OR REPLACE TEMP VIEW "{table_name}" AS
+                    WITH RECURSIVE map(source_id,target_id,depth) AS (
+                      SELECT source_id,target_id,1 FROM catalog_reconciliation_merges WHERE object_type='topic'
+                      UNION ALL
+                      SELECT m.source_id,n.target_id,m.depth+1 FROM map m
+                      JOIN catalog_reconciliation_merges n ON n.object_type='topic' AND n.source_id=m.target_id
+                      WHERE m.depth<20
+                    ), resolved AS (SELECT source_id,arg_max(target_id,depth) AS target_id FROM map GROUP BY source_id),
+                    canonical AS (
+                      SELECT r.article_id,coalesce(x.target_id,r.topic_id) AS topic_id,r.confidence,r.assignment_method,r.created_at
+                      FROM {view} r LEFT JOIN resolved x ON x.source_id=r.topic_id
+                    )
+                    SELECT article_id,topic_id,max(confidence) AS confidence,
+                           arg_max(assignment_method,created_at) AS assignment_method,min(created_at) AS created_at
+                    FROM canonical GROUP BY article_id,topic_id""")
+            else:
+                con.execute(f"""CREATE OR REPLACE TEMP VIEW "{table_name}" AS
+                    WITH RECURSIVE map(source_id,target_id,depth) AS (
+                      SELECT source_id,target_id,1 FROM catalog_reconciliation_merges WHERE object_type='entity'
+                      UNION ALL
+                      SELECT m.source_id,n.target_id,m.depth+1 FROM map m
+                      JOIN catalog_reconciliation_merges n ON n.object_type='entity' AND n.source_id=m.target_id
+                      WHERE m.depth<20
+                    ), resolved AS (SELECT source_id,arg_max(target_id,depth) AS target_id FROM map GROUP BY source_id),
+                    canonical AS (
+                      SELECT r.article_id,coalesce(x.target_id,r.entity_id) AS entity_id,r.mention_text,r.confidence,r.created_at
+                      FROM {view} r LEFT JOIN resolved x ON x.source_id=r.entity_id
+                    )
+                    SELECT article_id,entity_id,mention_text,max(confidence) AS confidence,min(created_at) AS created_at
+                    FROM canonical GROUP BY article_id,entity_id,mention_text""")
+
+        # Historical Gold fact rows may still refer to a source ID that was merged after
+        # the fact was produced. Keep those facts queryable under the canonical ID and
+        # aggregate collisions after ID resolution. Raw views are used for exact bootstrap
+        # verification; user-facing fact queries read these canonical views.
+        if "fact_topic_daily" in created:
+            con.execute('CREATE OR REPLACE TEMP VIEW "fact_topic_daily_raw" AS SELECT * FROM "fact_topic_daily"')
+            con.execute("""CREATE OR REPLACE TEMP VIEW "fact_topic_daily" AS
+                WITH RECURSIVE map(source_id,target_id,depth) AS (
+                  SELECT source_id,target_id,1 FROM catalog_reconciliation_merges WHERE object_type='topic'
+                  UNION ALL SELECT m.source_id,n.target_id,m.depth+1 FROM map m
+                    JOIN catalog_reconciliation_merges n ON n.object_type='topic' AND n.source_id=m.target_id WHERE m.depth<20
+                ), resolved AS (SELECT source_id,arg_max(target_id,depth) AS target_id FROM map GROUP BY source_id),
+                canonical AS (SELECT f.stat_date,coalesce(x.target_id,f.topic_id) AS topic_id,f.source_id,f.article_count,f.updated_at
+                              FROM "fact_topic_daily_raw" f LEFT JOIN resolved x ON x.source_id=f.topic_id)
+                SELECT stat_date,topic_id,source_id,sum(article_count)::INTEGER AS article_count,max(updated_at) AS updated_at
+                FROM canonical GROUP BY stat_date,topic_id,source_id""")
+        if "fact_entity_daily" in created:
+            con.execute('CREATE OR REPLACE TEMP VIEW "fact_entity_daily_raw" AS SELECT * FROM "fact_entity_daily"')
+            con.execute("""CREATE OR REPLACE TEMP VIEW "fact_entity_daily" AS
+                WITH RECURSIVE map(source_id,target_id,depth) AS (
+                  SELECT source_id,target_id,1 FROM catalog_reconciliation_merges WHERE object_type='entity'
+                  UNION ALL SELECT m.source_id,n.target_id,m.depth+1 FROM map m
+                    JOIN catalog_reconciliation_merges n ON n.object_type='entity' AND n.source_id=m.target_id WHERE m.depth<20
+                ), resolved AS (SELECT source_id,arg_max(target_id,depth) AS target_id FROM map GROUP BY source_id),
+                canonical AS (SELECT f.stat_date,coalesce(x.target_id,f.entity_id) AS entity_id,f.source_id,f.article_count,f.updated_at
+                              FROM "fact_entity_daily_raw" f LEFT JOIN resolved x ON x.source_id=f.entity_id)
+                SELECT stat_date,entity_id,source_id,sum(article_count)::INTEGER AS article_count,max(updated_at) AS updated_at
+                FROM canonical GROUP BY stat_date,entity_id,source_id""")
+        if "fact_topic_trending" in created:
+            con.execute('CREATE OR REPLACE TEMP VIEW "fact_topic_trending_raw" AS SELECT * FROM "fact_topic_trending"')
+            con.execute("""CREATE OR REPLACE TEMP VIEW "fact_topic_trending" AS
+                WITH RECURSIVE map(source_id,target_id,depth) AS (
+                  SELECT source_id,target_id,1 FROM catalog_reconciliation_merges WHERE object_type='topic'
+                  UNION ALL SELECT m.source_id,n.target_id,m.depth+1 FROM map m
+                    JOIN catalog_reconciliation_merges n ON n.object_type='topic' AND n.source_id=m.target_id WHERE m.depth<20
+                ), resolved AS (SELECT source_id,arg_max(target_id,depth) AS target_id FROM map GROUP BY source_id),
+                canonical AS (
+                  SELECT f.period_type,f.period_start,coalesce(x.target_id,f.topic_id) AS topic_id,
+                         f.article_count,f.source_count,f.previous_article_count,f.growth_pct,f.hotness_score,f.updated_at
+                  FROM "fact_topic_trending_raw" f LEFT JOIN resolved x ON x.source_id=f.topic_id
+                ), aggregate_rows AS (
+                  SELECT period_type,period_start,topic_id,sum(article_count)::INTEGER AS article_count,
+                         sum(source_count)::INTEGER AS source_count,sum(previous_article_count)::INTEGER AS previous_article_count,
+                         CASE WHEN sum(previous_article_count)>0
+                              THEN round(100.0*(sum(article_count)-sum(previous_article_count))/sum(previous_article_count),2)
+                              ELSE NULL END AS growth_pct,
+                         sum(hotness_score)::DECIMAL(12,3) AS hotness_score,max(updated_at) AS updated_at
+                  FROM canonical GROUP BY period_type,period_start,topic_id
+                )
+                SELECT period_type,period_start,topic_id,article_count,source_count,previous_article_count,growth_pct,hotness_score,
+                       row_number() OVER (PARTITION BY period_type,period_start ORDER BY hotness_score DESC,article_count DESC,source_count DESC,topic_id)::INTEGER AS rank_position,
+                       updated_at
+                FROM aggregate_rows""")
+    return created
+
+
+def _tables_referenced_by_sql(sql: str) -> list[str]:
+    """Extract physical table names from internal SQL and keep only our allow-list."""
+    found = []
+    pattern = re.compile(r'\b(?:FROM|JOIN)\s+["`]?([a-z_][a-z0-9_]*)', re.IGNORECASE)
+    for match in pattern.finditer(sql):
+        name = match.group(1).lower()
+        # Maintenance queries may explicitly request the unreconciled/raw current-state
+        # view for key-level comparison. Its physical event table is still the base name.
+        base_name = name[:-4] if name.endswith('_raw') else name
+        if base_name in TABLE_KEYS and base_name not in found:
+            found.append(base_name)
+    return found or list(TABLE_KEYS)
+
+
+def query(sql: str, params: tuple | list = ()) -> list[dict]:
+    """Run a read query against latest Iceberg state, loading only referenced views."""
+    if not lakehouse_reads_enabled():
+        raise LakehouseNotReady("Lakehouse reads are disabled")
+    with catalog_connection(read_only=True) as con:
+        create_current_views(con, _tables_referenced_by_sql(sql))
+        cursor = con.execute(sql, list(params))
+        columns = [d[0] for d in cursor.description or []]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def scalar(sql: str, params: tuple | list = (), default=None):
+    rows = query(sql, params)
+    if not rows:
+        return default
+    return next(iter(rows[0].values()), default)
+
+
+def _set_state(key: str, value: dict) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""INSERT INTO lakehouse_state(state_key,state_value,updated_at)
+                       VALUES(%s,%s::jsonb,now()) ON CONFLICT(state_key) DO UPDATE
+                       SET state_value=excluded.state_value,updated_at=now()""",
+                    (key, json.dumps(value, ensure_ascii=False, default=_json_default)))
+
+
+def _get_state(key: str) -> dict | None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT state_value FROM lakehouse_state WHERE state_key=%s", (key,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    value = row["state_value"]
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _increment_archive_totals_in_transaction(cur, deltas: dict[str, int]) -> None:
+    """Track rows intentionally retained in Iceberg but physically purged from PostgreSQL.
+
+    The cumulative offsets let later verification distinguish intentional archival from
+    an actual missing-data mismatch. The state update commits atomically with each PG purge.
+    """
+    cur.execute("SELECT state_value FROM lakehouse_state WHERE state_key='archive_totals' FOR UPDATE")
+    row = cur.fetchone()
+    value = row['state_value'] if row else {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            value = {}
+    totals = {str(k): int(v) for k, v in (value or {}).items()}
+    for table_name, delta in deltas.items():
+        totals[table_name] = max(0, totals.get(table_name, 0) + int(delta))
+    cur.execute("""INSERT INTO lakehouse_state(state_key,state_value,updated_at)
+                   VALUES('archive_totals',%s::jsonb,now())
+                   ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value,updated_at=now()""",
+                (json.dumps(totals, ensure_ascii=False),))
+
+
+def verify() -> dict:
+    """Verify full row counts against the Iceberg current-state views before archiving."""
+    sync_result = {"status": "synced", "events_synced": 0, "batches": 0}
+    while True:
+        batch = sync_pending(50000)
+        sync_result["events_synced"] += int(batch.get("events_synced", 0))
+        sync_result["batches"] += 1
+        if int(batch.get("events_synced", 0)) < 50000:
+            break
+    results: dict[str, dict] = {}
+    archived_offsets = _get_state("archive_totals") or {}
+    created: list[str] = []
+    with catalog_connection(read_only=True) as con:
+        created = create_current_views(con)
+        for table_name in created:
+            with get_conn() as pg, pg.cursor() as cur:
+                cur.execute(f'SELECT count(*)::bigint AS n FROM "{table_name}"')
+                postgres_count = int(cur.fetchone()["n"])
+            # Current relationship views map merged IDs to their canonical targets. Use
+            # the pre-remap current-state view for row-count equality during migration.
+            count_view = f'"{table_name}_raw"' if table_name in {
+                "article_topics", "article_entities", "fact_topic_daily", "fact_topic_trending", "fact_entity_daily"
+            } else f'"{table_name}"'
+            try:
+                iceberg_count = int(con.execute(f'SELECT count(*) FROM {count_view}').fetchone()[0])
+            except Exception:
+                iceberg_count = int(con.execute(f'SELECT count(*) FROM "{table_name}"').fetchone()[0])
+            intentional_archive_offset = int(archived_offsets.get(table_name, 0) or 0)
+            expected_iceberg_count = postgres_count + intentional_archive_offset
+            results[table_name] = {"postgres": postgres_count,
+                                   "intentional_archive_offset": intentional_archive_offset,
+                                   "expected_iceberg": expected_iceberg_count,
+                                   "iceberg": iceberg_count,
+                                   "match": expected_iceberg_count == iceberg_count}
+    required_tables = {
+        "news_articles", "topics", "entities", "article_topics", "article_entities",
+        "fact_news_article", "fact_topic_daily", "fact_topic_trending",
+        "fact_entity_daily", "fact_source_daily",
+    }
+    missing_required = sorted(required_tables - set(created))
+    exact = not missing_required and all(item["match"] for item in results.values())
+    payload = {"status": "verified" if exact else "mismatch", "tables": results,
+               "required_tables_missing": missing_required,
+               "tables_checked": len(results), "sync": sync_result}
+    if exact:
+        payload["verified_at"] = datetime.now(timezone.utc).isoformat()
+        _set_state("full_snapshot_verified", payload)
+    else:
+        _set_state("full_snapshot_verified", {"status": "mismatch", "tables": results})
+    return payload
+
+
+def archive_old_data(cutoff_days: int = 90, apply: bool = False, batch_size: int = 500) -> dict:
+    """Purge aged Article/FACT rows from PostgreSQL only after exact Iceberg verification.
+
+    Articles stay queryable from Iceberg after purge; user timelines, search and followed
+    feeds switch to Iceberg when CLOUDFLARE_LAKEHOUSE_READS=true. Topics/Entities remain as
+    the small serving dimensions because user follows, identity checks and operational
+    reconciliation need stable, transactionally-updated IDs; complete copies also exist in
+    Iceberg. Bronze/raw feed payloads are not migrated.
+    """
+    if not lakehouse_reads_enabled():
+        raise LakehouseNotReady("Refusing to archive: enable CLOUDFLARE_LAKEHOUSE_READS first")
+    verification = _get_state("full_snapshot_verified")
+    if not verification or verification.get("status") != "verified":
+        raise LakehouseNotReady("Refusing to archive: run `verify` and resolve all row-count mismatches first")
+    cutoff_days = max(90, min(int(cutoff_days), 3650))
+    batch_size = max(100, min(int(batch_size), 2000))
+    from datetime import timedelta
+    cutoff_date = date.today() - timedelta(days=cutoff_days)
+    # Capture all outstanding writes (including changes made by admin/API) before purging.
+    sync_result = {"events_synced": 0, "batches": 0}
+    while True:
+        batch_sync = sync_pending(50000)
+        sync_result["events_synced"] += int(batch_sync.get("events_synced", 0))
+        sync_result["batches"] += 1
+        if int(batch_sync.get("events_synced", 0)) < 50000:
+            break
+    left = pending_count()
+    if left:
+        raise LakehouseNotReady(f"Refusing to archive: {left} CDC events remain pending")
+    # The saved verification marker may predate new pipeline/admin writes. Re-run the exact
+    # current-state checks immediately before the first destructive batch.
+    fresh_verification = verify()
+    if fresh_verification.get("status") != "verified":
+        raise LakehouseNotReady(
+            "Refusing to archive: fresh Iceberg/PostgreSQL verification did not pass; "
+            f"see table mismatches {fresh_verification.get('tables', {})}"
+        )
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*)::bigint AS n FROM news_articles WHERE coalesce(published_at,collected_at) < %s::date", (cutoff_date,))
+        selected_articles = int(cur.fetchone()["n"])
+    report = {"cutoff_date": cutoff_date.isoformat(), "articles_selected": selected_articles,
+              "articles_archived": 0, "facts_pruned": {}, "apply": apply, "sync": sync_result}
+    if not apply:
+        return report
+
+    deleted = 0
+    while True:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT article_id FROM news_articles
+                           WHERE coalesce(published_at,collected_at) < %s::date
+                           ORDER BY article_id LIMIT %s""", (cutoff_date, batch_size))
+            batch = [int(row["article_id"]) for row in cur.fetchall()]
+        if not batch:
+            break
+        # Never cascade-delete a parent unless its row AND dependent relationships/fact row
+        # match the PostgreSQL snapshot in Iceberg. A global row-count check alone cannot
+        # detect a key-level mismatch hidden by another duplicated/missing record.
+        placeholders = ",".join("?" for _ in batch)
+        lake_rows = query(f"""SELECT a.article_id,a.source_id,a.canonical_url,a.url,a.title,a.content_hash,
+                   a.summary,a.field_category,a.image_url,a.is_excluded,a.published_at,a.collected_at,
+                   (SELECT count(*)::BIGINT FROM article_topics_raw rel WHERE rel.article_id=a.article_id) AS topic_links,
+                   (SELECT count(*)::BIGINT FROM article_entities_raw rel WHERE rel.article_id=a.article_id) AS entity_links,
+                   (SELECT count(*)::BIGINT FROM fact_news_article f WHERE f.article_id=a.article_id) AS article_facts
+                   FROM news_articles a WHERE a.article_id IN ({placeholders})""", batch)
+        lake_by_id = {int(row["article_id"]): row for row in lake_rows}
+        missing = sorted(set(batch) - set(lake_by_id))
+        if missing:
+            raise LakehouseNotReady(f"Refusing to delete article ids not present in Iceberg: {missing[:10]}")
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT a.article_id,a.source_id,a.canonical_url,a.url,a.title,a.content_hash,
+                              a.summary,a.field_category,a.image_url,a.is_excluded,a.published_at,a.collected_at,
+                              (SELECT count(*)::bigint FROM article_topics_raw rel WHERE rel.article_id=a.article_id) AS topic_links,
+                              (SELECT count(*)::bigint FROM article_entities_raw rel WHERE rel.article_id=a.article_id) AS entity_links,
+                              (SELECT count(*)::bigint FROM fact_news_article f WHERE f.article_id=a.article_id) AS article_facts
+                           FROM news_articles a WHERE a.article_id=ANY(%s::bigint[])""", (batch,))
+            pg_by_id = {int(row["article_id"]): row for row in cur.fetchall()}
+            mismatches = []
+            row_fields = ("source_id", "canonical_url", "url", "title", "content_hash", "summary",
+                          "field_category", "image_url", "is_excluded", "published_at", "collected_at")
+            count_fields = ("topic_links", "entity_links", "article_facts")
+            def comparable(value):
+                if isinstance(value, datetime):
+                    if value.tzinfo is None:
+                        value = value.replace(tzinfo=timezone.utc)
+                    return value.astimezone(timezone.utc).isoformat()
+                if isinstance(value, date):
+                    return value.isoformat()
+                return value
+            for article_id in batch:
+                expected = pg_by_id.get(article_id)
+                actual = lake_by_id.get(article_id)
+                if expected is None or actual is None:
+                    mismatches.append(article_id)
+                    continue
+                content_mismatch = any(comparable(expected[field]) != comparable(actual[field]) for field in row_fields)
+                count_mismatch = any(int(expected[field] or 0) != int(actual[field] or 0) for field in count_fields)
+                if content_mismatch or count_mismatch:
+                    mismatches.append(article_id)
+            if mismatches:
+                raise LakehouseNotReady(
+                    f"Refusing to archive: article relationship/FACT mismatch for IDs {mismatches[:10]}"
+                )
+            topic_links = sum(int(row["topic_links"] or 0) for row in pg_by_id.values())
+            entity_links = sum(int(row["entity_links"] or 0) for row in pg_by_id.values())
+            article_facts = sum(int(row["article_facts"] or 0) for row in pg_by_id.values())
+            cur.execute("SET LOCAL doraemon.skip_lakehouse_outbox = 'on'")
+            cur.execute("DELETE FROM news_articles WHERE article_id=ANY(%s::bigint[])", (batch,))
+            batch_deleted = int(cur.rowcount)
+            _increment_archive_totals_in_transaction(cur, {
+                "news_articles": batch_deleted,
+                "article_topics": topic_links,
+                "article_entities": entity_links,
+                "fact_news_article": article_facts,
+            })
+            deleted += batch_deleted
+    report["articles_archived"] = deleted
+
+    # Keep current analytical windows in PostgreSQL for low-latency dashboards; the full
+    # FACT history has already been preserved in Iceberg. Suppress CDC for this intentional
+    # hot-window purge, otherwise the outbox would mark historical FACT rows as deleted.
+    retentions = {"fact_topic_daily": 90, "fact_topic_trending": 90,
+                  "fact_entity_daily": 90, "fact_source_daily": 90}
+    for table_name, days in retentions.items():
+        date_col = "period_start" if table_name == "fact_topic_trending" else "stat_date"
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SET LOCAL doraemon.skip_lakehouse_outbox = 'on'")
+            cur.execute(f"DELETE FROM {table_name} WHERE {date_col} < current_date - %s", (days,))
+            pruned_count = int(cur.rowcount)
+            report["facts_pruned"][table_name] = pruned_count
+            if pruned_count:
+                _increment_archive_totals_in_transaction(cur, {table_name: pruned_count})
+    _set_state("last_archive", {**report, "archived_at": datetime.now(timezone.utc).isoformat()})
+    log.warning("Cloudflare Lakehouse archive complete: %s", report)
+    return report
+
+
+def compact_event_tables(limit_tables: int | None = None) -> dict:
+    """Collapse CDC event logs to one latest version per key without changing current state.
+
+    The underlying Iceberg tables are unpartitioned, which is important because DuckDB's
+    current Iceberg integration does not support DELETE on partitioned tables. Run this
+    maintenance command only when the CDC sync workflow is not running.
+    """
+    if not configured() or not lakehouse_enabled():
+        raise LakehouseNotReady("Enable/configure Cloudflare Lakehouse before compaction")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT table_name FROM lakehouse_table_registry WHERE bootstrap_status='complete' ORDER BY table_name")
+        tables = [str(r["table_name"]) for r in cur.fetchall()]
+    if limit_tables is not None:
+        tables = tables[:max(1, int(limit_tables))]
+    results = {}
+    with catalog_connection() as con:
+        for table_name in tables:
+            target = _event_table(table_name)
+            before = int(con.execute(f"SELECT count(*) FROM {target}").fetchone()[0])
+            temp = f"compact_{table_name}"
+            con.execute(f"CREATE OR REPLACE TEMP TABLE {temp} AS SELECT event_id,record_key,operation,row_data,event_at FROM {target} QUALIFY row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC)=1")
+            after = int(con.execute(f"SELECT count(*) FROM {temp}").fetchone()[0])
+            if after >= before:
+                con.execute(f"DROP TABLE {temp}")
+                results[table_name] = {"before": before, "after": after, "removed_versions": 0}
+                continue
+            con.execute("BEGIN TRANSACTION")
+            try:
+                con.execute(f"DELETE FROM {target}")
+                con.execute(f"INSERT INTO {target} SELECT event_id,record_key,operation,row_data,event_at FROM {temp}")
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+            con.execute(f"DROP TABLE {temp}")
+            results[table_name] = {"before": before, "after": after, "removed_versions": before-after}
+    result = {"status": "compacted", "tables": results,
+              "versions_removed": sum(x["removed_versions"] for x in results.values())}
+    _set_state("last_compaction", {**result, "compacted_at": datetime.now(timezone.utc).isoformat()})
+    return result
+
+def status() -> dict:
+    state = _get_state("full_snapshot_verified")
+    archive = _get_state("last_archive")
+    return {"enabled": lakehouse_enabled(), "reads_enabled": lakehouse_reads_enabled(),
+            "read_configured": read_configured(), "write_configured": configured(),
+            "configured": configured() or read_configured(),
+            "pending_outbox": pending_count() if configured() else None,
+            "verification": state, "last_archive": archive}

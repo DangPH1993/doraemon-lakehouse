@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json, logging, threading, secrets, hmac, re
-from datetime import date, timedelta
+from datetime import date, datetime, time as dt_time, timedelta, timezone as dt_timezone
+from zoneinfo import ZoneInfo
 from typing import Literal
 import re
 from urllib.parse import urlparse
@@ -19,10 +20,11 @@ from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
 from .field_categories import FIELD_CATEGORIES, LEGACY_BROAD_TOPIC_LABELS, is_broad_field_topic
+from . import cloudflare_lakehouse as cf_lakehouse
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.21',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.0',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -114,7 +116,8 @@ def public_news_page():
     return FileResponse('static/news.html', headers={'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'})
 
 @app.get('/news/following')
-def public_following_page(): return FileResponse('static/following.html')
+def public_following_page():
+    return FileResponse('static/following.html', headers={'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'})
 
 @app.get('/health')
 def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':app.version}
@@ -205,6 +208,21 @@ def current_user(user: dict = Depends(require_user)):
 
 @app.get('/api/user/timeline-options')
 def user_timeline_options(user: dict = Depends(require_user)):
+    if cf_lakehouse.lakehouse_reads_enabled():
+        topic_counts, entity_counts = _lakehouse_relationship_counts()
+        topics = fetch_all("""SELECT topic_id AS id,name,coalesce(description,'') AS description
+                                FROM topics WHERE status='active' AND topic_type='event' ORDER BY name LIMIT 300""")
+        entities = fetch_all("""SELECT entity_id AS id,canonical_name AS name,entity_type,coalesce(description,'') AS description
+                              FROM entities WHERE status='active' ORDER BY canonical_name LIMIT 300""")
+        for item in topics:
+            counts=topic_counts.get(int(item['id']),{})
+            item['article_count']=int(counts.get('article_count',0)); item['source_count']=int(counts.get('source_count',0))
+        for item in entities:
+            counts=entity_counts.get(int(item['id']),{})
+            item['article_count']=int(counts.get('article_count',0)); item['source_count']=int(counts.get('source_count',0))
+        topics.sort(key=lambda x:(-x['article_count'],x['name']))
+        entities.sort(key=lambda x:(-x['article_count'],x['name']))
+        return {'topics':topics[:300],'entities':entities[:300]}
     topics = fetch_all("""SELECT t.topic_id AS id, t.name, coalesce(t.description,'') AS description,
                                 count(DISTINCT a.article_id)::int AS article_count,
                                 count(DISTINCT a.source_id)::int AS source_count
@@ -231,6 +249,21 @@ def user_timeline_options(user: dict = Depends(require_user)):
 
 @app.get('/api/user/saved-timelines')
 def get_saved_timelines(user: dict = Depends(require_user)):
+    if cf_lakehouse.lakehouse_reads_enabled():
+        topic_counts, entity_counts = _lakehouse_relationship_counts()
+        saved = fetch_all("""SELECT ust.timeline_type AS type,coalesce(ust.topic_id,ust.entity_id)::bigint AS id,
+                                  coalesce(t.name,e.canonical_name) AS name,ust.display_order
+                           FROM user_saved_timelines ust
+                           LEFT JOIN topics t ON t.topic_id=ust.topic_id
+                           LEFT JOIN entities e ON e.entity_id=ust.entity_id
+                           WHERE ust.user_id=%s AND ((ust.timeline_type='topic' AND t.status='active' AND t.topic_type='event')
+                              OR (ust.timeline_type='entity' AND e.status='active'))
+                           ORDER BY ust.display_order,ust.timeline_type,name""", (user['user_id'],))
+        items=[]
+        for row in saved:
+            counts=(topic_counts if row['type']=='topic' else entity_counts).get(int(row['id']),{})
+            items.append({**row,'article_count':int(counts.get('article_count',0))})
+        return {'items':items}
     items = fetch_all("""SELECT timeline_kind AS type, id, name, display_order, article_count
                          FROM (
                            SELECT 'topic'::text AS timeline_kind, t.topic_id::bigint AS id, t.name,
@@ -440,6 +473,18 @@ def dashboard():
     trend=fetch_all("""select to_char(date_trunc('day',a.collected_at),'YYYY-MM-DD') as day, count(*) as count
                       from news_articles a where a.collected_at >= now()-interval '14 days' and a.is_excluded=false
                       group by 1 order by 1""")
+    if cf_lakehouse.lakehouse_reads_enabled():
+        # The admin dashboard's lifetime count must continue to reflect archived articles
+        # stored in Iceberg, not just the 90-day PostgreSQL serving window.
+        metrics = _lakehouse_query_or_503("""SELECT count(*)::BIGINT AS articles_total,
+            count(*) FILTER (WHERE collected_at >= current_timestamp - INTERVAL '24 hours')::BIGINT AS articles_24h
+            FROM news_articles""")
+        if metrics:
+            counts['articles_total'] = int(metrics[0]['articles_total'])
+            counts['articles_24h'] = int(metrics[0]['articles_24h'])
+        trend = _lakehouse_query_or_503("""SELECT strftime(date_trunc('day',collected_at),'%Y-%m-%d') AS day,count(*)::BIGINT AS count
+            FROM news_articles WHERE collected_at >= current_timestamp - INTERVAL '14 days' AND is_excluded=false
+            GROUP BY 1 ORDER BY 1""")
     top_topics=fetch_all("""select t.topic_id,t.name,sum(f.article_count)::int as article_count
                           from fact_topic_daily f join topics t on t.topic_id=f.topic_id
                           where f.stat_date >= (current_date - 6) and t.status='active' and t.topic_type='event'
@@ -529,6 +574,197 @@ def public_hot_topics(
             'items': items, 'count': len(items)}
 
 
+def _lakehouse_query_or_503(sql: str, params=()):
+    try:
+        return cf_lakehouse.query(sql, params)
+    except Exception as exc:
+        log.exception('Cloudflare Lakehouse read failed')
+        raise HTTPException(status_code=503, detail='Lakehouse tạm thời không truy vấn được. Dữ liệu PostgreSQL chưa bị thay đổi.') from exc
+
+
+def _decode_lakehouse_json_fields(items, field_names):
+    for item in items:
+        for name in field_names:
+            value = item.get(name)
+            if isinstance(value, str):
+                try:
+                    item[name] = json.loads(value)
+                except (TypeError, ValueError):
+                    pass
+            if item.get(name) is None:
+                item[name] = []
+    return items
+
+
+def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_from, effective_date_to, page, page_size):
+    where = ["a.is_excluded = false"]
+    vals: list = []
+    if chosen_field == 'Chưa phân loại':
+        where.append('a.field_category IS NULL')
+    elif chosen_field:
+        where.append('a.field_category = ?')
+        vals.append(chosen_field)
+    if query:
+        term = f"%{query}%"
+        where.append("""(
+            a.title ILIKE ? OR a.summary ILIKE ? OR a.content_text ILIKE ?
+            OR coalesce(a.author, '') ILIKE ? OR s.name ILIKE ?
+            OR EXISTS (SELECT 1 FROM article_topics search_at
+                       JOIN topics search_t ON search_t.topic_id=search_at.topic_id
+                       WHERE search_at.article_id=a.article_id AND search_t.status='active'
+                         AND (search_t.name ILIKE ? OR search_t.description ILIKE ?
+                              OR array_to_string(search_t.keywords, ' ') ILIKE ?))
+            OR EXISTS (SELECT 1 FROM article_entities search_ae
+                       JOIN entities search_e ON search_e.entity_id=search_ae.entity_id
+                       WHERE search_ae.article_id=a.article_id AND search_e.status='active'
+                         AND (search_e.canonical_name ILIKE ? OR search_ae.mention_text ILIKE ?
+                              OR EXISTS (SELECT 1 FROM entity_aliases search_alias
+                                         WHERE search_alias.entity_id=search_e.entity_id
+                                           AND search_alias.alias ILIKE ?)))
+        )""")
+        vals.extend([term] * 11)
+    if effective_date_from is not None and effective_date_to is not None:
+        # Convert the inclusive Vietnam-local date range to UTC bounds in Python. This
+        # preserves PostgreSQL behavior while allowing DuckDB predicate pushdown without
+        # depending on the optional ICU extension for timezone(name, timestamptz).
+        local_tz = ZoneInfo(settings.timezone)
+        utc_start = datetime.combine(effective_date_from, dt_time.min, tzinfo=local_tz).astimezone(dt_timezone.utc)
+        utc_end = datetime.combine(effective_date_to + timedelta(days=1), dt_time.min, tzinfo=local_tz).astimezone(dt_timezone.utc)
+        published_or_collected = "coalesce(a.published_at,a.collected_at)"
+        where.append(f"{published_or_collected} >= ? AND {published_or_collected} < ?")
+        vals.extend([utc_start, utc_end])
+    where_sql = ' WHERE ' + ' AND '.join(where)
+    from_sql = ' FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id'
+    total_rows = _lakehouse_query_or_503('SELECT count(*)::BIGINT AS total' + from_sql + where_sql, vals)
+    total = int((total_rows[0] if total_rows else {}).get('total', 0))
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    select_sql = """SELECT a.article_id,a.title,a.url,a.image_url,a.author,a.language,
+        left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+        a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
+        s.name AS source_name,coalesce(a.field_category,'Chưa phân loại') AS field_category,
+        coalesce((SELECT to_json(list(t.name ORDER BY t.name)) FROM article_topics at
+                  JOIN topics t ON t.topic_id=at.topic_id
+                  WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topics,
+        coalesce((SELECT to_json(list(struct_pack(id := t.topic_id, name := t.name) ORDER BY t.name))
+                  FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                  WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topic_refs,
+        coalesce((SELECT to_json(list(struct_pack(id := e.entity_id, name := e.canonical_name, type := e.entity_type)
+                                      ORDER BY e.canonical_name))
+                  FROM (SELECT DISTINCT e.entity_id,e.canonical_name,e.entity_type
+                        FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                        WHERE ae.article_id=a.article_id AND e.status='active') e),'[]') AS entity_refs
+    """ + from_sql + where_sql + ' ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT ? OFFSET ?'
+    items = _lakehouse_query_or_503(select_sql, vals + [page_size, (page - 1) * page_size])
+    _decode_lakehouse_json_fields(items, ['topics','topic_refs','entity_refs'])
+    return {'date': today,
+            'date_from': effective_date_from.isoformat() if effective_date_from else None,
+            'date_to': effective_date_to.isoformat() if effective_date_to else None,
+            'query': query or None, 'field_category': chosen_field or None,
+            'field_categories': [*FIELD_CATEGORIES, 'Chưa phân loại'], 'items': items,
+            'pagination': pagination_meta(page, page_size, total)}
+
+
+def _lakehouse_relationship_counts():
+    topics = _lakehouse_query_or_503("""SELECT at.topic_id AS id,count(DISTINCT a.article_id)::BIGINT AS article_count,
+                                               count(DISTINCT a.source_id)::BIGINT AS source_count
+                                        FROM article_topics at JOIN news_articles a ON a.article_id=at.article_id
+                                        WHERE a.is_excluded=false GROUP BY at.topic_id""")
+    entities = _lakehouse_query_or_503("""SELECT ae.entity_id AS id,count(DISTINCT a.article_id)::BIGINT AS article_count,
+                                                 count(DISTINCT a.source_id)::BIGINT AS source_count
+                                          FROM article_entities ae JOIN news_articles a ON a.article_id=ae.article_id
+                                          WHERE a.is_excluded=false GROUP BY ae.entity_id""")
+    return ({int(x['id']): x for x in topics}, {int(x['id']): x for x in entities})
+
+
+def _user_news_feed_lakehouse(user: dict):
+    """Preserve the same five-articles-per-follow feed using two Iceberg queries total."""
+    followed = fetch_all("""WITH followed AS (
+          SELECT 'topic'::text AS follow_type,t.topic_id::bigint AS follow_id,t.name AS follow_name,ust.display_order
+          FROM user_saved_timelines ust JOIN topics t ON t.topic_id=ust.topic_id
+          WHERE ust.user_id=%s AND ust.timeline_type='topic' AND t.status='active' AND t.topic_type='event'
+          UNION ALL
+          SELECT 'entity'::text AS follow_type,e.entity_id::bigint AS follow_id,e.canonical_name AS follow_name,ust.display_order
+          FROM user_saved_timelines ust JOIN entities e ON e.entity_id=ust.entity_id
+          WHERE ust.user_id=%s AND ust.timeline_type='entity' AND e.status='active'
+        ) SELECT * FROM followed ORDER BY display_order,follow_type,follow_name""",
+        (user['user_id'], user['user_id']))
+    if not followed:
+        return {'groups': [], 'items': [], 'count': 0, 'limit_per_group': 5}
+
+    # Construct a parameter-only VALUES relation. Identifiers are values; SQL table and
+    # column names below are hard-coded allow-listed constants, never user-controlled.
+    values_sql = ','.join('(CAST(? AS VARCHAR),CAST(? AS BIGINT),CAST(? AS VARCHAR),CAST(? AS INTEGER))'
+                          for _ in followed)
+    followed_params = []
+    for item in followed:
+        followed_params.extend([str(item['type'] if 'type' in item else item['follow_type']),
+                                int(item['id'] if 'id' in item else item['follow_id']),
+                                str(item.get('name', item.get('follow_name')) or ''),
+                                int(item.get('display_order') or 0)])
+    followed_cte = f"WITH followed(follow_type,follow_id,follow_name,display_order) AS (VALUES {values_sql})"
+    matches_cte = """matched AS (
+        SELECT f.follow_type,f.follow_id,f.follow_name,f.display_order,
+               a.article_id,a.title,a.url,a.image_url,a.author,a.language,
+               left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+               a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
+               s.name AS source_name
+        FROM followed f JOIN article_topics rel ON f.follow_type='topic' AND rel.topic_id=f.follow_id
+        JOIN news_articles a ON a.article_id=rel.article_id AND a.is_excluded=false
+        JOIN data_sources s ON s.source_id=a.source_id
+        UNION ALL
+        SELECT f.follow_type,f.follow_id,f.follow_name,f.display_order,
+               a.article_id,a.title,a.url,a.image_url,a.author,a.language,
+               left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+               a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
+               s.name AS source_name
+        FROM followed f JOIN article_entities rel ON f.follow_type='entity' AND rel.entity_id=f.follow_id
+        JOIN news_articles a ON a.article_id=rel.article_id AND a.is_excluded=false
+        JOIN data_sources s ON s.source_id=a.source_id
+    )"""
+    count_rows = _lakehouse_query_or_503(
+        followed_cte + ', ' + matches_cte + " SELECT follow_type,follow_id, max(follow_name) AS name, max(display_order) AS display_order, count(DISTINCT article_id)::BIGINT AS count FROM matched GROUP BY follow_type,follow_id",
+        followed_params)
+    counts = {(str(row['follow_type']), int(row['follow_id'])): int(row['count']) for row in count_rows}
+    item_rows = _lakehouse_query_or_503(
+        followed_cte + ', ' + matches_cte + ", ranked AS (SELECT *, row_number() OVER (PARTITION BY follow_type,follow_id ORDER BY timeline_at DESC,article_id DESC) AS rn FROM matched) "
+        + "SELECT * EXCLUDE (rn) FROM ranked WHERE rn<=5 ORDER BY display_order,follow_type,follow_name,timeline_at DESC,article_id DESC",
+        followed_params)
+
+    by_group = {}
+    flat_by_id = {}
+    for row in item_rows:
+        kind, ident, name = str(row['follow_type']), int(row['follow_id']), row['follow_name'] or ''
+        group_key = (kind, ident)
+        match = {'id': ident, 'name': name}
+        row = dict(row)
+        row.pop('follow_type', None); row.pop('follow_id', None); row.pop('follow_name', None)
+        row.pop('display_order', None)
+        row['matched_topics'] = [match] if kind == 'topic' else []
+        row['matched_entities'] = [match] if kind == 'entity' else []
+        by_group.setdefault(group_key, []).append(row)
+        article_id = row.get('article_id')
+        merged = flat_by_id.setdefault(article_id, {**row, 'matched_topics': [], 'matched_entities': []})
+        target = 'matched_topics' if kind == 'topic' else 'matched_entities'
+        if not any(int(item.get('id', 0)) == ident for item in merged[target]):
+            merged[target].append(match)
+
+    groups = []
+    grouped_count = 0
+    for item in followed:
+        kind = str(item['type'] if 'type' in item else item['follow_type'])
+        ident = int(item['id'] if 'id' in item else item['follow_id'])
+        name = item.get('name', item.get('follow_name')) or ''
+        count = counts.get((kind, ident), 0)
+        groups.append({'type': kind, 'id': ident, 'name': name, 'count': count,
+                       'items': by_group.get((kind, ident), [])[:5]})
+        grouped_count += count
+    flat_items = sorted(flat_by_id.values(),
+                        key=lambda item: (str(item.get('timeline_at') or ''), int(item.get('article_id') or 0)),
+                        reverse=True)
+    return {'groups': groups, 'items': flat_items, 'count': grouped_count, 'limit_per_group': 5}
+
+
 @app.get('/api/public/news/articles')
 def public_daily_articles(
     q: str | None = Query(default=None, max_length=150),
@@ -563,6 +799,10 @@ def public_daily_articles(
         effective_date_to = effective_date_from
     if effective_date_from is not None and effective_date_to is not None and effective_date_from > effective_date_to:
         raise HTTPException(status_code=400, detail='Ngày bắt đầu không được sau ngày kết thúc')
+
+    if cf_lakehouse.lakehouse_reads_enabled():
+        return _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_from,
+                                                effective_date_to, page, page_size)
 
     where = ["a.is_excluded=false"]
     vals: list = []
@@ -676,6 +916,8 @@ def public_daily_articles(
 @app.get('/api/user/feed')
 def user_news_feed(user: dict = Depends(require_user)):
     """Return followed topic/entity groups with at most five latest articles per group."""
+    if cf_lakehouse.lakehouse_reads_enabled():
+        return _user_news_feed_lakehouse(user)
     rows = fetch_all("""WITH followed AS (
           SELECT 'topic'::text AS follow_type, t.topic_id::bigint AS follow_id,
                  t.name AS follow_name, ust.display_order
@@ -782,6 +1024,37 @@ def user_news_feed(user: dict = Depends(require_user)):
 def _public_direct_timeline_items(relation_table: str, relation_key: str, record_id: int,
                                   page: int, page_size: int):
     """Fetch articles linked to one exact topic_id or entity_id; no transitive grouping."""
+    if cf_lakehouse.lakehouse_reads_enabled():
+        if relation_table not in {"news_articles", "article_topics", "article_entities"}:
+            raise HTTPException(status_code=400, detail="Invalid timeline relation")
+        if relation_key not in {"article_id", "topic_id", "entity_id"}:
+            raise HTTPException(status_code=400, detail="Invalid timeline key")
+        total_rows = _lakehouse_query_or_503(
+            f"SELECT count(DISTINCT a.article_id)::BIGINT AS total FROM {relation_table} rel "
+            f"JOIN news_articles a ON a.article_id=rel.article_id "
+            f"WHERE rel.{relation_key}=? AND a.is_excluded=false", [record_id])
+        total = int((total_rows[0] if total_rows else {}).get("total", 0))
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        actual_page = min(page, total_pages)
+        items = _lakehouse_query_or_503(f"""WITH matched AS (
+                SELECT DISTINCT rel.article_id FROM {relation_table} rel WHERE rel.{relation_key}=?
+            )
+            SELECT a.article_id,a.title,a.url,a.image_url,a.author,a.language,
+                   left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+                   a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
+                   a.field_category,s.name AS source_name,
+                   coalesce((SELECT string_agg(DISTINCT e.canonical_name, ', ' ORDER BY e.canonical_name)
+                             FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                             WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities,
+                   coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
+                             FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                             WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
+            FROM matched m JOIN news_articles a ON a.article_id=m.article_id
+            JOIN data_sources s ON s.source_id=a.source_id
+            WHERE a.is_excluded=false
+            ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
+            LIMIT ? OFFSET ?""", [record_id, page_size, (actual_page-1)*page_size])
+        return items, pagination_meta(actual_page, page_size, total), total
     # relation_table/relation_key are internal constants supplied only by our route handlers.
     total_row = fetch_one(
         f"""SELECT count(DISTINCT a.article_id)::int AS total
@@ -833,10 +1106,16 @@ def public_article_timeline(
     UI links now open Timeline by explicit topic_id or entity_id. This endpoint remains for
     older clients during cache/deploy transitions but deliberately does not join other groups.
     """
-    anchor = fetch_one("""SELECT a.article_id, a.title, a.image_url, a.published_at, a.collected_at,
-                                coalesce(a.published_at,a.collected_at) AS timeline_at
-                         FROM news_articles a
-                         WHERE a.article_id=%s AND a.is_excluded=false""", (article_id,))
+    if cf_lakehouse.lakehouse_reads_enabled():
+        anchors = _lakehouse_query_or_503("""SELECT article_id,title,image_url,published_at,collected_at,
+                                                  coalesce(published_at,collected_at) AS timeline_at
+                                           FROM news_articles WHERE article_id=? AND is_excluded=false""", [article_id])
+        anchor = anchors[0] if anchors else None
+    else:
+        anchor = fetch_one("""SELECT a.article_id, a.title, a.image_url, a.published_at, a.collected_at,
+                                    coalesce(a.published_at,a.collected_at) AS timeline_at
+                             FROM news_articles a
+                             WHERE a.article_id=%s AND a.is_excluded=false""", (article_id,))
     if not anchor:
         raise HTTPException(status_code=404, detail='Article not found')
     items, pagination, total = _public_direct_timeline_items('news_articles', 'article_id', article_id, page, page_size)
@@ -878,6 +1157,11 @@ def public_entity_timeline(
 
 @app.get('/api/sources',dependencies=[Depends(require_admin)])
 def list_sources():
+    if cf_lakehouse.lakehouse_reads_enabled():
+        sources = fetch_all("SELECT * FROM data_sources ORDER BY source_id")
+        counts = _lakehouse_query_or_503("SELECT source_id,count(*)::BIGINT AS article_count FROM news_articles GROUP BY source_id")
+        count_by_source = {int(row['source_id']): int(row['article_count']) for row in counts}
+        return [{**source, 'article_count': count_by_source.get(int(source['source_id']), 0)} for source in sources]
     return fetch_all("""select s.*, (select count(*) from news_articles a where a.source_id=s.source_id) as article_count
                        from data_sources s order by s.source_id""")
 @app.post('/api/sources',dependencies=[Depends(require_admin)])
@@ -1402,6 +1686,9 @@ FACT_QUERIES={
 @app.get('/api/facts/{table_name}',dependencies=[Depends(require_admin)])
 def read_fact(table_name:str,limit:int=Query(default=100,ge=1,le=500)):
     if table_name not in FACT_QUERIES: raise HTTPException(status_code=400,detail='Unknown or unsupported fact table')
+    if cf_lakehouse.lakehouse_reads_enabled():
+        sql = FACT_QUERIES[table_name].replace('%s','?')
+        return _lakehouse_query_or_503(sql,(limit,))
     return fetch_all(FACT_QUERIES[table_name],(limit,))
 @app.get('/api/pipeline/runs',dependencies=[Depends(require_admin)])
 def pipeline_runs(limit:int=Query(default=50,ge=1,le=200)):

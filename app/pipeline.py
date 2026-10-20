@@ -28,6 +28,7 @@ from .field_categories import (
 )
 from .article_images import (extract_image_url, _lookup_open_graph_images,
                               _IMAGE_BACKFILL_LIMIT_PER_RUN, _IMAGE_OG_FALLBACK_LIMIT_PER_SOURCE)
+from . import cloudflare_lakehouse as cf_lakehouse
 
 log = logging.getLogger('mini-lakehouse.pipeline')
 USER_AGENT = 'DoraemonMiniLakehouse/1.0 (+RSS feed reader; contact admin of the configured source)'
@@ -556,6 +557,21 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
                     (source['source_id'], urls))
         known_urls = {row['canonical_url'] for row in cur.fetchall()}
 
+    # After aged Articles are archived from PostgreSQL, consult the Lakehouse archive
+    # before inserting. Otherwise an RSS feed that replays an old URL could recreate a
+    # duplicate row with a new PostgreSQL ID. Failure is explicit: don't silently ingest
+    # duplicates while Lakehouse reads are enabled.
+    if cf_lakehouse.lakehouse_reads_enabled():
+        missing_urls = [url for url in urls if url not in known_urls]
+        for offset in range(0, len(missing_urls), 200):
+            url_batch = missing_urls[offset:offset + 200]
+            placeholders = ','.join('?' for _ in url_batch)
+            archived_rows = cf_lakehouse.query(
+                f"SELECT canonical_url FROM news_articles WHERE source_id = ? AND canonical_url IN ({placeholders})",
+                [int(source['source_id']), *url_batch],
+            )
+            known_urls.update(row['canonical_url'] for row in archived_rows if row.get('canonical_url'))
+
     # Resolve missing publisher image metadata only for genuinely new articles. This is
     # bounded per source and concurrent so an RSS entry without an image cannot stall the
     # ingestion loop indefinitely.
@@ -829,11 +845,28 @@ def refresh_topic_trending():
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""select (now() at time zone %s)::date as local_today""", (settings.timezone,))
         today = cur.fetchone()['local_today']
-        cur.execute("""delete from fact_topic_trending
-                       where (period_type='day' and period_start >= %s - 60)
-                          or (period_type='week' and period_start >= %s - 183)
-                          or (period_type='month' and period_start >= date_trunc('month', %s::timestamp)::date - interval '12 months')""",
-                    (today, today, today))
+        lakehouse_serving = cf_lakehouse.lakehouse_reads_enabled()
+        if lakehouse_serving:
+            # After archival, PostgreSQL is only a hot serving window. Do not delete or
+            # rewrite older monthly/week FACT rows from an incomplete 90-day source set;
+            # those historical Gold rows remain authoritative in Iceberg.
+            cur.execute("""delete from fact_topic_trending
+                           where (period_type='day' and period_start >= %s - 60)
+                              or (period_type='week' and period_start >= %s - 14)
+                              or (period_type='month' and period_start >= date_trunc('month', %s::timestamp)::date - interval '1 month')""",
+                        (today, today, today))
+            source_lookback_days = 90
+            week_lookback_days = 14
+            month_lookback_months = 1
+        else:
+            cur.execute("""delete from fact_topic_trending
+                           where (period_type='day' and period_start >= %s - 60)
+                              or (period_type='week' and period_start >= %s - 183)
+                              or (period_type='month' and period_start >= date_trunc('month', %s::timestamp)::date - interval '12 months')""",
+                        (today, today, today))
+            source_lookback_days = 400
+            week_lookback_days = 183
+            month_lookback_months = 12
         cur.execute(r"""
             WITH cfg AS (
               SELECT %s::text AS tz, (now() at time zone %s)::date AS today
@@ -847,17 +880,17 @@ def refresh_topic_trending():
               JOIN topics t ON t.topic_id=at.topic_id AND t.status='active' AND t.topic_type='event'
               CROSS JOIN cfg
               WHERE a.is_excluded=false
-                AND ((coalesce(a.published_at,a.collected_at) at time zone cfg.tz)::date) >= cfg.today - 400
+                AND ((coalesce(a.published_at,a.collected_at) at time zone cfg.tz)::date) >= cfg.today - %s
             ), period_rows AS (
               SELECT 'day'::text AS period_type, local_date AS period_start, topic_id, article_id, source_id, today
               FROM article_topic_base WHERE local_date >= today - 60 AND local_date <= today
               UNION ALL
               SELECT 'week'::text, date_trunc('week',local_ts)::date, topic_id, article_id, source_id, today
-              FROM article_topic_base WHERE local_date >= today - 183 AND local_date <= today
+              FROM article_topic_base WHERE local_date >= today - %s AND local_date <= today
               UNION ALL
               SELECT 'month'::text, date_trunc('month',local_ts)::date, topic_id, article_id, source_id, today
               FROM article_topic_base
-              WHERE local_date >= (date_trunc('month',today::timestamp) - interval '12 months')::date
+              WHERE local_date >= (date_trunc('month',today::timestamp) - (%s * interval '1 month'))::date
                 AND local_date <= today
             ), aggregated AS (
               SELECT period_type, period_start, topic_id,
@@ -898,7 +931,8 @@ def refresh_topic_trending():
               article_count=excluded.article_count, source_count=excluded.source_count,
               previous_article_count=excluded.previous_article_count, growth_pct=excluded.growth_pct,
               hotness_score=excluded.hotness_score, rank_position=excluded.rank_position, updated_at=now()
-        """, (settings.timezone, settings.timezone))
+        """, (settings.timezone, settings.timezone, source_lookback_days,
+              week_lookback_days, month_lookback_months))
 
 
 def purge_raw_feed_items_after_fact_refresh() -> int:
