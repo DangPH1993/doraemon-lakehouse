@@ -380,3 +380,7 @@ CREATE TABLE IF NOT EXISTS user_telegram_deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_user_telegram_deliveries_sent_at
     ON user_telegram_deliveries(sent_at);
+
+-- Existing installations must also apply sql/migrations/018_cloudflare_iceberg_lakehouse.sql
+-- after all core tables (and catalog_reconciliation_merges) have been created. The migration
+-- enables CDC only; no user data is removed until an operator runs the verified archive step.
