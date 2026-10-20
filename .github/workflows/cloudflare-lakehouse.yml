@@ -40,7 +40,7 @@ jobs:
   sync-or-admin:
     if: github.event_name == 'workflow_dispatch' || (vars.CLOUDFLARE_LAKEHOUSE_ENABLED == 'true' && vars.CLOUDFLARE_LAKEHOUSE_BOOTSTRAPPED == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       CLOUDFLARE_LAKEHOUSE_ENABLED: ${{ vars.CLOUDFLARE_LAKEHOUSE_ENABLED }}
