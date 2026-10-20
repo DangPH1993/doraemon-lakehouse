@@ -19,6 +19,14 @@ on:
           - archive-apply
         default: sync
         required: true
+      bootstrap_mode:
+        description: "Bootstrap baseline: forward-only skips all historical article/relationship/FACT rows"
+        type: choice
+        options:
+          - forward-only
+          - full
+        default: forward-only
+        required: true
       cutoff_days:
         description: "Archive cutoff; keep the most recent N days in PostgreSQL"
         type: number
@@ -75,11 +83,12 @@ jobs:
           OPERATION: ${{ github.event.inputs.operation || (github.event.schedule == '35 3 * * 0' && 'compact') || 'sync' }}
           CUTOFF_DAYS: ${{ github.event.inputs.cutoff_days || '90' }}
           ARCHIVE_CONFIRMATION: ${{ github.event.inputs.archive_confirmation }}
+          BOOTSTRAP_MODE: ${{ github.event.inputs.bootstrap_mode || 'forward-only' }}
         run: |
           case "$OPERATION" in
             bootstrap)
-              echo "Bootstrap seeds full clean tables into Iceberg. Keep ingestion/reconciliation workflows paused while it runs."
-              python -m app.lakehouse_migration bootstrap
+              echo "Bootstrap mode=$BOOTSTRAP_MODE. Keep ingestion/reconciliation workflows paused while the baseline watermark is captured."
+              python -m app.lakehouse_migration bootstrap --mode "$BOOTSTRAP_MODE"
               ;;
             sync)
               python -m app.lakehouse_migration sync --limit 50000
