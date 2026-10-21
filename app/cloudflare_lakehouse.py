@@ -43,14 +43,12 @@ TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "catalog_reconciliation_merges": ("object_type", "source_id"),
 }
 
-# With forward-only bootstrap, retain small operational dimensions but start article,
-# relationship and FACT history at the cutover watermark. These event tables are created
-# empty so CDC can populate them with future changes without importing historic rows.
-FORWARD_ONLY_SKIP_TABLES = {
-    "news_articles", "article_topics", "article_entities",
-    "fact_news_article", "fact_topic_daily", "fact_topic_trending",
-    "fact_entity_daily", "fact_source_daily",
-}
+# Forward-only bootstrap is a genuinely empty start: it creates every registered Iceberg
+# event table and captures the CDC watermark, but imports NO existing source rows, including
+# dimensions/catalogs. Required dimension rows are hydrated lazily only when a post-cutover
+# article/relationship references them, so the initial bootstrap stays fast regardless of
+# the size of historical PostgreSQL tables.
+FORWARD_ONLY_SKIP_TABLES = set(TABLE_KEYS)
 
 
 class LakehouseNotReady(RuntimeError):
@@ -199,6 +197,33 @@ def _ensure_event_table(conn, table_name: str) -> None:
     )""")
 
 
+def _insert_event_rows_bulk(conn, target: str, event_rows: list[tuple], statement_batch_size: int = 500) -> None:
+    """Insert event rows using set-based multi-row INSERT statements.
+
+    DuckDB's ``executemany`` executes the prepared INSERT repeatedly, which is extremely
+    slow against Iceberg tables because every individual execution incurs row-level
+    execution overhead. Multi-row VALUES statements keep the same transaction semantics
+    while sending hundreds of records through one execution. The target is internal and
+    always comes from ``_event_table``; payload values remain parameterized.
+    """
+    if not event_rows:
+        return
+    chunk_size = max(1, min(int(statement_batch_size), 500))
+    for offset in range(0, len(event_rows), chunk_size):
+        chunk = event_rows[offset:offset + chunk_size]
+        values_sql = ", ".join(["(?, ?, ?, ?, ?)"] * len(chunk))
+        parameters = tuple(value for row in chunk for value in row)
+        conn.execute(f"INSERT INTO {target} VALUES {values_sql}", parameters)
+
+
+def _rollback_if_active(conn) -> None:
+    """Try to roll back without masking the original transaction/commit error."""
+    try:
+        conn.execute("ROLLBACK")
+    except Exception as rollback_error:
+        log.debug("Rollback skipped because no active DuckDB transaction remained: %s", rollback_error)
+
+
 def _available_source_tables() -> list[str]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""SELECT table_name FROM information_schema.tables
@@ -231,14 +256,13 @@ def _register_table(table_name: str, columns: list[dict], status: str, row_count
 
 
 def bootstrap(mode: str = "full") -> dict:
-    """Seed Iceberg from a consistent source snapshot.
+    """Initialize Iceberg from a consistent source watermark.
 
-    ``full`` imports current clean tables and facts. ``forward-only`` creates all tracked
-    Iceberg event tables but skips existing article, relationship and FACT rows; small
-    dimensions/catalogs are loaded so new incoming articles can still link to stable IDs.
-    Both modes checkpoint each Iceberg batch and cover all outbox events through the locked
-    snapshot watermark. In forward-only mode, Verify explicitly validates table readiness and
-    full parity only for tables whose historical baseline was imported.
+    ``full`` imports all current clean tables and facts. ``forward-only`` imports ZERO
+    existing source rows: it creates empty event tables, captures the cutover watermark, and
+    marks older outbox entries covered/ignored. Future CDC events populate the tables. Small
+    topic/entity/source dimensions needed by new rows are hydrated lazily during sync, not
+    bulk-loaded during bootstrap. Verification checks table readiness, not historical parity.
     """
     mode = str(mode or "full").strip().lower()
     if mode not in {"full", "forward-only"}:
@@ -259,6 +283,13 @@ def bootstrap(mode: str = "full") -> dict:
     if archived_any:
         raise LakehouseNotReady(
             "Bootstrap is disabled after PostgreSQL archival. Restore/rehydrate the archived data first."
+        )
+
+    previous_snapshot = _get_state("bootstrap_snapshot") or {}
+    if mode == "forward-only" and previous_snapshot.get("status") == "complete":
+        raise LakehouseNotReady(
+            "A completed Iceberg baseline already exists. Refusing to reset it with an empty forward-only bootstrap; "
+            "clear the partial bootstrap state only after confirming no post-cutover data must be retained."
         )
 
     previous_progress = _get_state("bootstrap_progress") or {}
@@ -320,7 +351,7 @@ def bootstrap(mode: str = "full") -> dict:
             mode, snapshot_watermark, len(available), sum(row_counts.values()), skipped_tables,
         )
 
-    batch_size = int(os.getenv("CLOUDFLARE_LAKEHOUSE_BOOTSTRAP_BATCH_SIZE", "2000"))
+    batch_size = int(os.getenv("CLOUDFLARE_LAKEHOUSE_BOOTSTRAP_BATCH_SIZE", "500"))
     batch_size = max(100, min(batch_size, 10000))
     counts: dict[str, int] = {}
 
@@ -341,6 +372,11 @@ def bootstrap(mode: str = "full") -> dict:
                 raise LakehouseNotReady(f"No column metadata found for source table {table_name}")
 
             target = _event_table(table_name)
+            # A prior failed bootstrap may have left large partial baseline tables (for
+            # example thousands of topics). With the empty forward-only mode, replace those
+            # partial event tables once instead of issuing row-wise DELETEs against them.
+            if mode == "forward-only" and not can_resume:
+                con.execute(f"DROP TABLE IF EXISTS {target}")
             _ensure_event_table(con, table_name)
             table_progress = progress.get("tables", {}).get(table_name, {})
             is_marked_complete = (
@@ -393,7 +429,7 @@ def bootstrap(mode: str = "full") -> dict:
                     con.execute(f"DELETE FROM {target}")
                     con.execute("COMMIT")
                 except Exception:
-                    con.execute("ROLLBACK")
+                    _rollback_if_active(con)
                     raise
 
             _register_table(table_name, columns, "running", expected_rows)
@@ -417,12 +453,10 @@ def bootstrap(mode: str = "full") -> dict:
                 ]
                 con.execute("BEGIN TRANSACTION")
                 try:
-                    con.executemany(
-                        f"INSERT INTO {target} VALUES (?, ?, ?, ?, ?)", event_rows,
-                    )
+                    _insert_event_rows_bulk(con, target, event_rows)
                     con.execute("COMMIT")
                 except Exception:
-                    con.execute("ROLLBACK")
+                    _rollback_if_active(con)
                     raise
 
                 loaded_rows = offset + len(batch)
@@ -468,12 +502,198 @@ def bootstrap(mode: str = "full") -> dict:
             "outbox_rows_covered_by_snapshot": handled_outbox,
             "tables": counts, "total_rows": sum(counts.values())}
 
+def _hydrate_missing_dimensions(con, outbox_rows: list[dict], registered_tables: set[str]) -> dict[str, int]:
+    """Copy only dimension rows referenced by post-cutover changes, never whole catalogs.
+
+    A fresh forward-only baseline intentionally has no source/topic/entity rows. New articles
+    still point to stable PostgreSQL source/topic/entity IDs, so hydrate only those referenced
+    rows (and their aliases) before inserting the new relationships. This avoids orphan joins
+    in Radar while keeping bootstrap at zero source rows.
+    """
+    needed: dict[str, dict[str, int]] = {name: {} for name in ("data_sources", "topics", "entities")}
+    for event in outbox_rows:
+        if str(event.get("operation")) != "UPSERT":
+            continue
+        row = event.get("row_data")
+        if isinstance(row, str):
+            try:
+                row = json.loads(row)
+            except (TypeError, ValueError):
+                continue
+        if not isinstance(row, dict):
+            continue
+        source_event_id = int(event["outbox_id"])
+        table_name = str(event.get("table_name") or "")
+        ref_fields: list[tuple[str, str]] = []
+        if table_name in {"news_articles", "fact_source_daily", "fact_topic_daily", "fact_entity_daily"}:
+            ref_fields.append(("data_sources", "source_id"))
+        if table_name in {"article_topics", "fact_topic_daily", "fact_topic_trending"}:
+            ref_fields.append(("topics", "topic_id"))
+        if table_name in {"article_entities", "fact_entity_daily"}:
+            ref_fields.append(("entities", "entity_id"))
+        for dimension, field in ref_fields:
+            value = row.get(field)
+            if value is None:
+                continue
+            key = str(value)
+            needed[dimension][key] = max(source_event_id, needed[dimension].get(key, 0))
+
+    hydrated: dict[str, int] = {name: 0 for name in needed}
+
+    def append_missing(table_name: str, requested: dict[str, int]) -> list[dict]:
+        if not requested or table_name not in registered_tables or table_name not in TABLE_KEYS:
+            return []
+        key_column = TABLE_KEYS[table_name][0]
+        target = _event_table(table_name)
+        keys = [_record_key(table_name, {key_column: value}, TABLE_KEYS[table_name]) for value in requested]
+        placeholders = ",".join(["?"] * len(keys))
+        existing_rows = con.execute(
+            f"""SELECT record_key,operation FROM (
+                    SELECT record_key,operation,row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
+                    FROM {target} WHERE record_key IN ({placeholders})
+                ) WHERE rn=1""", keys
+        ).fetchall()
+        alive = {str(item[0]) for item in existing_rows if str(item[1]) != "DELETE"}
+        missing_ids = [value for value in requested if _record_key(table_name, {key_column: value}, TABLE_KEYS[table_name]) not in alive]
+        if not missing_ids:
+            return []
+        pg_ids: list[Any] = []
+        for value in missing_ids:
+            try:
+                pg_ids.append(int(value))
+            except (TypeError, ValueError):
+                pg_ids.append(value)
+        with get_conn() as pg, pg.cursor() as cur:
+            cur.execute(f'SELECT * FROM public."{table_name}" WHERE "{key_column}" = ANY(%s)', (pg_ids,))
+            records = [dict(item) for item in cur.fetchall()]
+        if records:
+            event_rows = []
+            for record in records:
+                record_id = str(record.get(key_column))
+                event_rows.append((requested[record_id], _record_key(table_name, record, TABLE_KEYS[table_name]),
+                                   "UPSERT", _row_json(record), datetime.now(timezone.utc).isoformat()))
+            _insert_event_rows_bulk(con, target, event_rows)
+        return records
+
+    for dimension, requested in needed.items():
+        requested_items = list(requested.items())
+        # Keep parameter lists bounded when a single sync batch references many dimensions.
+        for offset in range(0, len(requested_items), 500):
+            request_chunk = dict(requested_items[offset:offset + 500])
+            records = append_missing(dimension, request_chunk)
+            hydrated[dimension] += len(records)
+            # Check aliases for every referenced dimension, not only newly inserted
+            # dimensions: a dimension may have arrived in an earlier CDC event while its
+            # pre-cutover aliases were intentionally omitted from the empty baseline.
+            alias_table = "topic_aliases" if dimension == "topics" else ("entity_aliases" if dimension == "entities" else None)
+            fk_column = "topic_id" if dimension == "topics" else ("entity_id" if dimension == "entities" else None)
+            if alias_table and fk_column and alias_table in registered_tables and request_chunk:
+                ids: list[Any] = []
+                for value in request_chunk:
+                    try:
+                        ids.append(int(value))
+                    except (TypeError, ValueError):
+                        ids.append(value)
+                with get_conn() as pg, pg.cursor() as cur:
+                    cur.execute(f'SELECT * FROM public."{alias_table}" WHERE "{fk_column}" = ANY(%s)', (ids,))
+                    aliases = [dict(item) for item in cur.fetchall()]
+                alias_target = _event_table(alias_table)
+                for alias_offset in range(0, len(aliases), 500):
+                    alias_chunk = aliases[alias_offset:alias_offset + 500]
+                    if not alias_chunk:
+                        continue
+                    key_values = [_record_key(alias_table, item, TABLE_KEYS[alias_table]) for item in alias_chunk]
+                    placeholders = ",".join(["?"] * len(key_values))
+                    current = con.execute(
+                        f"""SELECT record_key,operation FROM (
+                               SELECT record_key,operation,row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
+                               FROM {alias_target} WHERE record_key IN ({placeholders})
+                           ) WHERE rn=1""", key_values
+                    ).fetchall()
+                    already = {str(item[0]) for item in current if str(item[1]) != "DELETE"}
+                    alias_events = []
+                    for alias in alias_chunk:
+                        key = _record_key(alias_table, alias, TABLE_KEYS[alias_table])
+                        if key in already:
+                            continue
+                        dimension_id = str(alias.get(fk_column))
+                        alias_events.append((request_chunk.get(dimension_id, 0), key, "UPSERT",
+                                             _row_json(alias), datetime.now(timezone.utc).isoformat()))
+                    if alias_events:
+                        _insert_event_rows_bulk(con, alias_target, alias_events)
+                        hydrated[alias_table] = hydrated.get(alias_table, 0) + len(alias_events)
+    # Resolve only merge-map rows connected to referenced topic/entity IDs. The map may
+    # contain older reconciliations that predate the empty baseline; importing those small
+    # connected paths preserves canonical timeline behavior without loading the whole map.
+    merge_table = "catalog_reconciliation_merges"
+    if merge_table in registered_tables:
+        merge_target = _event_table(merge_table)
+        for object_type, dimension in (("topic", "topics"), ("entity", "entities")):
+            frontier = dict(needed[dimension])
+            visited: set[str] = set()
+            for _depth in range(20):
+                frontier = {key: event_id for key, event_id in frontier.items() if key not in visited}
+                if not frontier:
+                    break
+                visited.update(frontier)
+                pg_ids = []
+                for value in frontier:
+                    try:
+                        pg_ids.append(int(value))
+                    except (TypeError, ValueError):
+                        pg_ids.append(value)
+                with get_conn() as pg, pg.cursor() as cur:
+                    cur.execute(
+                        'SELECT * FROM public."catalog_reconciliation_merges" WHERE object_type=%s AND source_id = ANY(%s)',
+                        (object_type, pg_ids),
+                    )
+                    merges = [dict(item) for item in cur.fetchall()]
+                if not merges:
+                    break
+                keys = [_record_key(merge_table, item, TABLE_KEYS[merge_table]) for item in merges]
+                key_chunks = []
+                for offset in range(0, len(keys), 500):
+                    key_chunks.extend(keys[offset:offset + 500])
+                active_keys: set[str] = set()
+                for offset in range(0, len(key_chunks), 500):
+                    key_chunk = key_chunks[offset:offset + 500]
+                    placeholders = ",".join(["?"] * len(key_chunk))
+                    current = con.execute(
+                        f"""SELECT record_key,operation FROM (
+                               SELECT record_key,operation,row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
+                               FROM {merge_target} WHERE record_key IN ({placeholders})
+                           ) WHERE rn=1""", key_chunk
+                    ).fetchall()
+                    active_keys.update(str(item[0]) for item in current if str(item[1]) != "DELETE")
+                merge_events = []
+                next_frontier: dict[str, int] = {}
+                for merge in merges:
+                    source_id = str(merge.get("source_id"))
+                    event_id = frontier.get(source_id, 0)
+                    target_id = str(merge.get("target_id"))
+                    next_frontier[target_id] = max(event_id, next_frontier.get(target_id, 0))
+                    key = _record_key(merge_table, merge, TABLE_KEYS[merge_table])
+                    if key not in active_keys:
+                        merge_events.append((event_id, key, "UPSERT", _row_json(merge),
+                                             datetime.now(timezone.utc).isoformat()))
+                for offset in range(0, len(merge_events), 500):
+                    _insert_event_rows_bulk(con, merge_target, merge_events[offset:offset + 500])
+                if merge_events:
+                    hydrated[merge_table] = hydrated.get(merge_table, 0) + len(merge_events)
+                frontier = next_frontier
+
+    nonzero = {name: count for name, count in hydrated.items() if count}
+    if nonzero:
+        log.info("Cloudflare Lakehouse lazy dimension hydration: %s", nonzero)
+    return hydrated
+
+
 def sync_pending(limit: int = 10000) -> dict:
     """Append pending PostgreSQL outbox changes into Iceberg event tables.
 
-    Outbox rows are marked processed only after Iceberg accepted them. Retrying after a
-    network failure can append the same event id twice; the current-state view is idempotent
-    because both copies carry the same event id/key/payload.
+    Outbox rows are marked processed only after Iceberg accepted them. On a fresh forward-only
+    baseline, only dimensions referenced by new article/link/fact events are hydrated, avoiding
+    a full copy of historical source/topic/entity catalogs.
     """
     if not configured() or not lakehouse_enabled():
         raise LakehouseNotReady("Enable/configure Cloudflare Lakehouse before syncing")
@@ -497,22 +717,28 @@ def sync_pending(limit: int = 10000) -> dict:
         grouped.setdefault(row["table_name"], []).append(row)
     ids_by_table: dict[str, list[int]] = {}
     with catalog_connection() as con:
+        _hydrate_missing_dimensions(con, rows, {t for t, status in registry.items() if status == "complete"})
         for table_name, events in grouped.items():
             _ensure_event_table(con, table_name)
             target = _event_table(table_name)
-            con.execute("BEGIN TRANSACTION")
-            try:
-                con.executemany(
-                    f"INSERT INTO {target} VALUES (?, ?, ?, ?, ?)",
-                    [(int(e["outbox_id"]), str(e["record_key"]), str(e["operation"]),
-                      _row_json(e["row_data"]),
-                      e["event_at"].isoformat() if hasattr(e["event_at"], "isoformat") else str(e["event_at"]))
-                     for e in events],
-                )
-                con.execute("COMMIT")
-            except Exception:
-                con.execute("ROLLBACK")
-                raise
+            event_rows = [
+                (int(e["outbox_id"]), str(e["record_key"]), str(e["operation"]),
+                 _row_json(e["row_data"]),
+                 e["event_at"].isoformat() if hasattr(e["event_at"], "isoformat") else str(e["event_at"]))
+                for e in events
+            ]
+            # Commit bounded chunks so transient Catalog/R2 errors do not hold one very
+            # large transaction open. Outbox IDs are acknowledged only after all chunks
+            # for the selected sync batch have been written successfully.
+            for offset in range(0, len(event_rows), 500):
+                chunk = event_rows[offset:offset + 500]
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    _insert_event_rows_bulk(con, target, chunk)
+                    con.execute("COMMIT")
+                except Exception:
+                    _rollback_if_active(con)
+                    raise
             ids_by_table[table_name] = [int(e["outbox_id"]) for e in events]
     synced_ids = [int(row["outbox_id"]) for row in rows]
     with get_conn() as conn, conn.cursor() as cur:
@@ -811,9 +1037,9 @@ def _increment_archive_totals_in_transaction(cur, deltas: dict[str, int]) -> Non
 def verify() -> dict:
     """Verify Iceberg parity for a full baseline, or validate forward-only cutover.
 
-    A forward-only bootstrap intentionally skips historical Article/bridge/FACT rows. Those
-    tables are checked for successful creation and pending CDC is drained, but historical
-    row-count parity is not claimed for them. Archival remains prohibited in forward-only mode.
+    A forward-only bootstrap intentionally imports no historical rows at all. It verifies that
+    all required event tables/views exist, drains post-watermark CDC, and does not claim
+    historical row-count parity. Archival remains prohibited in forward-only mode.
     """
     sync_result = {"status": "synced", "events_synced": 0, "batches": 0}
     while True:
@@ -842,7 +1068,7 @@ def verify() -> dict:
                     "iceberg": iceberg_count,
                     "match": None,
                     "verification": "historical_baseline_skipped",
-                    "note": "Existing PostgreSQL history was intentionally not imported; future CDC is enabled.",
+                    "note": "No pre-watermark source rows were imported; future CDC is enabled and required dimensions hydrate on demand.",
                 }
                 continue
             with get_conn() as pg, pg.cursor() as cur:
@@ -866,7 +1092,7 @@ def verify() -> dict:
                                    "match": expected_iceberg_count == iceberg_count,
                                    "verification": "row_count_parity"}
     required_tables = {
-        "news_articles", "topics", "entities", "article_topics", "article_entities",
+        "data_sources", "news_articles", "topics", "entities", "article_topics", "article_entities",
         "fact_news_article", "fact_topic_daily", "fact_topic_trending",
         "fact_entity_daily", "fact_source_daily",
     }
@@ -1065,7 +1291,7 @@ def compact_event_tables(limit_tables: int | None = None) -> dict:
                 con.execute(f"INSERT INTO {target} SELECT event_id,record_key,operation,row_data,event_at FROM {temp}")
                 con.execute("COMMIT")
             except Exception:
-                con.execute("ROLLBACK")
+                _rollback_if_active(con)
                 raise
             con.execute(f"DROP TABLE {temp}")
             results[table_name] = {"before": before, "after": after, "removed_versions": before-after}

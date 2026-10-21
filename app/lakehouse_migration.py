@@ -23,9 +23,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Doraemon Cloudflare Iceberg Lakehouse migration")
     sub = parser.add_subparsers(dest="command", required=True)
-    boot = sub.add_parser("bootstrap", help="Seed Iceberg from a full or forward-only baseline")
+    boot = sub.add_parser("bootstrap", help="Initialize Iceberg from a full snapshot or an empty forward-only baseline")
     boot.add_argument("--mode", choices=("full", "forward-only"), default="full",
-                      help="full imports historical rows; forward-only skips historical articles, links and FACTs")
+                      help="full imports all current rows; forward-only imports zero existing rows and starts from the current CDC watermark")
     sync = sub.add_parser("sync", help="Append pending transactional outbox events to Iceberg")
     sync.add_argument("--limit", type=int, default=10000)
     sub.add_parser("verify", help="Compare PostgreSQL and Iceberg row counts before archiving")
