@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import time
+import threading
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -24,6 +25,116 @@ from typing import Any
 from .db import get_conn
 
 log = logging.getLogger("mini-lakehouse.cloudflare")
+
+# Reuse read-only DuckDB connections in the API process. Opening a fresh in-memory
+# DuckDB instance and attaching Basin Catalog for every SQL query added substantial
+# latency to the News Radar page (which issues several queries on first load).
+# The pool is bounded and serialized per connection by checkout: a connection is never
+# used concurrently by two requests. It recycles connections periodically so catalog
+# metadata and credentials are refreshed without restarting Render.
+_READ_POOL_CONDITION = threading.Condition()
+_READ_POOL_AVAILABLE: list[tuple[Any, float]] = []
+_READ_POOL_CREATED = 0
+_READ_POOL_CONFIG_KEY: tuple[str, ...] | None = None
+_READ_POOL_MAX_AGE_SECONDS = 60.0
+_READ_POOL_ACQUIRE_TIMEOUT_SECONDS = 20.0
+
+
+def _read_pool_size() -> int:
+    try:
+        return max(1, min(6, int(os.getenv("CLOUDFLARE_LAKEHOUSE_READ_POOL_SIZE", "3"))))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _read_pool_key() -> tuple[str, ...]:
+    # The writer token is intentionally excluded; public queries must use the read-only token.
+    return tuple(os.getenv(name, "").strip() for name in (
+        "CLOUDFLARE_R2_WAREHOUSE", "CLOUDFLARE_R2_CATALOG_URI", "CLOUDFLARE_R2_READ_TOKEN"
+    ))
+
+
+@contextmanager
+def _pooled_read_catalog_connection():
+    """Checkout one dedicated read connection, reusing Basin Catalog attachment across queries."""
+    global _READ_POOL_CREATED, _READ_POOL_CONFIG_KEY, _READ_POOL_AVAILABLE
+    key = _read_pool_key()
+    if not all(key):
+        raise LakehouseNotReady(
+            "Cloudflare read catalog is not configured. Set Warehouse, Catalog URI and CLOUDFLARE_R2_READ_TOKEN."
+        )
+    deadline = time.monotonic() + _READ_POOL_ACQUIRE_TIMEOUT_SECONDS
+    conn = None
+    created_at = None
+    should_create = False
+    with _READ_POOL_CONDITION:
+        if _READ_POOL_CONFIG_KEY != key:
+            # A live env/config change invalidates idle handles. Any in-flight connection
+            # from the previous key is closed when its request releases it.
+            for idle_conn, _ in _READ_POOL_AVAILABLE:
+                try:
+                    idle_conn.close()
+                except Exception:
+                    pass
+            _READ_POOL_AVAILABLE = []
+            _READ_POOL_CREATED = 0
+            _READ_POOL_CONFIG_KEY = key
+        while True:
+            while _READ_POOL_AVAILABLE:
+                candidate, candidate_created_at = _READ_POOL_AVAILABLE.pop()
+                if time.monotonic() - candidate_created_at <= _READ_POOL_MAX_AGE_SECONDS:
+                    conn, created_at = candidate, candidate_created_at
+                    break
+                try:
+                    candidate.close()
+                except Exception:
+                    pass
+                _READ_POOL_CREATED = max(0, _READ_POOL_CREATED - 1)
+            if conn is not None:
+                break
+            if _READ_POOL_CREATED < _read_pool_size():
+                _READ_POOL_CREATED += 1
+                should_create = True
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LakehouseNotReady("Timed out waiting for a free Cloudflare read connection; retry the request.")
+            _READ_POOL_CONDITION.wait(remaining)
+    if should_create:
+        try:
+            conn = _connect_catalog(read_only=True)
+            created_at = time.monotonic()
+        except Exception:
+            with _READ_POOL_CONDITION:
+                if _READ_POOL_CONFIG_KEY == key:
+                    _READ_POOL_CREATED = max(0, _READ_POOL_CREATED - 1)
+                _READ_POOL_CONDITION.notify()
+            raise
+    discard = False
+    try:
+        yield conn
+    except Exception:
+        # Syntax/binder errors do not poison DuckDB connections. Discard only if the
+        # local engine connection itself is no longer usable.
+        try:
+            conn.execute("SELECT 1").fetchone()
+        except Exception:
+            discard = True
+        raise
+    finally:
+        with _READ_POOL_CONDITION:
+            if (not discard and _READ_POOL_CONFIG_KEY == key
+                    and time.monotonic() - (created_at or 0) <= _READ_POOL_MAX_AGE_SECONDS
+                    and len(_READ_POOL_AVAILABLE) < _read_pool_size()):
+                _READ_POOL_AVAILABLE.append((conn, created_at or time.monotonic()))
+            else:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                if _READ_POOL_CONFIG_KEY == key:
+                    _READ_POOL_CREATED = max(0, _READ_POOL_CREATED - 1)
+            _READ_POOL_CONDITION.notify()
 
 # Bronze/raw is intentionally excluded. These are the clean core tables, bridge tables,
 # dimensions and Gold facts needed by News Radar and the analysis layer.
@@ -1028,14 +1139,20 @@ def _tables_referenced_by_sql(sql: str) -> list[str]:
 
 
 def query(sql: str, params: tuple | list = ()) -> list[dict]:
-    """Run a read query against latest Iceberg state, loading only referenced views."""
+    """Run a read query against latest Iceberg state using a bounded warm connection pool."""
     if not lakehouse_reads_enabled():
         raise LakehouseNotReady("Lakehouse reads are disabled")
-    with catalog_connection(read_only=True) as con:
-        create_current_views(con, _tables_referenced_by_sql(sql))
+    started = time.monotonic()
+    table_names = _tables_referenced_by_sql(sql)
+    with _pooled_read_catalog_connection() as con:
+        create_current_views(con, table_names)
         cursor = con.execute(sql, list(params))
         columns = [d[0] for d in cursor.description or []]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if elapsed_ms >= 1000:
+        log.warning("Slow Iceberg read: duration_ms=%s tables=%s rows=%s", elapsed_ms, ",".join(table_names), len(rows))
+    return rows
 
 
 def scalar(sql: str, params: tuple | list = (), default=None):

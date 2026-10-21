@@ -24,7 +24,7 @@ from . import cloudflare_lakehouse as cf_lakehouse
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.9',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.10',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -788,11 +788,19 @@ def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_
         vals.extend([utc_start, utc_end])
     where_sql = ' WHERE ' + ' AND '.join(where)
     from_sql = ' FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id'
-    total_rows = _lakehouse_query_or_503('SELECT count(*)::BIGINT AS total' + from_sql + where_sql, vals)
-    total = int((total_rows[0] if total_rows else {}).get('total', 0))
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = min(page, total_pages)
-    select_sql = """SELECT a.article_id,a.title,a.url,a.image_url,a.author,a.language,
+    # The first page is the default and the most common request during initial rendering.
+    # Return count and rows in one Iceberg scan by using a window count, avoiding a separate
+    # full-table COUNT query followed by the page query. Keep the two-query path for later
+    # pages so existing out-of-range page clamping remains unchanged.
+    include_window_count = page == 1
+    total = None
+    if not include_window_count:
+        total_rows = _lakehouse_query_or_503('SELECT count(*)::BIGINT AS total' + from_sql + where_sql, vals)
+        total = int((total_rows[0] if total_rows else {}).get('total', 0))
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, total_pages)
+    window_count_select = 'count(*) OVER()::BIGINT AS _total_count, ' if include_window_count else ''
+    select_sql = f"""SELECT {window_count_select}a.article_id,a.title,a.url,a.image_url,a.author,a.language,
         left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
         a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
         s.name AS source_name,coalesce(a.field_category,'Chưa phân loại') AS field_category,
@@ -809,6 +817,8 @@ def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_
                         WHERE ae.article_id=a.article_id AND e.status='active') e),'[]') AS entity_refs
     """ + from_sql + where_sql + ' ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT ? OFFSET ?'
     items = _lakehouse_query_or_503(select_sql, vals + [page_size, (page - 1) * page_size])
+    if include_window_count:
+        total = int(items[0].pop('_total_count', 0)) if items else 0
     _decode_lakehouse_json_fields(items, ['topics','topic_refs','entity_refs'])
     return {'date': today,
             'date_from': effective_date_from.isoformat() if effective_date_from else None,
