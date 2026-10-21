@@ -33,7 +33,9 @@ services:
       - key: CLOUDFLARE_LAKEHOUSE_READS
         value: "false"
       - key: CLOUDFLARE_LAKEHOUSE_READ_POOL_SIZE
-        value: "3"
+        value: "1"
+      - key: CLOUDFLARE_LAKEHOUSE_READ_SNAPSHOT_TTL_SECONDS
+        value: "30"
       - key: CLOUDFLARE_LAKEHOUSE_DIRECT_WRITES
         value: "false"
       - key: CLOUDFLARE_R2_WAREHOUSE
