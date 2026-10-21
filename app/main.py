@@ -24,7 +24,7 @@ from . import cloudflare_lakehouse as cf_lakehouse
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.6',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.7',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -227,8 +227,8 @@ def user_timeline_options(user: dict = Depends(require_user)):
                                 count(DISTINCT a.article_id)::int AS article_count,
                                 count(DISTINCT a.source_id)::int AS source_count
                          FROM topics t
-                         LEFT JOIN article_topics at ON at.topic_id=t.topic_id
-                         LEFT JOIN news_articles a ON a.article_id=at.article_id AND a.is_excluded=false
+                         LEFT JOIN article_topics topic_link ON topic_link.topic_id=t.topic_id
+                         LEFT JOIN news_articles a ON a.article_id=topic_link.article_id AND a.is_excluded=false
                          WHERE t.status='active' AND t.topic_type='event'
                          GROUP BY t.topic_id, t.name, t.description
                          ORDER BY count(DISTINCT a.article_id) DESC, t.name
@@ -268,9 +268,9 @@ def get_saved_timelines(user: dict = Depends(require_user)):
                          FROM (
                            SELECT 'topic'::text AS timeline_kind, t.topic_id::bigint AS id, t.name,
                                   ust.display_order,
-                                  (SELECT count(DISTINCT at.article_id)::int FROM article_topics at
-                                   JOIN news_articles a ON a.article_id=at.article_id
-                                   WHERE at.topic_id=t.topic_id AND a.is_excluded=false) AS article_count
+                                  (SELECT count(DISTINCT topic_link.article_id)::int FROM article_topics topic_link
+                                   JOIN news_articles a ON a.article_id=topic_link.article_id
+                                   WHERE topic_link.topic_id=t.topic_id AND a.is_excluded=false) AS article_count
                            FROM user_saved_timelines ust JOIN topics t ON t.topic_id=ust.topic_id
                            WHERE ust.user_id=%s AND ust.timeline_type='topic' AND t.status='active' AND t.topic_type='event'
                            UNION ALL
@@ -556,10 +556,10 @@ def public_hot_topics(
                               f.article_count, f.source_count,
                               f.previous_article_count, f.growth_pct,
                               f.hotness_score, f.rank_position,
-                              (SELECT at.article_id
-                               FROM article_topics at
-                               JOIN news_articles anchor ON anchor.article_id=at.article_id
-                               WHERE at.topic_id=t.topic_id AND anchor.is_excluded=false
+                              (SELECT topic_link.article_id
+                               FROM article_topics topic_link
+                               JOIN news_articles anchor ON anchor.article_id=topic_link.article_id
+                               WHERE topic_link.topic_id=t.topic_id AND anchor.is_excluded=false
                                ORDER BY coalesce(anchor.published_at,anchor.collected_at) DESC,
                                         anchor.article_id DESC
                                LIMIT 1) AS anchor_article_id
@@ -643,12 +643,12 @@ def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_
         left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
         a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
         s.name AS source_name,coalesce(a.field_category,'Chưa phân loại') AS field_category,
-        coalesce((SELECT to_json(list(t.name ORDER BY t.name)) FROM article_topics at
-                  JOIN topics t ON t.topic_id=at.topic_id
-                  WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topics,
+        coalesce((SELECT to_json(list(t.name ORDER BY t.name)) FROM article_topics topic_link
+                  JOIN topics t ON t.topic_id=topic_link.topic_id
+                  WHERE topic_link.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topics,
         coalesce((SELECT to_json(list(struct_pack(id := t.topic_id, name := t.name) ORDER BY t.name))
-                  FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                  WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topic_refs,
+                  FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
+                  WHERE topic_link.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topic_refs,
         coalesce((SELECT to_json(list(struct_pack(id := e.entity_id, name := e.canonical_name, type := e.entity_type)
                                       ORDER BY e.canonical_name))
                   FROM (SELECT DISTINCT e.entity_id,e.canonical_name,e.entity_type
@@ -666,10 +666,10 @@ def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_
 
 
 def _lakehouse_relationship_counts():
-    topics = _lakehouse_query_or_503("""SELECT at.topic_id AS id,count(DISTINCT a.article_id)::BIGINT AS article_count,
+    topics = _lakehouse_query_or_503("""SELECT topic_link.topic_id AS id,count(DISTINCT a.article_id)::BIGINT AS article_count,
                                                count(DISTINCT a.source_id)::BIGINT AS source_count
-                                        FROM article_topics at JOIN news_articles a ON a.article_id=at.article_id
-                                        WHERE a.is_excluded=false GROUP BY at.topic_id""")
+                                        FROM article_topics topic_link JOIN news_articles a ON a.article_id=topic_link.article_id
+                                        WHERE a.is_excluded=false GROUP BY topic_link.topic_id""")
     entities = _lakehouse_query_or_503("""SELECT ae.entity_id AS id,count(DISTINCT a.article_id)::BIGINT AS article_count,
                                                  count(DISTINCT a.source_id)::BIGINT AS source_count
                                           FROM article_entities ae JOIN news_articles a ON a.article_id=ae.article_id
@@ -866,11 +866,11 @@ def public_daily_articles(
                               s.name AS source_name,
                               coalesce(a.field_category,'Chưa phân loại') AS field_category,
                               coalesce((SELECT json_agg(t.name ORDER BY t.name)
-                                        FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                                        WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topics,
+                                        FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
+                                        WHERE topic_link.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topics,
                               coalesce((SELECT json_agg(json_build_object('id', t.topic_id, 'name', t.name) ORDER BY t.name)
-                                        FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                                        WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topic_refs,
+                                        FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
+                                        WHERE topic_link.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topic_refs,
                               coalesce((SELECT json_agg(json_build_object('id', resolved.entity_id, 'name', resolved.canonical_name,
                                                                       'type', resolved.entity_type) ORDER BY resolved.canonical_name)
                                         FROM (
@@ -939,8 +939,8 @@ def user_news_feed(user: dict = Depends(require_user)):
                  coalesce(a.published_at,a.collected_at) AS timeline_at,
                  s.name AS source_name
           FROM followed f
-          JOIN article_topics at ON f.follow_type='topic' AND at.topic_id=f.follow_id
-          JOIN news_articles a ON a.article_id=at.article_id AND a.is_excluded=false
+          JOIN article_topics topic_link ON f.follow_type='topic' AND topic_link.topic_id=f.follow_id
+          JOIN news_articles a ON a.article_id=topic_link.article_id AND a.is_excluded=false
           JOIN data_sources s ON s.source_id=a.source_id
           UNION ALL
           SELECT f.follow_type, f.follow_id, f.follow_name, f.display_order,
@@ -1047,8 +1047,8 @@ def _public_direct_timeline_items(relation_table: str, relation_key: str, record
                              FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
                              WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities,
                    coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
-                             FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                             WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
+                             FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
+                             WHERE topic_link.article_id=a.article_id AND t.status='active'), '') AS topics
             FROM matched m JOIN news_articles a ON a.article_id=m.article_id
             JOIN data_sources s ON s.source_id=a.source_id
             WHERE a.is_excluded=false
@@ -1082,8 +1082,8 @@ def _public_direct_timeline_items(relation_table: str, relation_key: str, record
                              FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
                              WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities,
                    coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
-                             FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
-                             WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
+                             FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
+                             WHERE topic_link.article_id=a.article_id AND t.status='active'), '') AS topics
             FROM matched m
             JOIN news_articles a ON a.article_id=m.article_id
             JOIN data_sources s ON s.source_id=a.source_id
@@ -1237,9 +1237,9 @@ def list_articles(
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
     sql="""select a.article_id,a.title,a.url,a.canonical_url,a.summary,left(a.content_text,500) as content_preview,a.author,a.language,a.published_at,a.collected_at,a.quality_score,a.is_excluded,a.exclude_reason,s.name as source_name,coalesce(a.field_category,'Chưa phân loại') as field_category,
-           coalesce((select string_agg(t.name,', ' order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id and t.topic_type='event' and t.status='active'),'') as topics,
+           coalesce((select string_agg(t.name,', ' order by t.name) from article_topics topic_link join topics t on t.topic_id=topic_link.topic_id where topic_link.article_id=a.article_id and t.topic_type='event' and t.status='active'),'') as topics,
            coalesce((select string_agg(e.canonical_name,', ' order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id and e.status='active'),'') as entities,
-           coalesce((select json_agg(t.name order by t.name) from article_topics at join topics t on t.topic_id=at.topic_id where at.article_id=a.article_id and t.topic_type='event' and t.status='active'),'[]'::json) as topic_names,
+           coalesce((select json_agg(t.name order by t.name) from article_topics topic_link join topics t on t.topic_id=topic_link.topic_id where topic_link.article_id=a.article_id and t.topic_type='event' and t.status='active'),'[]'::json) as topic_names,
            coalesce((select json_agg(e.canonical_name order by e.canonical_name) from article_entities ae join entities e on e.entity_id=ae.entity_id where ae.article_id=a.article_id and e.status='active'),'[]'::json) as entity_names""" + from_sql + where_sql + ' order by a.collected_at desc limit %s offset %s'
     items = fetch_all(sql, vals + [page_size, (page - 1) * page_size])
     return {'items': items, 'pagination': pagination_meta(page, page_size, total)}
@@ -1249,8 +1249,8 @@ def get_article_classifications(article_id: int):
     article = fetch_one("select article_id,title from news_articles where article_id=%s", (article_id,))
     if not article:
         raise HTTPException(status_code=404, detail='Article not found')
-    topics = fetch_all("""select t.topic_id,t.name,t.topic_type from article_topics at
-                         join topics t on t.topic_id=at.topic_id where at.article_id=%s
+    topics = fetch_all("""select t.topic_id,t.name,t.topic_type from article_topics topic_link
+                         join topics t on t.topic_id=topic_link.topic_id where topic_link.article_id=%s
                            and t.topic_type='event' and t.status='active' order by t.name""", (article_id,))
     entities = fetch_all("""select distinct e.entity_id,e.canonical_name,e.entity_type from article_entities ae
                            join entities e on e.entity_id=ae.entity_id where ae.article_id=%s and e.status='active' order by e.canonical_name""", (article_id,))
@@ -1357,15 +1357,15 @@ def topic_timeline(topic_id: int, limit: int = Query(default=100, ge=1, le=300))
                       from (
                         select a.article_id,a.title,a.url,a.summary,a.author,s.name as source_name,
                                a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) as timeline_at
-                        from article_topics at
-                        join news_articles a on a.article_id=at.article_id
+                        from article_topics topic_link
+                        join news_articles a on a.article_id=topic_link.article_id
                         join data_sources s on s.source_id=a.source_id
-                        where at.topic_id=%s and a.is_excluded=false
+                        where topic_link.topic_id=%s and a.is_excluded=false
                         order by coalesce(a.published_at,a.collected_at) desc
                         limit %s
                       ) recent
                       order by recent.timeline_at asc""", (topic_id, limit))
-    total = fetch_one('select count(*)::int as total from article_topics at join news_articles a on a.article_id=at.article_id where at.topic_id=%s and a.is_excluded=false', (topic_id,))
+    total = fetch_one('select count(*)::int as total from article_topics topic_link join news_articles a on a.article_id=topic_link.article_id where topic_link.topic_id=%s and a.is_excluded=false', (topic_id,))
     return {'topic': topic, 'count': len(rows), 'total_count': (total or {}).get('total', len(rows)), 'items': rows}
 
 @app.get('/api/raw-items',dependencies=[Depends(require_admin)])
@@ -1406,7 +1406,7 @@ def list_topics(
         page = 1
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
-    topics=fetch_all("""select t.*, (select count(*) from article_topics at where at.topic_id=t.topic_id) as article_count
+    topics=fetch_all("""select t.*, (select count(*) from article_topics topic_link where topic_link.topic_id=t.topic_id) as article_count
                        from topics t""" + where_sql + " order by t.status, t.name limit %s offset %s",
                       vals + [page_size, 0 if all_items else (page - 1) * page_size])
     # Topic discovery is automatic; no manual approval queue is exposed in the admin UI.
