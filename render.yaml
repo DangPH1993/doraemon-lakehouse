@@ -32,11 +32,15 @@ services:
         value: "false"
       - key: CLOUDFLARE_LAKEHOUSE_READS
         value: "false"
+      - key: CLOUDFLARE_LAKEHOUSE_DIRECT_WRITES
+        value: "false"
       - key: CLOUDFLARE_R2_WAREHOUSE
         sync: false
       - key: CLOUDFLARE_R2_CATALOG_URI
         sync: false
       - key: CLOUDFLARE_R2_READ_TOKEN
+        sync: false
+      - key: CLOUDFLARE_R2_TOKEN
         sync: false
       - key: CLOUDFLARE_R2_RAW_ENABLED
         value: "false"
