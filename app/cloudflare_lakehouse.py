@@ -811,6 +811,27 @@ def _column_expression(column: dict) -> str:
     return f"{expr} AS {q_name}"
 
 
+def _create_current_state_view(con, table_name: str, columns: list[dict], view_name: str | None = None) -> None:
+    """Create a current-state view directly over the physical Iceberg event table.
+
+    This helper is also used to construct ``*_raw`` views. Those views must not be
+    defined as SELECTs from a view that is subsequently replaced by a canonicalized
+    view; DuckDB can rebind that dependency into an infinite self-recursion.
+    """
+    projections = ", ".join(_column_expression(c) for c in columns)
+    event_table = _event_table(table_name)
+    output_name = view_name or table_name
+    quoted_output = '"' + output_name.replace('"', '""') + '"'
+    con.execute(f"""CREATE OR REPLACE TEMP VIEW {quoted_output} AS
+        WITH ranked AS (
+          SELECT record_key,operation,row_data,event_id,
+                 row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
+          FROM {event_table}
+        )
+        SELECT {projections}
+        FROM ranked WHERE rn=1 AND operation <> 'DELETE'""")
+
+
 def create_current_views(con, table_names: list[str] | None = None) -> list[str]:
     """Create typed temporary views for selected bootstrapped tables in this session.
 
@@ -844,23 +865,15 @@ def create_current_views(con, table_names: list[str] | None = None) -> list[str]
     rows = [row for row in registry_rows if row['table_name'] in selected]
     rows.sort(key=lambda item: (item['table_name'] == 'catalog_reconciliation_merges', item['table_name']))
     created = []
+    columns_by_table: dict[str, list[dict]] = {}
     for row in rows:
         table_name = row["table_name"]
         try:
             columns = row["columns_json"]
             if isinstance(columns, str):
                 columns = json.loads(columns)
-            projections = ", ".join(_column_expression(c) for c in columns)
-            event_table = _event_table(table_name)
-            view_name = '"' + table_name.replace('"', '""') + '"'
-            con.execute(f"""CREATE OR REPLACE TEMP VIEW {view_name} AS
-                WITH ranked AS (
-                  SELECT record_key,operation,row_data,event_id,
-                         row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
-                  FROM {event_table}
-                )
-                SELECT {projections}
-                FROM ranked WHERE rn=1 AND operation <> 'DELETE'""")
+            columns_by_table[table_name] = columns
+            _create_current_state_view(con, table_name, columns, view_name=table_name)
             created.append(table_name)
         except Exception as exc:
             raise LakehouseNotReady(f"Could not construct current-state view for {table_name}: {exc}") from exc
@@ -872,7 +885,10 @@ def create_current_views(con, table_names: list[str] | None = None) -> list[str]
             if table_name not in created:
                 continue
             view = f'"{table_name}_raw"'
-            con.execute(f'CREATE OR REPLACE TEMP VIEW {view} AS SELECT * FROM "{table_name}"')
+            # Build the raw bridge view from its Iceberg event table, not from the
+            # replaceable canonical view. This avoids DuckDB binding a recursive edge.
+            _create_current_state_view(con, table_name, columns_by_table[table_name],
+                                       view_name=f"{table_name}_raw")
             if table_name == "article_topics":
                 con.execute(f"""CREATE OR REPLACE TEMP VIEW "{table_name}" AS
                     WITH RECURSIVE map(source_id,target_id,depth) AS (
@@ -910,7 +926,8 @@ def create_current_views(con, table_names: list[str] | None = None) -> list[str]
         # aggregate collisions after ID resolution. Raw views are used for exact bootstrap
         # verification; user-facing fact queries read these canonical views.
         if "fact_topic_daily" in created:
-            con.execute('CREATE OR REPLACE TEMP VIEW "fact_topic_daily_raw" AS SELECT * FROM "fact_topic_daily"')
+            _create_current_state_view(con, "fact_topic_daily", columns_by_table["fact_topic_daily"],
+                                       view_name="fact_topic_daily_raw")
             con.execute("""CREATE OR REPLACE TEMP VIEW "fact_topic_daily" AS
                 WITH RECURSIVE map(source_id,target_id,depth) AS (
                   SELECT source_id,target_id,1 FROM catalog_reconciliation_merges WHERE object_type='topic'
@@ -922,7 +939,8 @@ def create_current_views(con, table_names: list[str] | None = None) -> list[str]
                 SELECT stat_date,topic_id,source_id,sum(article_count)::INTEGER AS article_count,max(updated_at) AS updated_at
                 FROM canonical GROUP BY stat_date,topic_id,source_id""")
         if "fact_entity_daily" in created:
-            con.execute('CREATE OR REPLACE TEMP VIEW "fact_entity_daily_raw" AS SELECT * FROM "fact_entity_daily"')
+            _create_current_state_view(con, "fact_entity_daily", columns_by_table["fact_entity_daily"],
+                                       view_name="fact_entity_daily_raw")
             con.execute("""CREATE OR REPLACE TEMP VIEW "fact_entity_daily" AS
                 WITH RECURSIVE map(source_id,target_id,depth) AS (
                   SELECT source_id,target_id,1 FROM catalog_reconciliation_merges WHERE object_type='entity'
@@ -934,7 +952,8 @@ def create_current_views(con, table_names: list[str] | None = None) -> list[str]
                 SELECT stat_date,entity_id,source_id,sum(article_count)::INTEGER AS article_count,max(updated_at) AS updated_at
                 FROM canonical GROUP BY stat_date,entity_id,source_id""")
         if "fact_topic_trending" in created:
-            con.execute('CREATE OR REPLACE TEMP VIEW "fact_topic_trending_raw" AS SELECT * FROM "fact_topic_trending"')
+            _create_current_state_view(con, "fact_topic_trending", columns_by_table["fact_topic_trending"],
+                                       view_name="fact_topic_trending_raw")
             con.execute("""CREATE OR REPLACE TEMP VIEW "fact_topic_trending" AS
                 WITH RECURSIVE map(source_id,target_id,depth) AS (
                   SELECT source_id,target_id,1 FROM catalog_reconciliation_merges WHERE object_type='topic'
