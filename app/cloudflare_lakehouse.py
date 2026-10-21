@@ -38,13 +38,59 @@ _READ_POOL_CREATED = 0
 _READ_POOL_CONFIG_KEY: tuple[str, ...] | None = None
 _READ_POOL_MAX_AGE_SECONDS = 60.0
 _READ_POOL_ACQUIRE_TIMEOUT_SECONDS = 20.0
+# Current-state views over the append-only Iceberg event log otherwise execute a
+# row_number() scan on every API query. Materialize per-connection snapshots and reuse
+# them briefly; this is the main fast path for the public article list.
+_READ_SNAPSHOT_CACHE: dict[int, dict[str, float]] = {}
+_READ_POOLED_CONN_IDS: set[int] = set()
+_READ_SNAPSHOT_CACHE_LOCK = threading.RLock()
+_READ_REGISTRY_CACHE: tuple[float, list[dict]] | None = None
+_READ_REGISTRY_CACHE_LOCK = threading.RLock()
 
 
 def _read_pool_size() -> int:
     try:
-        return max(1, min(6, int(os.getenv("CLOUDFLARE_LAKEHOUSE_READ_POOL_SIZE", "3"))))
+        # One warm session is usually faster for initial page render: several API calls
+        # share its materialized current-state snapshot instead of scanning each Iceberg
+        # event table independently on multiple cold connections. Increase to 2–3 for
+        # workloads with sustained concurrent readers.
+        return max(1, min(6, int(os.getenv("CLOUDFLARE_LAKEHOUSE_READ_POOL_SIZE", "1"))))
     except (TypeError, ValueError):
-        return 3
+        return 1
+
+
+def _read_snapshot_ttl_seconds() -> float:
+    try:
+        return max(2.0, min(60.0, float(os.getenv("CLOUDFLARE_LAKEHOUSE_READ_SNAPSHOT_TTL_SECONDS", "30"))))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _forget_read_snapshot_cache(conn) -> None:
+    with _READ_SNAPSHOT_CACHE_LOCK:
+        conn_id = id(conn)
+        _READ_SNAPSHOT_CACHE.pop(conn_id, None)
+        _READ_POOLED_CONN_IDS.discard(conn_id)
+
+
+def _registry_rows_cached() -> list[dict]:
+    """Cache the tiny operational table registry briefly rather than querying PG on every read."""
+    global _READ_REGISTRY_CACHE
+    now = time.monotonic()
+    with _READ_REGISTRY_CACHE_LOCK:
+        if _READ_REGISTRY_CACHE and now - _READ_REGISTRY_CACHE[0] < 30.0:
+            return [dict(row) for row in _READ_REGISTRY_CACHE[1]]
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT table_name,columns_json,bootstrap_status FROM lakehouse_table_registry WHERE bootstrap_status='complete'")
+            rows = [dict(row) for row in cur.fetchall()]
+        _READ_REGISTRY_CACHE = (now, rows)
+        return [dict(row) for row in rows]
+
+
+def _invalidate_read_registry_cache() -> None:
+    global _READ_REGISTRY_CACHE
+    with _READ_REGISTRY_CACHE_LOCK:
+        _READ_REGISTRY_CACHE = None
 
 
 def _read_pool_key() -> tuple[str, ...]:
@@ -72,6 +118,7 @@ def _pooled_read_catalog_connection():
             # A live env/config change invalidates idle handles. Any in-flight connection
             # from the previous key is closed when its request releases it.
             for idle_conn, _ in _READ_POOL_AVAILABLE:
+                _forget_read_snapshot_cache(idle_conn)
                 try:
                     idle_conn.close()
                 except Exception:
@@ -85,6 +132,7 @@ def _pooled_read_catalog_connection():
                 if time.monotonic() - candidate_created_at <= _READ_POOL_MAX_AGE_SECONDS:
                     conn, created_at = candidate, candidate_created_at
                     break
+                _forget_read_snapshot_cache(candidate)
                 try:
                     candidate.close()
                 except Exception:
@@ -104,6 +152,8 @@ def _pooled_read_catalog_connection():
         try:
             conn = _connect_catalog(read_only=True)
             created_at = time.monotonic()
+            with _READ_SNAPSHOT_CACHE_LOCK:
+                _READ_POOLED_CONN_IDS.add(id(conn))
         except Exception:
             with _READ_POOL_CONDITION:
                 if _READ_POOL_CONFIG_KEY == key:
@@ -128,6 +178,7 @@ def _pooled_read_catalog_connection():
                     and len(_READ_POOL_AVAILABLE) < _read_pool_size()):
                 _READ_POOL_AVAILABLE.append((conn, created_at or time.monotonic()))
             else:
+                _forget_read_snapshot_cache(conn)
                 try:
                     conn.close()
                 except Exception:
@@ -375,6 +426,7 @@ def _register_table(table_name: str, columns: list[dict], status: str, row_count
                          bootstrap_row_count=excluded.bootstrap_row_count,
                          updated_at=now()""",
                     (table_name, list(TABLE_KEYS[table_name]), json.dumps(columns), status, row_count))
+    _invalidate_read_registry_cache()
 
 
 def bootstrap(mode: str = "full") -> dict:
@@ -956,25 +1008,61 @@ def _column_expression(column: dict) -> str:
 
 
 def _create_current_state_view(con, table_name: str, columns: list[dict], view_name: str | None = None) -> None:
-    """Create a current-state view directly over the physical Iceberg event table.
+    """Expose current-state rows; pooled API sessions materialize short-lived snapshots.
 
-    This helper is also used to construct ``*_raw`` views. Those views must not be
-    defined as SELECTs from a view that is subsequently replaced by a canonicalized
-    view; DuckDB can rebind that dependency into an infinite self-recursion.
+    The backing Iceberg tables are append-only event logs, so a ROW_NUMBER() current-state
+    view forces repeated scans of the same remote data on every endpoint call. Pooled API
+    connections keep a connection-local TEMP TABLE snapshot for a short TTL and expose the
+    public / *_raw names as cheap views over it. Direct pipeline, verification and migration
+    connections do not cache, so they always see fresh data and cannot leak a cache across
+    closed DuckDB sessions.
     """
     projections = ", ".join(_column_expression(c) for c in columns)
     event_table = _event_table(table_name)
     output_name = view_name or table_name
     quoted_output = '"' + output_name.replace('"', '""') + '"'
-    con.execute(f"""CREATE OR REPLACE TEMP VIEW {quoted_output} AS
-        WITH ranked AS (
-          SELECT record_key,operation,row_data,event_id,
-                 row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
-          FROM {event_table}
-        )
-        SELECT {projections}
-        FROM ranked WHERE rn=1 AND operation <> 'DELETE'""")
+    conn_id = id(con)
+    with _READ_SNAPSHOT_CACHE_LOCK:
+        use_snapshot_cache = conn_id in _READ_POOLED_CONN_IDS
+        last_materialized = _READ_SNAPSHOT_CACHE.get(conn_id, {}).get(table_name, 0.0)
+    if not use_snapshot_cache:
+        con.execute(f"""CREATE OR REPLACE TEMP VIEW {quoted_output} AS
+            WITH ranked AS (
+              SELECT record_key,operation,row_data,event_id,
+                     row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
+              FROM {event_table}
+            )
+            SELECT {projections}
+            FROM ranked WHERE rn=1 AND operation <> 'DELETE'""")
+        return
 
+    snapshot_name = f"__lh_current_state_{table_name}"
+    quoted_snapshot = '"' + snapshot_name.replace('"', '""') + '"'
+    now = time.monotonic()
+    refresh = (not last_materialized) or (now - last_materialized >= _read_snapshot_ttl_seconds())
+    ranked_cte = f"""WITH ranked AS (
+              SELECT record_key,operation,row_data,event_id,
+                     row_number() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS rn
+              FROM {event_table}
+            )"""
+    state_select = f"SELECT {projections} FROM ranked WHERE rn=1 AND operation <> 'DELETE'"
+    if refresh and last_materialized:
+        # Keep dependent TEMP VIEWs valid while refreshing the snapshot in-place. The
+        # transaction makes readers see either the previous snapshot or the new one.
+        con.execute("BEGIN TRANSACTION")
+        try:
+            con.execute(f"DELETE FROM {quoted_snapshot}")
+            con.execute(f"{ranked_cte} INSERT INTO {quoted_snapshot} {state_select}")
+            con.execute("COMMIT")
+        except Exception:
+            _rollback_if_active(con)
+            raise
+    elif refresh:
+        con.execute(f"CREATE TEMP TABLE {quoted_snapshot} AS {ranked_cte} {state_select}")
+    if refresh:
+        with _READ_SNAPSHOT_CACHE_LOCK:
+            _READ_SNAPSHOT_CACHE.setdefault(conn_id, {})[table_name] = time.monotonic()
+    con.execute(f"CREATE OR REPLACE TEMP VIEW {quoted_output} AS SELECT * FROM {quoted_snapshot}")
 
 def create_current_views(con, table_names: list[str] | None = None) -> list[str]:
     """Create typed temporary views for selected bootstrapped tables in this session.
@@ -988,10 +1076,7 @@ def create_current_views(con, table_names: list[str] | None = None) -> list[str]
         unknown = requested - set(TABLE_KEYS)
         if unknown:
             raise LakehouseNotReady(f"Unsupported Iceberg view(s) requested: {sorted(unknown)}")
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""SELECT table_name,columns_json,bootstrap_status FROM lakehouse_table_registry
-                       WHERE bootstrap_status='complete'""")
-        registry_rows = [dict(row) for row in cur.fetchall()]
+    registry_rows = _registry_rows_cached()
     registered = {row['table_name'] for row in registry_rows}
     if requested is None:
         requested = set(registered)
