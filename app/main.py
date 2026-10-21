@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, logging, threading, secrets, hmac, re
+import json, logging, threading, secrets, hmac, re, time
 from datetime import date, datetime, time as dt_time, timedelta, timezone as dt_timezone
 from zoneinfo import ZoneInfo
 from typing import Literal
@@ -24,7 +24,7 @@ from . import cloudflare_lakehouse as cf_lakehouse
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.11',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.12',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -749,6 +749,44 @@ def _direct_entity_record(canonical_name: str, entity_type: str = "UNKNOWN", des
     return {**row, "aliases": [x["alias"] for x in aliases_out]}
 
 
+_PUBLIC_ARTICLE_COUNT_CACHE: dict[tuple, tuple[float, int]] = {}
+_PUBLIC_ARTICLE_COUNT_CACHE_LOCK = threading.RLock()
+_PUBLIC_ARTICLE_COUNT_CACHE_TTL_SECONDS = 120.0
+_PUBLIC_ARTICLE_COUNT_CACHE_MAX_KEYS = 256
+
+
+def _public_article_count_cache_key(query, chosen_field, effective_date_from, effective_date_to):
+    return (
+        (query or '').strip().casefold(),
+        (chosen_field or '').strip(),
+        effective_date_from.isoformat() if effective_date_from else None,
+        effective_date_to.isoformat() if effective_date_to else None,
+    )
+
+
+def _public_article_count_cache_get(key):
+    now = time.monotonic()
+    with _PUBLIC_ARTICLE_COUNT_CACHE_LOCK:
+        cached = _PUBLIC_ARTICLE_COUNT_CACHE.get(key)
+        if cached and now - cached[0] < _PUBLIC_ARTICLE_COUNT_CACHE_TTL_SECONDS:
+            return cached[1]
+        _PUBLIC_ARTICLE_COUNT_CACHE.pop(key, None)
+    return None
+
+
+def _public_article_count_cache_put(key, total):
+    now = time.monotonic()
+    with _PUBLIC_ARTICLE_COUNT_CACHE_LOCK:
+        expired = [k for k, (inserted_at, _) in _PUBLIC_ARTICLE_COUNT_CACHE.items()
+                   if now - inserted_at >= _PUBLIC_ARTICLE_COUNT_CACHE_TTL_SECONDS]
+        for old_key in expired:
+            _PUBLIC_ARTICLE_COUNT_CACHE.pop(old_key, None)
+        if len(_PUBLIC_ARTICLE_COUNT_CACHE) >= _PUBLIC_ARTICLE_COUNT_CACHE_MAX_KEYS and key not in _PUBLIC_ARTICLE_COUNT_CACHE:
+            oldest = min(_PUBLIC_ARTICLE_COUNT_CACHE, key=lambda k: _PUBLIC_ARTICLE_COUNT_CACHE[k][0])
+            _PUBLIC_ARTICLE_COUNT_CACHE.pop(oldest, None)
+        _PUBLIC_ARTICLE_COUNT_CACHE[key] = (now, max(0, int(total)))
+
+
 def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_from, effective_date_to, page, page_size):
     where = ["a.is_excluded = false"]
     vals: list = []
@@ -762,24 +800,21 @@ def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_
         where.append("""(
             a.title ILIKE ? OR a.summary ILIKE ? OR a.content_text ILIKE ?
             OR coalesce(a.author, '') ILIKE ? OR s.name ILIKE ?
-            OR EXISTS (SELECT 1 FROM article_topics search_at
-                       JOIN topics search_t ON search_t.topic_id=search_at.topic_id
-                       WHERE search_at.article_id=a.article_id AND search_t.status='active'
-                         AND (search_t.name ILIKE ? OR search_t.description ILIKE ?
-                              OR array_to_string(search_t.keywords, ' ') ILIKE ?))
-            OR EXISTS (SELECT 1 FROM article_entities search_ae
-                       JOIN entities search_e ON search_e.entity_id=search_ae.entity_id
-                       WHERE search_ae.article_id=a.article_id AND search_e.status='active'
-                         AND (search_e.canonical_name ILIKE ? OR search_ae.mention_text ILIKE ?
+            OR EXISTS (SELECT 1 FROM article_topics search_topic_link
+                       JOIN topics search_topic ON search_topic.topic_id=search_topic_link.topic_id
+                       WHERE search_topic_link.article_id=a.article_id AND search_topic.status='active'
+                         AND (search_topic.name ILIKE ? OR search_topic.description ILIKE ?
+                              OR array_to_string(search_topic.keywords, ' ') ILIKE ?))
+            OR EXISTS (SELECT 1 FROM article_entities search_article_entity
+                       JOIN entities search_entity ON search_entity.entity_id=search_article_entity.entity_id
+                       WHERE search_article_entity.article_id=a.article_id AND search_entity.status='active'
+                         AND (search_entity.canonical_name ILIKE ? OR search_article_entity.mention_text ILIKE ?
                               OR EXISTS (SELECT 1 FROM entity_aliases search_alias
-                                         WHERE search_alias.entity_id=search_e.entity_id
+                                         WHERE search_alias.entity_id=search_entity.entity_id
                                            AND search_alias.alias ILIKE ?)))
         )""")
         vals.extend([term] * 11)
     if effective_date_from is not None and effective_date_to is not None:
-        # Convert the inclusive Vietnam-local date range to UTC bounds in Python. This
-        # preserves PostgreSQL behavior while allowing DuckDB predicate pushdown without
-        # depending on the optional ICU extension for timezone(name, timestamptz).
         local_tz = ZoneInfo(settings.timezone)
         utc_start = datetime.combine(effective_date_from, dt_time.min, tzinfo=local_tz).astimezone(dt_timezone.utc)
         utc_end = datetime.combine(effective_date_to + timedelta(days=1), dt_time.min, tzinfo=local_tz).astimezone(dt_timezone.utc)
@@ -788,44 +823,72 @@ def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_
         vals.extend([utc_start, utc_end])
     where_sql = ' WHERE ' + ' AND '.join(where)
     from_sql = ' FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id'
-    # The first page is the default and the most common request during initial rendering.
-    # Return count and rows in one Iceberg scan by using a window count, avoiding a separate
-    # full-table COUNT query followed by the page query. Keep the two-query path for later
-    # pages so existing out-of-range page clamping remains unchanged.
-    include_window_count = page == 1
-    total = None
-    if not include_window_count:
-        total_rows = _lakehouse_query_or_503('SELECT count(*)::BIGINT AS total' + from_sql + where_sql, vals)
-        total = int((total_rows[0] if total_rows else {}).get('total', 0))
+    cache_key = _public_article_count_cache_key(query, chosen_field, effective_date_from, effective_date_to)
+    total = _public_article_count_cache_get(cache_key)
+    include_window_count = total is None
+    if total is not None:
         total_pages = max(1, (total + page_size - 1) // page_size)
         page = min(page, total_pages)
-    window_count_select = 'count(*) OVER()::BIGINT AS _total_count, ' if include_window_count else ''
-    select_sql = f"""SELECT {window_count_select}a.article_id,a.title,a.url,a.image_url,a.author,a.language,
-        left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
-        a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
-        s.name AS source_name,coalesce(a.field_category,'Chưa phân loại') AS field_category,
-        coalesce((SELECT to_json(list(t.name ORDER BY t.name)) FROM article_topics topic_link
-                  JOIN topics t ON t.topic_id=topic_link.topic_id
-                  WHERE topic_link.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topics,
-        coalesce((SELECT to_json(list(struct_pack(id := t.topic_id, name := t.name) ORDER BY t.name))
-                  FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
-                  WHERE topic_link.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topic_refs,
-        coalesce((SELECT to_json(list(struct_pack(id := e.entity_id, name := e.canonical_name, type := e.entity_type)
-                                      ORDER BY e.canonical_name))
-                  FROM (SELECT DISTINCT e.entity_id,e.canonical_name,e.entity_type
-                        FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
-                        WHERE ae.article_id=a.article_id AND e.status='active') e),'[]') AS entity_refs
-    """ + from_sql + where_sql + ' ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT ? OFFSET ?'
-    items = _lakehouse_query_or_503(select_sql, vals + [page_size, (page - 1) * page_size])
+
+    def fetch_page(page_number: int, include_total: bool):
+        count_projection = 'count(*) OVER()::BIGINT AS _total_count, ' if include_total else ''
+        # Limit the main article set before looking up topic/entity labels. On page 2+, this
+        # avoids running the correlated relationship subqueries over every matching article.
+        # CTE's LIMIT/OFFSET produces only the requested page; tag expansion happens outside it.
+        page_cte = f"""WITH page_rows AS MATERIALIZED (
+            SELECT {count_projection}a.article_id,a.title,a.url,a.image_url,a.author,a.language,
+                left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+                a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
+                s.name AS source_name,coalesce(a.field_category,'Chưa phân loại') AS field_category
+            {from_sql}{where_sql}
+            ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC
+            LIMIT ? OFFSET ?
+        )
+        SELECT a.*,
+            coalesce((SELECT to_json(list(t.name ORDER BY t.name))
+                      FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
+                      WHERE topic_link.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topics,
+            coalesce((SELECT to_json(list(struct_pack(id := t.topic_id, name := t.name) ORDER BY t.name))
+                      FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
+                      WHERE topic_link.article_id=a.article_id AND t.status='active' AND t.topic_type='event'),'[]') AS topic_refs,
+            coalesce((SELECT to_json(list(struct_pack(id := e.entity_id, name := e.canonical_name, type := e.entity_type)
+                                          ORDER BY e.canonical_name))
+                      FROM (SELECT DISTINCT e.entity_id,e.canonical_name,e.entity_type
+                            FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                            WHERE ae.article_id=a.article_id AND e.status='active') e),'[]') AS entity_refs
+        FROM page_rows a
+        ORDER BY a.timeline_at DESC, a.article_id DESC"""
+        return _lakehouse_query_or_503(page_cte, vals + [page_size, (page_number - 1) * page_size])
+
+    items = fetch_page(page, include_window_count)
     if include_window_count:
-        total = int(items[0].pop('_total_count', 0)) if items else 0
+        if items:
+            total = int(items[0].pop('_total_count', 0) or 0)
+            for item in items:
+                item.pop('_total_count', None)
+            _public_article_count_cache_put(cache_key, total)
+        elif page == 1:
+            total = 0
+            _public_article_count_cache_put(cache_key, total)
+        else:
+            # A direct link to a later page can miss the page-one total cache. If that page
+            # is out of range, count once, clamp the page, and re-run only when necessary.
+            total_rows = _lakehouse_query_or_503('SELECT count(*)::BIGINT AS total' + from_sql + where_sql, vals)
+            total = int((total_rows[0] if total_rows else {}).get('total', 0) or 0)
+            _public_article_count_cache_put(cache_key, total)
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            clamped_page = min(page, total_pages)
+            if clamped_page != page:
+                page = clamped_page
+                items = fetch_page(page, False)
+
     _decode_lakehouse_json_fields(items, ['topics','topic_refs','entity_refs'])
     return {'date': today,
             'date_from': effective_date_from.isoformat() if effective_date_from else None,
             'date_to': effective_date_to.isoformat() if effective_date_to else None,
             'query': query or None, 'field_category': chosen_field or None,
             'field_categories': [*FIELD_CATEGORIES, 'Chưa phân loại'], 'items': items,
-            'pagination': pagination_meta(page, page_size, total)}
+            'pagination': pagination_meta(page, page_size, int(total or 0))}
 
 
 def _lakehouse_relationship_counts():
