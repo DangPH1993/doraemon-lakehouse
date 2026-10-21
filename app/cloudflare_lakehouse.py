@@ -1,8 +1,8 @@
 """Cloudflare Basin Catalog / Apache Iceberg adapter for Doraemon Lakehouse.
 
-PostgreSQL remains the operational write path for ingestion/reconciliation and user
-state. Changes to the selected analytical tables are captured in a transactional outbox
-and appended to Iceberg event tables. Current-state views are reconstructed from the latest
+The compatibility mode mirrors PostgreSQL changes through an outbox. In direct-write mode,
+news/article/topic/entity/relationship/FACT records are appended straight to Iceberg; PostgreSQL
+contains only operational metadata such as source configuration, users, run status and CDC state. Current-state views are reconstructed from the latest
 record version, so old Article/Topic/Entity/FACT rows remain queryable after hot data is
 purged from PostgreSQL.
 
@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import time
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -66,6 +67,16 @@ def lakehouse_enabled() -> bool:
 
 def lakehouse_reads_enabled() -> bool:
     return lakehouse_enabled() and _flag("CLOUDFLARE_LAKEHOUSE_READS")
+
+
+def direct_writes_requested() -> bool:
+    """Return the explicit cutover intent even if a required companion flag is missing."""
+    return _flag("CLOUDFLARE_LAKEHOUSE_DIRECT_WRITES")
+
+
+def direct_writes_enabled() -> bool:
+    """Enable the R2/Iceberg-first ingestion path only when the master flag is also on."""
+    return lakehouse_enabled() and direct_writes_requested()
 
 
 def read_configured() -> bool:
@@ -697,11 +708,33 @@ def sync_pending(limit: int = 10000) -> dict:
     """
     if not configured() or not lakehouse_enabled():
         raise LakehouseNotReady("Enable/configure Cloudflare Lakehouse before syncing")
+    if direct_writes_enabled():
+        # In direct mode, article/catalog/FACT rows are authoritative in Iceberg. Do not
+        # mirror stale PostgreSQL compatibility tables back over the direct dataset.
+        # Only operational data_sources changes are allowed to flow through the outbox.
+        direct_owned = {"news_articles", "topics", "entities", "topic_aliases", "entity_aliases",
+                        "article_topics", "article_entities", "fact_news_article", "fact_topic_daily",
+                        "fact_topic_trending", "fact_entity_daily", "fact_source_daily",
+                        "catalog_reconciliation_merges"}
+    else:
+        direct_owned = set()
     limit = max(1, min(int(limit), 50000))
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT table_name,bootstrap_status FROM lakehouse_table_registry")
         registry = {row["table_name"]: row["bootstrap_status"] for row in cur.fetchall()}
-        pending_tables = [t for t, status in registry.items() if status == "complete"]
+        if direct_owned:
+            # Any clean-data mutations accidentally emitted by a legacy PG-only admin/reconcile
+            # path must not overwrite Iceberg's authoritative direct-write dataset.
+            # Drop legacy clean-row payloads from the PostgreSQL outbox after cutover. These
+            # historical duplicates must not consume PG storage or be replayed over the direct
+            # Iceberg dataset. Keep only event metadata/keys for auditability; business clean
+            # tables themselves are left untouched until a separately approved cleanup.
+            cur.execute("""UPDATE lakehouse_outbox SET processed_at=coalesce(processed_at,now()),
+                           processing_error='ignored: Iceberg direct-write mode is authoritative',
+                           row_data='{}'::jsonb
+                           WHERE table_name=ANY(%s::text[])
+                             AND (processed_at IS NULL OR row_data <> '{}'::jsonb)""", (sorted(direct_owned),))
+        pending_tables = [t for t, status in registry.items() if status == "complete" and t not in direct_owned]
         if not pending_tables:
             raise LakehouseNotReady("No completed bootstrap tables; run bootstrap first")
         cur.execute("""SELECT outbox_id,table_name,operation,record_key,row_data,event_at
@@ -1010,6 +1043,100 @@ def scalar(sql: str, params: tuple | list = (), default=None):
     if not rows:
         return default
     return next(iter(rows[0].values()), default)
+
+
+def direct_query(sql: str, params: tuple | list = ()) -> list[dict]:
+    """Query current Iceberg state from the writer runtime, without relying on the API read flag.
+
+    This is for GitHub Actions ingestion/admin jobs that hold the Lakehouse writer token.
+    Render public reads should continue to use ``query`` and the dedicated read-only token.
+    """
+    if not configured() or not lakehouse_enabled():
+        raise LakehouseNotReady("Direct Iceberg access requires CLOUDFLARE_LAKEHOUSE_ENABLED and writer credentials")
+    with catalog_connection(read_only=False) as con:
+        requested = _tables_referenced_by_sql(sql)
+        create_current_views(con, requested)
+        cursor = con.execute(sql, list(params))
+        columns = [d[0] for d in cursor.description or []]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def direct_upsert_records(table_name: str, rows: list[dict], *, batch_size: int = 250) -> int:
+    """Write current-state records directly to Iceberg event tables, without storing rows in PG.
+
+    The PostgreSQL outbox sequence is used solely as a globally monotonic event-ID allocator;
+    no clean record or outbox payload is written to PostgreSQL. Sharing its sequence means any
+    later operational CDC event will sort after these direct writes, while event IDs remain unique.
+    """
+    if not rows:
+        return 0
+    if table_name not in TABLE_KEYS:
+        raise ValueError(f"Unsupported Lakehouse table: {table_name}")
+    if not configured() or not lakehouse_enabled():
+        raise LakehouseNotReady("Direct Iceberg writes require CLOUDFLARE_LAKEHOUSE_ENABLED and writer credentials")
+    with get_conn() as pg, pg.cursor() as cur:
+        cur.execute("SELECT bootstrap_status FROM lakehouse_table_registry WHERE table_name=%s", (table_name,))
+        registry = cur.fetchone()
+        if not registry or registry["bootstrap_status"] != "complete":
+            raise LakehouseNotReady(f"Iceberg table {table_name} is not bootstrapped; run forward-only bootstrap first")
+        cur.execute("SELECT nextval('lakehouse_outbox_outbox_id_seq'::regclass) AS event_id FROM generate_series(1,%s)", (len(rows),))
+        event_ids = [int(item["event_id"]) for item in cur.fetchall()]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    event_rows = []
+    for event_id, row in zip(event_ids, rows):
+        if not isinstance(row, dict):
+            raise TypeError(f"Direct Lakehouse row for {table_name} must be a dict")
+        event_rows.append((event_id, _record_key(table_name, row, TABLE_KEYS[table_name]),
+                           "UPSERT", _row_json(row), now_iso))
+    target = _event_table(table_name)
+    with catalog_connection(read_only=False) as con:
+        _ensure_event_table(con, table_name)
+        width = max(1, min(int(batch_size), 250))
+        for offset in range(0, len(event_rows), width):
+            batch = event_rows[offset:offset + width]
+            # Catalog gateways can return transient 502/503/504 errors during metadata
+            # commits. Retry the exact same stable event IDs; duplicate retries are
+            # idempotent at the current-state view because they carry identical row data.
+            attempt = 0
+            while True:
+                try:
+                    con.execute("BEGIN TRANSACTION")
+                    _insert_event_rows_bulk(con, target, batch, statement_batch_size=width)
+                    con.execute("COMMIT")
+                    break
+                except Exception as exc:
+                    _rollback_if_active(con)
+                    message = str(exc).lower()
+                    transient = any(token in message for token in (
+                        "502", "503", "504", "bad gateway", "gateway timeout",
+                        "temporarily unavailable", "connection reset", "timed out", "timeout"
+                    ))
+                    if not transient or attempt >= 3:
+                        raise
+                    delay = min(2 ** attempt, 8)
+                    log.warning("Transient Iceberg write failure table=%s batch_start=%s attempt=%s; retrying in %ss: %s",
+                                table_name, offset, attempt + 1, delay, str(exc)[:220])
+                    time.sleep(delay)
+                    attempt += 1
+    return len(rows)
+
+
+def direct_delete_records(table_name: str, key_rows: list[dict]) -> int:
+    """Append tombstones directly to Iceberg. This never deletes PostgreSQL source rows."""
+    if not key_rows:
+        return 0
+    if table_name not in TABLE_KEYS:
+        raise ValueError(f"Unsupported Lakehouse table: {table_name}")
+    with get_conn() as pg, pg.cursor() as cur:
+        cur.execute("SELECT nextval('lakehouse_outbox_outbox_id_seq'::regclass) AS event_id FROM generate_series(1,%s)", (len(key_rows),))
+        event_ids = [int(item["event_id"]) for item in cur.fetchall()]
+    target = _event_table(table_name)
+    events = [(event_id, _record_key(table_name, row, TABLE_KEYS[table_name]), "DELETE", "{}",
+               datetime.now(timezone.utc).isoformat()) for event_id, row in zip(event_ids, key_rows)]
+    with catalog_connection(read_only=False) as con:
+        _ensure_event_table(con, table_name)
+        _insert_event_rows_bulk(con, target, events)
+    return len(events)
 
 
 def _set_state(key: str, value: dict) -> None:

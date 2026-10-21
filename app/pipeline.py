@@ -1032,6 +1032,16 @@ def purge_raw_feed_items_after_fact_refresh() -> int:
 
 
 def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = None) -> dict:
+    # Once the Cloudflare direct-write cutover is enabled, never fall back silently to
+    # storing clean article/topic/entity/FACT rows in PostgreSQL.
+    if cf_lakehouse.direct_writes_enabled():
+        from .direct_pipeline import _run_direct_pipeline_impl
+        return _run_direct_pipeline_impl(trigger_type, source_ids)
+    if cf_lakehouse.direct_writes_requested() or cf_lakehouse.lakehouse_reads_enabled():
+        raise RuntimeError(
+            "CLOUDFLARE_LAKEHOUSE_READS=true but CLOUDFLARE_LAKEHOUSE_DIRECT_WRITES is disabled. "
+            "Refusing to write clean news data back into PostgreSQL; enable direct writes in GitHub Actions."
+        )
     started = datetime.now(timezone.utc)
     run_clock = time.monotonic()
     with get_conn() as conn, conn.cursor() as cur:

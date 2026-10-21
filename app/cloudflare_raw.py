@@ -1,9 +1,9 @@
 """Temporary RSS raw-payload storage in Cloudflare R2.
 
-Raw RSS entries are uploaded to an ordinary S3-compatible R2 bucket before their clean
-rows are committed. The PostgreSQL raw_feed_items row stores only a small object-key
-reference. After clean rows and their base FACT rows have been persisted successfully,
-the pipeline deletes the R2 object and then removes the PostgreSQL reference row.
+Raw RSS entries are uploaded to a dedicated S3-compatible R2 bucket before their clean
+rows are committed directly to Iceberg. In direct-write mode the raw payload and its key
+are never stored in PostgreSQL. The pipeline deletes the object only after verifying that
+the clean article and its base FACT are visible in Iceberg.
 
 This deliberately uses R2 S3 credentials, which are distinct from the Basin Catalog API
 Token used by the Iceberg adapter.
@@ -78,8 +78,8 @@ def object_key(source_id: int, entry_key: str) -> str:
 def store_raw_entry(source_id: int, entry_key: str, item_url: str, payload: dict[str, Any]) -> str:
     """Write the raw RSS entry to R2 and return its durable object key.
 
-    Upload happens before the clean PostgreSQL row is inserted. If later processing fails,
-    the raw object is deliberately kept for recovery and is overwritten on a retry.
+    Upload happens before any clean Iceberg writes. If later processing fails, the raw
+    object is deliberately kept for recovery and is overwritten on a retry.
     """
     key = object_key(source_id, entry_key)
     document = {
@@ -133,3 +133,52 @@ def referenced_object_key(payload: Any) -> str | None:
         return None
     key = payload.get("_r2_object_key")
     return str(key) if isinstance(key, str) and key else None
+
+
+def list_raw_entries(limit: int = 100, source_id: int | None = None, query: str | None = None,
+                     source_names: dict[int, str] | None = None) -> list[dict[str, Any]]:
+    """List the bounded set of transient RSS objects for the existing admin Raw view.
+
+    Raw data is never copied to PostgreSQL in direct mode. This adapter
+    reads only a bounded number of small staged objects from R2 and returns the display
+    fields expected by the admin table.
+    """
+    if not raw_storage_enabled():
+        return []
+    limit = max(1, min(int(limit), 500))
+    query_norm = str(query or "").casefold().strip()
+    names = {int(k): str(v) for k, v in (source_names or {}).items()}
+    client = _s3_client()
+    response = client.list_objects_v2(Bucket=_bucket(), Prefix="rss-raw/", MaxKeys=min(1000, max(100, limit * 2)))
+    rows: list[dict[str, Any]] = []
+    for item in sorted(response.get("Contents") or [], key=lambda x: x.get("LastModified") or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+        key = str(item.get("Key") or "")
+        if not key.endswith(".json") or not key.startswith("rss-raw/"):
+            continue
+        try:
+            response_obj = client.get_object(Bucket=_bucket(), Key=key)
+            document = json.loads(response_obj["Body"].read().decode("utf-8"))
+        except Exception:
+            # A partially uploaded/deleted item should not make the whole admin list fail.
+            continue
+        try:
+            sid = int(document.get("source_id"))
+        except (TypeError, ValueError):
+            continue
+        if source_id is not None and sid != int(source_id):
+            continue
+        payload = document.get("payload") if isinstance(document.get("payload"), dict) else {}
+        title = str(payload.get("title") or "")
+        summary = str(payload.get("summary") or payload.get("description") or "")
+        url = str(document.get("item_url") or payload.get("link") or "")
+        if query_norm and query_norm not in f"{title} {summary} {url}".casefold():
+            continue
+        raw_id = int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:8], "big") & 0x7FFFFFFFFFFFFFFF
+        published = str(payload.get("published") or payload.get("updated") or payload.get("pubDate") or "")
+        captured = document.get("captured_at") or item.get("LastModified")
+        rows.append({"raw_id": raw_id or 1, "entry_key": document.get("entry_key") or key,
+                     "item_url": url, "fetched_at": captured, "source_name": names.get(sid, f"Source {sid}"),
+                     "raw_title": title, "raw_published": published, "raw_summary": summary})
+        if len(rows) >= limit:
+            break
+    return rows
