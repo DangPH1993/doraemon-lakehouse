@@ -5,6 +5,7 @@ requests>=2.32,<3.0
 feedparser>=6.0,<7.0
 beautifulsoup4>=4.12,<5.0
 python-dateutil>=2.9,<3.0
+pytz>=2024.1,<2027.0
 scikit-learn>=1.5,<2.0
 numpy>=1.26,<3.0
 python-dotenv>=1.0,<2.0
