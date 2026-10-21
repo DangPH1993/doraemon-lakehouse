@@ -20,7 +20,7 @@ on:
         default: sync
         required: true
       bootstrap_mode:
-        description: "Bootstrap baseline: forward-only skips all historical article/relationship/FACT rows"
+        description: "Bootstrap baseline: forward-only imports zero existing rows; starts syncing new changes from cutover"
         type: choice
         options:
           - forward-only
@@ -87,8 +87,22 @@ jobs:
         run: |
           case "$OPERATION" in
             bootstrap)
-              echo "Bootstrap mode=$BOOTSTRAP_MODE. Keep ingestion/reconciliation workflows paused while the baseline watermark is captured."
-              python -m app.lakehouse_migration bootstrap --mode "$BOOTSTRAP_MODE"
+              echo "Bootstrap mode=$BOOTSTRAP_MODE. Forward-only imports no existing source rows. Keep ingestion/reconciliation paused while the CDC watermark is captured."
+              attempt=1
+              while true; do
+                if python -m app.lakehouse_migration bootstrap --mode "$BOOTSTRAP_MODE"; then
+                  break
+                else
+                  rc=$?
+                  if [ "$attempt" -ge 3 ]; then
+                    echo "Bootstrap failed after $attempt attempts; inspect the original error above."
+                    exit "$rc"
+                  fi
+                  echo "Bootstrap attempt $attempt failed; retrying from the validated checkpoint in $((attempt * 15)) seconds."
+                  sleep $((attempt * 15))
+                  attempt=$((attempt + 1))
+                fi
+              done
               ;;
             sync)
               python -m app.lakehouse_migration sync --limit 50000
