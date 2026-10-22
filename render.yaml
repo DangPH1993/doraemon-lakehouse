@@ -9,6 +9,8 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+      - key: DATABASE_URL_UNPOOLED
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL
@@ -27,40 +29,3 @@ services:
         generateValue: true
       - key: CORS_ORIGINS
         value: http://localhost:8000
-
-      - key: CLOUDFLARE_LAKEHOUSE_ENABLED
-        value: "false"
-      - key: CLOUDFLARE_LAKEHOUSE_READS
-        value: "false"
-      - key: CLOUDFLARE_LAKEHOUSE_READ_POOL_SIZE
-        value: "3"
-      - key: CLOUDFLARE_LAKEHOUSE_READ_SNAPSHOT_TTL_SECONDS
-        value: "300"
-      - key: CLOUDFLARE_LAKEHOUSE_DIRECT_WRITES
-        value: "false"
-      - key: CLOUDFLARE_BASIN_SQL_READS
-        value: "false"
-      - key: CLOUDFLARE_BASIN_SQL_ACCOUNT_ID
-        sync: false
-      - key: CLOUDFLARE_BASIN_SQL_BUCKET
-        sync: false
-      - key: CLOUDFLARE_BASIN_SQL_READ_TOKEN
-        sync: false
-      - key: CLOUDFLARE_R2_WAREHOUSE
-        sync: false
-      - key: CLOUDFLARE_R2_CATALOG_URI
-        sync: false
-      - key: CLOUDFLARE_R2_READ_TOKEN
-        sync: false
-      - key: CLOUDFLARE_R2_TOKEN
-        sync: false
-      - key: CLOUDFLARE_R2_RAW_ENABLED
-        value: "false"
-      - key: CLOUDFLARE_R2_ACCOUNT_ID
-        sync: false
-      - key: CLOUDFLARE_R2_RAW_BUCKET
-        sync: false
-      - key: CLOUDFLARE_R2_S3_ACCESS_KEY_ID
-        sync: false
-      - key: CLOUDFLARE_R2_S3_SECRET_ACCESS_KEY
-        sync: false
