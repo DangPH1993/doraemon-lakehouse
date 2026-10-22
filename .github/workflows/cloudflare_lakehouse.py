@@ -17,11 +17,13 @@ import os
 import re
 import time
 import threading
+import hashlib
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+import requests
 from .db import get_conn
 
 log = logging.getLogger("mini-lakehouse.cloudflare")
@@ -52,13 +54,12 @@ _READ_REGISTRY_CACHE_LOCK = threading.RLock()
 
 def _read_pool_size() -> int:
     try:
-        # One warm session is usually faster for initial page render: several API calls
-        # share its materialized current-state snapshot instead of scanning each Iceberg
-        # event table independently on multiple cold connections. Increase to 2–3 for
-        # workloads with sustained concurrent readers.
-        return max(1, min(6, int(os.getenv("CLOUDFLARE_LAKEHOUSE_READ_POOL_SIZE", "1"))))
+        # Public page loads issue several independent requests concurrently. Keep enough
+        # readers to avoid one slow query blocking the entire page. Basin SQL can be used
+        # for the heavy article-list and hot-topic reads; this pool serves other endpoints.
+        return max(1, min(6, int(os.getenv("CLOUDFLARE_LAKEHOUSE_READ_POOL_SIZE", "3"))))
     except (TypeError, ValueError):
-        return 1
+        return 3
 
 
 def _read_snapshot_ttl_seconds() -> float:
@@ -254,6 +255,165 @@ def read_configured() -> bool:
     return all(os.getenv(k, "").strip() for k in (
         "CLOUDFLARE_R2_WAREHOUSE", "CLOUDFLARE_R2_CATALOG_URI", "CLOUDFLARE_R2_READ_TOKEN"
     ))
+
+
+def basin_sql_reads_enabled() -> bool:
+    """Whether public read paths should use Cloudflare's distributed Basin SQL engine.
+
+    This stays opt-in because the Basin SQL API token needs Basin SQL + Catalog + R2 read
+    permissions, and the API uses the R2 bucket name rather than the DuckDB warehouse URI.
+    """
+    return lakehouse_reads_enabled() and _flag("CLOUDFLARE_BASIN_SQL_READS") and all(
+        os.getenv(name, "").strip() for name in (
+            "CLOUDFLARE_BASIN_SQL_ACCOUNT_ID", "CLOUDFLARE_BASIN_SQL_BUCKET", "CLOUDFLARE_BASIN_SQL_READ_TOKEN"
+        )
+    )
+
+
+def _basin_sql_column_expr(column: dict) -> str:
+    """Project one JSON event field into a Basin SQL typed current-state column."""
+    name = str(column["column_name"])
+    quoted_name = '"' + name.replace('"', '""') + '"'
+    json_key = _sql_quote(name)
+    doc = "CAST(row_data AS JSON)"
+    data_type = str(column.get("data_type") or "").lower()
+    udt = str(column.get("udt_name") or "").lower()
+    raw_json = f"json_get_json({doc}, {json_key})"
+
+    def preserve_nulls(expression: str, sql_type: str) -> str:
+        # Basin's typed JSON helpers return 0/false/empty-string for absent or nonmatching
+        # values. That would turn nullable timestamps into CAST('' AS TIMESTAMP) failures
+        # and nullable numeric fields into misleading zeroes. Inspect the raw JSON value
+        # first so JSON null/missing stays SQL NULL while a real empty string stays empty.
+        return (f"CASE WHEN {raw_json} IS NULL OR CAST({raw_json} AS VARCHAR) = 'null' "
+                f"THEN CAST(NULL AS {sql_type}) ELSE {expression} END")
+
+    if data_type in {"json", "jsonb"} or udt in {"json", "jsonb"}:
+        expr = f"json_get_json({doc}, {json_key})"
+    elif data_type == "boolean":
+        expr = preserve_nulls(f"json_get_bool({doc}, {json_key})", "BOOLEAN")
+    elif data_type in {"smallint", "integer", "bigint"}:
+        expr = preserve_nulls(f"CAST(json_get_int({doc}, {json_key}) AS BIGINT)", "BIGINT")
+    elif data_type in {"numeric", "decimal", "real", "double precision"}:
+        expr = preserve_nulls(f"CAST(json_get_float({doc}, {json_key}) AS DOUBLE)", "DOUBLE")
+    elif data_type == "date":
+        expr = preserve_nulls(f"CAST(json_get_str({doc}, {json_key}) AS DATE)", "DATE")
+    elif data_type in {"timestamp with time zone", "timestamp without time zone"}:
+        expr = preserve_nulls(f"CAST(json_get_str({doc}, {json_key}) AS TIMESTAMP)", "TIMESTAMP")
+    elif data_type == "array":
+        # The Lakehouse's public keyword array is text[]; JSON arrays become SQL arrays.
+        expr = f"json_get_array({doc}, {json_key})"
+    else:
+        expr = preserve_nulls(f"json_get_str({doc}, {json_key})", "VARCHAR")
+    return f"{expr} AS {quoted_name}"
+
+
+def _basin_current_state_ctes(table_names: list[str]) -> str:
+    """Build read-only typed CTEs over the append-only Iceberg event tables."""
+    wanted = list(dict.fromkeys(table_names))
+    unknown = set(wanted) - set(TABLE_KEYS)
+    if unknown:
+        raise LakehouseNotReady(f"Unsupported Basin SQL view(s): {sorted(unknown)}")
+    registry_rows = _registry_rows_cached()
+    registry = {row["table_name"]: row for row in registry_rows}
+    missing = set(wanted) - set(registry)
+    if missing:
+        raise LakehouseNotReady(f"Iceberg table(s) not bootstrapped: {sorted(missing)}")
+    ctes = []
+    for table_name in wanted:
+        columns = registry[table_name]["columns_json"]
+        if isinstance(columns, str):
+            columns = json.loads(columns)
+        projections = ", ".join(_basin_sql_column_expr(column) for column in columns)
+        events = f"doraemon.{table_name}_events"
+        ctes.append(
+            f'"{table_name}" AS (SELECT {projections} FROM '
+            f'(SELECT record_key, operation, row_data, event_id, '
+            f'ROW_NUMBER() OVER (PARTITION BY record_key ORDER BY event_id DESC) AS __rn '
+            f"FROM {events}) ranked WHERE __rn = 1 AND operation <> 'DELETE')"
+        )
+    return ",\n".join(ctes)
+
+
+_BASIN_SQL_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_BASIN_SQL_CACHE_LOCK = threading.RLock()
+_BASIN_SQL_CACHE_TTL_SECONDS = 20.0
+_BASIN_SQL_CACHE_MAX_ENTRIES = 128
+
+
+def basin_sql_query_current(sql: str, table_names: list[str]) -> list[dict]:
+    """Run a read-only query in Cloudflare Basin SQL against typed current-state CTEs.
+
+    SQL input must be authored by this server from validated query parameters. The API does
+    not support prepared parameters, so public callers must quote literals with
+    ``basin_sql_literal`` rather than interpolate unchecked user input.
+    """
+    if not basin_sql_reads_enabled():
+        raise LakehouseNotReady("Basin SQL reads are disabled or not fully configured")
+    ctes = _basin_current_state_ctes(table_names)
+    body = sql.strip().rstrip(";")
+    if body[:5].upper() == "WITH ":
+        full_sql = "WITH " + ctes + ",\n" + body[5:]
+    else:
+        full_sql = "WITH " + ctes + "\n" + body
+    cache_key = hashlib.sha256(full_sql.encode("utf-8")).hexdigest()
+    now = time.monotonic()
+    with _BASIN_SQL_CACHE_LOCK:
+        cached = _BASIN_SQL_CACHE.get(cache_key)
+        if cached and now - cached[0] < _BASIN_SQL_CACHE_TTL_SECONDS:
+            return [dict(row) for row in cached[1]]
+        if cached:
+            _BASIN_SQL_CACHE.pop(cache_key, None)
+    account_id = os.getenv("CLOUDFLARE_BASIN_SQL_ACCOUNT_ID", "").strip()
+    bucket = os.getenv("CLOUDFLARE_BASIN_SQL_BUCKET", "").strip()
+    token = os.getenv("CLOUDFLARE_BASIN_SQL_READ_TOKEN", "").strip()
+    url = f"https://api.sql.cloudflarestorage.com/api/v1/accounts/{account_id}/basin-sql/query/{bucket}"
+    started = time.monotonic()
+    try:
+        response = requests.post(
+            url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"query": full_sql}, timeout=(5, 75),
+        )
+        if not response.ok:
+            detail = (response.text or "")[:500]
+            raise LakehouseNotReady(f"Basin SQL HTTP {response.status_code}: {detail}")
+        payload = response.json()
+        if payload.get("success") is False:
+            raise LakehouseNotReady(f"Basin SQL query failed: {str(payload.get('errors') or payload)[:500]}")
+        result = payload.get("result") or {}
+        rows = result.get("rows")
+        if not isinstance(rows, list):
+            raise LakehouseNotReady("Basin SQL returned an unexpected response format")
+        safe_rows = [dict(row) for row in rows if isinstance(row, dict)]
+        with _BASIN_SQL_CACHE_LOCK:
+            expired = [key for key, (inserted_at, _) in _BASIN_SQL_CACHE.items()
+                       if now - inserted_at >= _BASIN_SQL_CACHE_TTL_SECONDS]
+            for key in expired:
+                _BASIN_SQL_CACHE.pop(key, None)
+            if len(_BASIN_SQL_CACHE) >= _BASIN_SQL_CACHE_MAX_ENTRIES and cache_key not in _BASIN_SQL_CACHE:
+                oldest = min(_BASIN_SQL_CACHE, key=lambda key: _BASIN_SQL_CACHE[key][0])
+                _BASIN_SQL_CACHE.pop(oldest, None)
+            _BASIN_SQL_CACHE[cache_key] = (time.monotonic(), safe_rows)
+        duration_ms = int((time.monotonic() - started) * 1000)
+        if duration_ms >= 1000:
+            log.warning("Slow Basin SQL read: duration_ms=%s tables=%s rows=%s", duration_ms,
+                        ",".join(table_names), len(safe_rows))
+        return [dict(row) for row in safe_rows]
+    except requests.RequestException as exc:
+        raise LakehouseNotReady(f"Basin SQL request failed: {str(exc)[:300]}") from exc
+
+
+def basin_sql_literal(value: Any) -> str:
+    """Safely quote a scalar literal for Basin SQL's non-parameterized HTTP API."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float, Decimal)):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        value = value.isoformat()
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def configured() -> bool:

@@ -24,7 +24,7 @@ from . import cloudflare_lakehouse as cf_lakehouse
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.13',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.8.14',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -537,6 +537,31 @@ def dashboard():
 @app.get('/api/public/news/overview')
 def public_news_overview():
     """Public, read-only summary for the user-facing news portal."""
+    if cf_lakehouse.basin_sql_reads_enabled():
+        local_today = datetime.now(ZoneInfo(settings.timezone)).date()
+        local_tz = ZoneInfo(settings.timezone)
+        start_utc = datetime.combine(local_today, dt_time.min, tzinfo=local_tz).astimezone(dt_timezone.utc)
+        end_utc = datetime.combine(local_today + timedelta(days=1), dt_time.min, tzinfo=local_tz).astimezone(dt_timezone.utc)
+        start_lit = cf_lakehouse.basin_sql_literal(start_utc)
+        end_lit = cf_lakehouse.basin_sql_literal(end_utc)
+        try:
+            rows = cf_lakehouse.basin_sql_query_current(f"""WITH seed AS (SELECT 1 AS one FROM data_sources LIMIT 1)
+                SELECT
+                  (SELECT count(*) FROM news_articles a WHERE a.is_excluded=FALSE
+                    AND coalesce(a.published_at,a.collected_at)>=CAST({start_lit} AS TIMESTAMP)
+                    AND coalesce(a.published_at,a.collected_at)<CAST({end_lit} AS TIMESTAMP)) AS articles_today,
+                  (SELECT count(*) FROM data_sources WHERE enabled=TRUE) AS enabled_sources,
+                  (SELECT count(*) FROM topics WHERE status='active' AND topic_type='event') AS active_event_topics,
+                  (SELECT count(*) FROM fact_topic_trending f JOIN topics t ON t.topic_id=f.topic_id
+                    WHERE f.period_type='day' AND f.period_start=CAST({cf_lakehouse.basin_sql_literal(local_today)} AS DATE)
+                    AND t.status='active' AND t.topic_type='event') AS ranked_events_today
+                FROM seed""", ['news_articles', 'data_sources', 'topics', 'fact_topic_trending'])
+            row = rows[0] if rows else {}
+            return {key: int(row.get(key) or 0) for key in
+                    ('articles_today', 'enabled_sources', 'active_event_topics', 'ranked_events_today')}
+        except Exception as exc:
+            log.exception('Basin SQL public overview read failed')
+            raise HTTPException(status_code=503, detail='Basin SQL tạm thời không truy vấn được. Kiểm tra token và quyền Basin SQL/Catalog/R2.') from exc
     if cf_lakehouse.lakehouse_reads_enabled():
         local_today = datetime.now(ZoneInfo(settings.timezone)).date()
         local_tz = ZoneInfo(settings.timezone)
@@ -577,6 +602,37 @@ def public_hot_topics(
     limit: int = Query(default=10, ge=1, le=30),
 ):
     """Return current event-topic ranking for today, this week or this month."""
+    if cf_lakehouse.basin_sql_reads_enabled():
+        today = datetime.now(ZoneInfo(settings.timezone)).date()
+        if period == 'day': period_start, label = today, 'Hôm nay'
+        elif period == 'week': period_start, label = today - timedelta(days=today.weekday()), 'Tuần này'
+        else: period_start, label = date(today.year, today.month, 1), 'Tháng này'
+        try:
+            cap = max(100, min(600, limit * 20))
+            sql = f"""WITH latest_article AS (
+                SELECT topic_link.topic_id,anchor.article_id,
+                       row_number() OVER (PARTITION BY topic_link.topic_id
+                         ORDER BY coalesce(anchor.published_at,anchor.collected_at) DESC,anchor.article_id DESC) AS __rn
+                FROM article_topics topic_link JOIN news_articles anchor ON anchor.article_id=topic_link.article_id
+                WHERE anchor.is_excluded=FALSE
+            )
+            SELECT f.topic_id,t.slug,t.name AS topic_name,t.description,f.period_type,f.period_start,
+                   f.article_count,f.source_count,f.previous_article_count,f.growth_pct,f.hotness_score,
+                   f.rank_position,latest_article.article_id AS anchor_article_id
+            FROM fact_topic_trending f JOIN topics t ON t.topic_id=f.topic_id
+            LEFT JOIN latest_article ON latest_article.topic_id=t.topic_id AND latest_article.__rn=1
+            WHERE f.period_type={cf_lakehouse.basin_sql_literal(period)}
+              AND f.period_start=CAST({cf_lakehouse.basin_sql_literal(period_start)} AS DATE)
+              AND t.status='active' AND t.topic_type='event'
+            ORDER BY f.rank_position ASC,f.hotness_score DESC LIMIT {cap}"""
+            items = cf_lakehouse.basin_sql_query_current(
+                sql, ['fact_topic_trending', 'topics', 'article_topics', 'news_articles'])
+        except Exception as exc:
+            log.exception('Basin SQL hot-topic read failed')
+            raise HTTPException(status_code=503, detail='Basin SQL tạm thời không truy vấn được. Kiểm tra token và quyền Basin SQL/Catalog/R2.') from exc
+        items = [item for item in items if not is_broad_field_topic(item.get('topic_name'))][:limit]
+        return {'period': period, 'period_start': period_start, 'period_label': label,
+                'items': items, 'count': len(items)}
     if cf_lakehouse.lakehouse_reads_enabled():
         today = datetime.now(ZoneInfo(settings.timezone)).date()
         if period == 'day': period_start, label = today, 'Hôm nay'
@@ -785,6 +841,146 @@ def _public_article_count_cache_put(key, total):
             oldest = min(_PUBLIC_ARTICLE_COUNT_CACHE, key=lambda k: _PUBLIC_ARTICLE_COUNT_CACHE[k][0])
             _PUBLIC_ARTICLE_COUNT_CACHE.pop(oldest, None)
         _PUBLIC_ARTICLE_COUNT_CACHE[key] = (now, max(0, int(total)))
+
+
+
+def _public_daily_articles_basin_sql(today, query, chosen_field, effective_date_from, effective_date_to, page, page_size):
+    """Fast read path for the public article list using Cloudflare's distributed SQL engine."""
+    where = ["a.is_excluded = FALSE"]
+    if chosen_field == 'Chưa phân loại':
+        where.append('a.field_category IS NULL')
+    elif chosen_field:
+        where.append(f"a.field_category = {cf_lakehouse.basin_sql_literal(chosen_field)}")
+    if query:
+        term = cf_lakehouse.basin_sql_literal(f"%{query}%")
+        where.append(f"""(
+            a.title ILIKE {term} OR a.summary ILIKE {term} OR a.content_text ILIKE {term}
+            OR coalesce(a.author, '') ILIKE {term} OR s.name ILIKE {term}
+            OR EXISTS (SELECT 1 FROM article_topics search_topic_link
+                       JOIN topics search_topic ON search_topic.topic_id=search_topic_link.topic_id
+                       WHERE search_topic_link.article_id=a.article_id AND search_topic.status='active'
+                         AND (search_topic.name ILIKE {term} OR search_topic.description ILIKE {term}
+                              OR array_to_string(search_topic.keywords, ' ') ILIKE {term}))
+            OR EXISTS (SELECT 1 FROM article_entities search_article_entity
+                       JOIN entities search_entity ON search_entity.entity_id=search_article_entity.entity_id
+                       WHERE search_article_entity.article_id=a.article_id AND search_entity.status='active'
+                         AND (search_entity.canonical_name ILIKE {term} OR search_article_entity.mention_text ILIKE {term}
+                              OR EXISTS (SELECT 1 FROM entity_aliases search_alias
+                                         WHERE search_alias.entity_id=search_entity.entity_id
+                                           AND search_alias.alias ILIKE {term})))
+        )""")
+    if effective_date_from is not None and effective_date_to is not None:
+        local_tz = ZoneInfo(settings.timezone)
+        utc_start = datetime.combine(effective_date_from, dt_time.min, tzinfo=local_tz).astimezone(dt_timezone.utc)
+        utc_end = datetime.combine(effective_date_to + timedelta(days=1), dt_time.min, tzinfo=local_tz).astimezone(dt_timezone.utc)
+        start_lit = cf_lakehouse.basin_sql_literal(utc_start)
+        end_lit = cf_lakehouse.basin_sql_literal(utc_end)
+        where.append(f"coalesce(a.published_at,a.collected_at) >= CAST({start_lit} AS TIMESTAMP)")
+        where.append(f"coalesce(a.published_at,a.collected_at) < CAST({end_lit} AS TIMESTAMP)")
+    where_sql = ' WHERE ' + ' AND '.join(where)
+    cache_key = _public_article_count_cache_key(query, chosen_field, effective_date_from, effective_date_to)
+    total = _public_article_count_cache_get(cache_key)
+    table_names = ['news_articles', 'data_sources', 'article_topics', 'topics',
+                   'article_entities', 'entities', 'entity_aliases']
+
+    def fetch_page(page_number: int):
+        start_row = (page_number - 1) * page_size + 1
+        end_row = page_number * page_size
+        sql = f"""WITH ordered_articles AS (
+            SELECT a.article_id,a.title,a.url,a.image_url,a.author,a.language,
+                left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+                a.published_at,a.collected_at,coalesce(a.published_at,a.collected_at) AS timeline_at,
+                s.name AS source_name,coalesce(a.field_category,'Chưa phân loại') AS field_category,
+                count(*) OVER() AS _total_count,
+                row_number() OVER (ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC) AS __row_num
+            FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id
+            {where_sql}
+        )
+        SELECT article_id,title,url,image_url,author,language,snippet,published_at,collected_at,timeline_at,
+               source_name,field_category,_total_count,__row_num
+        FROM ordered_articles
+        WHERE __row_num BETWEEN {start_row} AND {end_row}
+        ORDER BY __row_num"""
+        return cf_lakehouse.basin_sql_query_current(sql, table_names)
+
+    try:
+        rows = fetch_page(page)
+        if rows:
+            total = int(rows[0].pop('_total_count', 0) or 0)
+            for row in rows:
+                row.pop('_total_count', None)
+                row.pop('__row_num', None)
+            _public_article_count_cache_put(cache_key, total)
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            clamped_page = min(page, total_pages)
+            if clamped_page != page:
+                page = clamped_page
+                rows = fetch_page(page)
+                for row in rows:
+                    row.pop('_total_count', None)
+                    row.pop('__row_num', None)
+        else:
+            if total is None:
+                count_rows = cf_lakehouse.basin_sql_query_current(
+                    'SELECT count(*) AS total FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id' + where_sql,
+                    table_names)
+                total = int((count_rows[0] if count_rows else {}).get('total', 0) or 0)
+                _public_article_count_cache_put(cache_key, total)
+            total_pages = max(1, (int(total or 0) + page_size - 1) // page_size)
+            clamped_page = min(page, total_pages)
+            if clamped_page != page:
+                page = clamped_page
+                if total:
+                    rows = fetch_page(page)
+                    for row in rows:
+                        row.pop('_total_count', None)
+                        row.pop('__row_num', None)
+        if not rows:
+            rows = []
+        article_ids = [int(row['article_id']) for row in rows if row.get('article_id') is not None]
+        if article_ids:
+            ids_sql = ','.join(str(ident) for ident in article_ids)
+            relation_sql = f"""SELECT topic_link.article_id,'topic' AS ref_kind,t.topic_id AS ref_id,
+                       t.name AS ref_name,CAST(NULL AS VARCHAR) AS entity_type
+                FROM article_topics topic_link JOIN topics t ON t.topic_id=topic_link.topic_id
+                WHERE topic_link.article_id IN ({ids_sql}) AND t.status='active' AND t.topic_type='event'
+                UNION ALL
+                SELECT ae.article_id,'entity' AS ref_kind,e.entity_id AS ref_id,
+                       e.canonical_name AS ref_name,e.entity_type AS entity_type
+                FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                WHERE ae.article_id IN ({ids_sql}) AND e.status='active'"""
+            refs = cf_lakehouse.basin_sql_query_current(
+                relation_sql, ['article_topics', 'topics', 'article_entities', 'entities'])
+            refs_by_article = {}
+            for ref in refs:
+                article_id = int(ref['article_id'])
+                group = refs_by_article.setdefault(article_id, {'topics': [], 'topic_refs': [], 'entity_refs': []})
+                if ref['ref_kind'] == 'topic':
+                    group['topics'].append(str(ref['ref_name']))
+                    group['topic_refs'].append({'id': int(ref['ref_id']), 'name': str(ref['ref_name'])})
+                else:
+                    group['entity_refs'].append({'id': int(ref['ref_id']), 'name': str(ref['ref_name']),
+                                                 'type': str(ref.get('entity_type') or 'UNKNOWN')})
+            for row in rows:
+                group = refs_by_article.get(int(row['article_id']), {})
+                row['topics'] = sorted(group.get('topics', []))
+                row['topic_refs'] = sorted(group.get('topic_refs', []), key=lambda item: item['name'])
+                row['entity_refs'] = sorted(group.get('entity_refs', []), key=lambda item: item['name'])
+        else:
+            for row in rows:
+                row.update({'topics': [], 'topic_refs': [], 'entity_refs': []})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception('Basin SQL public article-list read failed')
+        raise HTTPException(status_code=503, detail='Basin SQL tạm thời không truy vấn được. Kiểm tra token và quyền Basin SQL/Catalog/R2.') from exc
+
+    return {'date': today,
+            'date_from': effective_date_from.isoformat() if effective_date_from else None,
+            'date_to': effective_date_to.isoformat() if effective_date_to else None,
+            'query': query or None, 'field_category': chosen_field or None,
+            'field_categories': [*FIELD_CATEGORIES, 'Chưa phân loại'], 'items': rows,
+            'pagination': pagination_meta(page, page_size, int(total or 0))}
 
 
 def _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_from, effective_date_to, page, page_size):
@@ -1029,6 +1225,9 @@ def public_daily_articles(
     if effective_date_from is not None and effective_date_to is not None and effective_date_from > effective_date_to:
         raise HTTPException(status_code=400, detail='Ngày bắt đầu không được sau ngày kết thúc')
 
+    if cf_lakehouse.basin_sql_reads_enabled():
+        return _public_daily_articles_basin_sql(today, query, chosen_field, effective_date_from,
+                                                 effective_date_to, page, page_size)
     if cf_lakehouse.lakehouse_reads_enabled():
         return _public_daily_articles_lakehouse(today, query, chosen_field, effective_date_from,
                                                 effective_date_to, page, page_size)
