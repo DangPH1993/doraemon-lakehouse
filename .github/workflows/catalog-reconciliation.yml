@@ -29,13 +29,7 @@ jobs:
       - name: Validate discovered entities with GenAI, then reconcile equivalent topics/entities
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          CLOUDFLARE_LAKEHOUSE_ENABLED: ${{ vars.CLOUDFLARE_LAKEHOUSE_ENABLED }}
-          CLOUDFLARE_LAKEHOUSE_READS: ${{ vars.CLOUDFLARE_LAKEHOUSE_READS }}
-          CLOUDFLARE_LAKEHOUSE_DIRECT_WRITES: ${{ vars.CLOUDFLARE_LAKEHOUSE_DIRECT_WRITES }}
-          CLOUDFLARE_R2_TOKEN: ${{ secrets.CLOUDFLARE_R2_TOKEN }}
-          CLOUDFLARE_R2_WAREHOUSE: ${{ secrets.CLOUDFLARE_R2_WAREHOUSE }}
-          CLOUDFLARE_R2_CATALOG_URI: ${{ secrets.CLOUDFLARE_R2_CATALOG_URI }}
-          CLOUDFLARE_R2_READ_TOKEN: ${{ secrets.CLOUDFLARE_R2_READ_TOKEN }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-4.1-mini
           AI_REQUEST_TIMEOUT_SECONDS: "35"
@@ -50,5 +44,6 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
+          if [[ "$DATABASE_URL" == *"neon.tech"* && "$DATABASE_URL" == *"-pooler."* && -z "$DATABASE_URL_UNPOOLED" ]]; then echo "Missing GitHub secret DATABASE_URL_UNPOOLED (direct Neon URL required for advisory locks)"; exit 1; fi
           if [ -z "$OPENAI_API_KEY" ]; then echo "Missing GitHub secret OPENAI_API_KEY"; exit 1; fi
           python -m app.reconcile_catalog
