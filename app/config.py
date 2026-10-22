@@ -8,7 +8,9 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Settings:
+    # Use Neon pooled URL for ordinary query traffic; use direct URL for session-level advisory locks.
     database_url: str = os.getenv('DATABASE_URL', '')
+    database_url_unpooled: str = os.getenv('DATABASE_URL_UNPOOLED', '')
     admin_username: str = os.getenv('ADMIN_USERNAME', 'admin')
     admin_password: str = os.getenv('ADMIN_PASSWORD', '')
     session_secret: str = os.getenv('SESSION_SECRET', '')

@@ -1,7 +1,29 @@
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 import psycopg
 from psycopg.rows import dict_row
 from .config import settings
+
+
+def get_lock_database_url() -> str:
+    """Return a direct PostgreSQL URL for session-scoped advisory locks.
+
+    Neon pooled endpoints use transaction pooling and do not guarantee a stable server
+    session, so advisory locks must use DATABASE_URL_UNPOOLED. Existing non-Neon installs
+    can continue using DATABASE_URL when the separate value is not configured.
+    """
+    direct_url = (settings.database_url_unpooled or '').strip()
+    url = direct_url or (settings.database_url or '').strip()
+    if not url:
+        raise RuntimeError('DATABASE_URL is not configured')
+    hostname = (urlsplit(url).hostname or '').lower()
+    if hostname.endswith('.neon.tech') and '-pooler.' in hostname:
+        raise RuntimeError(
+            'Session advisory locks require a direct Neon URL. Set DATABASE_URL_UNPOOLED '
+            'to the Neon connection string without the -pooler suffix.'
+        )
+    return url
+
 
 @contextmanager
 def get_conn():
