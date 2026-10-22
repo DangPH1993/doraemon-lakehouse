@@ -29,11 +29,17 @@ def get_lock_database_url() -> str:
 def get_conn():
     if not settings.database_url:
         raise RuntimeError('DATABASE_URL is not configured')
+    # Neon pooled endpoints use PgBouncer, which rejects statement_timeout and
+    # other custom GUCs in libpq startup options. Apply limits with SET LOCAL
+    # inside the transaction instead, so they work with both pooled and direct URLs.
     conn = psycopg.connect(
         settings.database_url, row_factory=dict_row, connect_timeout=12,
-        options='-c statement_timeout=120000 -c lock_timeout=15000 -c idle_in_transaction_session_timeout=180000',
     )
     try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '120s'")
+            cur.execute("SET LOCAL lock_timeout = '15s'")
+            cur.execute("SET LOCAL idle_in_transaction_session_timeout = '180s'")
         yield conn
         conn.commit()
     except Exception:
