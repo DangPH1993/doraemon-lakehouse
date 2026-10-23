@@ -48,5 +48,11 @@ class Settings:
     smtp_password: str = os.getenv('SMTP_PASSWORD', '')
     smtp_from_email: str = os.getenv('SMTP_FROM_EMAIL', '').strip()
     smtp_starttls: bool = os.getenv('SMTP_STARTTLS', 'true').strip().lower() in {'1','true','yes','on'}
+    # Cloudflare R2 S3-compatible storage. Keep the bucket private; the API streams images.
+    cloudflare_r2_account_id: str = os.getenv('CLOUDFLARE_R2_ACCOUNT_ID', '').strip()
+    cloudflare_r2_access_key_id: str = os.getenv('CLOUDFLARE_R2_ACCESS_KEY_ID', '').strip()
+    cloudflare_r2_secret_access_key: str = os.getenv('CLOUDFLARE_R2_SECRET_ACCESS_KEY', '')
+    cloudflare_r2_bucket_name: str = os.getenv('CLOUDFLARE_R2_BUCKET_NAME', '').strip()
+    cloudflare_r2_key_prefix: str = os.getenv('CLOUDFLARE_R2_KEY_PREFIX', 'news-radar').strip('/')
 
 settings = Settings()

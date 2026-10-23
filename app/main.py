@@ -20,10 +20,13 @@ from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
 from .field_categories import FIELD_CATEGORIES, LEGACY_BROAD_TOPIC_LABELS, is_broad_field_topic
+from .r2_storage import (R2NotConfigured, delete_object as delete_r2_object, get_bytes as get_r2_bytes,
+                         is_configured as r2_is_configured, make_object_key as make_r2_key,
+                         put_bytes as put_r2_bytes)
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.25',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.26',description='News Radar with Pro subscriptions, Cloudflare R2 payment images, password recovery, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -244,19 +247,20 @@ def _valid_image_signature(content: bytes, content_type: str) -> bool:
 
 def _get_plan_config_row():
     try:
-        return fetch_one("""SELECT payment_qr_data, payment_qr_mime_type, payment_qr_filename, payment_qr_override,
-                                 pro_plan_description, pro_plan_price_label, updated_at
+        return fetch_one("""SELECT payment_qr_data, payment_qr_object_key, payment_qr_mime_type,
+                                 payment_qr_filename, payment_qr_override, pro_plan_description,
+                                 pro_plan_price_label, updated_at
                           FROM app_runtime_settings WHERE setting_key='pro_plan'""")
     except Exception:
-        # Preserve the legacy environment-based configuration if migration 019
-        # has not been applied yet. Admin save routes still clearly require it.
+        # Preserve the legacy environment-based configuration if migration 019/020
+        # has not been applied yet. Admin save routes still clearly require them.
         log.warning('Plan runtime settings unavailable; using environment defaults', exc_info=True)
         return None
 
 
 def _effective_plan_config(request: Request | None = None) -> dict:
     row = _get_plan_config_row() or {}
-    has_db_qr = bool(row.get('payment_qr_data'))
+    has_db_qr = bool(row.get('payment_qr_object_key') or row.get('payment_qr_data'))
     env_qr = (settings.payment_qr_image_url or '').strip() or None
     fallback_qr = None if bool(row.get('payment_qr_override')) else env_qr
     qr_url = None
@@ -266,8 +270,7 @@ def _effective_plan_config(request: Request | None = None) -> dict:
         configured_base = (settings.public_app_url or '').strip().rstrip('/')
         if not configured_base or 'YOUR-NEWS-RADAR-DOMAIN' in configured_base or not configured_base.startswith('https://'):
             configured_base = str(request.base_url).rstrip('/')
-        public_base = configured_base
-        qr_url = f"{public_base}/api/public/plan-config/qr?v={version_key}"
+        qr_url = f"{configured_base}/api/public/plan-config/qr?v={version_key}"
     elif fallback_qr:
         qr_url = fallback_qr
     return {
@@ -276,6 +279,7 @@ def _effective_plan_config(request: Request | None = None) -> dict:
         'qr_configured': has_db_qr or bool(fallback_qr),
         'payment_instructions': row.get('pro_plan_description') if row.get('pro_plan_description') is not None else settings.payment_instructions,
         'qr_data': row.get('payment_qr_data'),
+        'qr_object_key': row.get('payment_qr_object_key'),
         'qr_mime_type': row.get('payment_qr_mime_type'),
         'qr_filename': row.get('payment_qr_filename'),
         'updated_at': row.get('updated_at'),
@@ -285,8 +289,18 @@ def _effective_plan_config(request: Request | None = None) -> dict:
 @app.get('/api/public/plan-config/qr')
 def public_plan_qr():
     config = _get_plan_config_row() or {}
+    object_key = config.get('payment_qr_object_key')
     image_data = config.get('payment_qr_data')
     image_type = config.get('payment_qr_mime_type')
+    if object_key:
+        try:
+            image_data = get_r2_bytes(object_key)
+        except R2NotConfigured as exc:
+            log.error('R2 is not configured while serving Pro payment QR')
+            raise HTTPException(status_code=503, detail='Chưa cấu hình Cloudflare R2 để hiển thị mã QR.') from exc
+        except Exception as exc:
+            log.exception('Could not retrieve Pro payment QR from R2')
+            raise HTTPException(status_code=503, detail='Không tải được mã QR từ Cloudflare R2. Vui lòng thử lại sau.') from exc
     if image_data and image_type in ALLOWED_PAYMENT_MIME:
         return Response(content=bytes(image_data), media_type=image_type,
                         headers={'Cache-Control': 'public, max-age=300', 'X-Content-Type-Options': 'nosniff'})
@@ -312,19 +326,21 @@ def get_user_plan(request: Request, user: dict = Depends(require_user)):
 
 @app.get('/api/admin/plan-config', dependencies=[Depends(require_admin)])
 def get_admin_plan_config(request: Request):
-    row = fetch_one("""SELECT payment_qr_data, payment_qr_mime_type, payment_qr_filename, payment_qr_override,
-                             pro_plan_description, pro_plan_price_label, updated_at
+    row = fetch_one("""SELECT payment_qr_data, payment_qr_object_key, payment_qr_mime_type,
+                             payment_qr_filename, payment_qr_override, pro_plan_description,
+                             pro_plan_price_label, updated_at
                       FROM app_runtime_settings WHERE setting_key='pro_plan'""")
     config = _effective_plan_config(request)
+    has_saved_qr = bool((row or {}).get('payment_qr_object_key') or (row or {}).get('payment_qr_data'))
     return {
         'description': (row.get('pro_plan_description') if row and row.get('pro_plan_description') is not None else settings.payment_instructions),
         'price_label': ((row.get('pro_plan_price_label') or settings.pro_plan_price_label or '') if row else settings.pro_plan_price_label),
-        'qr_configured': bool((row or {}).get('payment_qr_data')) or (not bool((row or {}).get('payment_qr_override')) and bool(settings.payment_qr_image_url)),
+        'qr_configured': has_saved_qr or (not bool((row or {}).get('payment_qr_override')) and bool(settings.payment_qr_image_url)),
         'qr_mime_type': (row or {}).get('payment_qr_mime_type'),
         'qr_filename': (row or {}).get('payment_qr_filename'),
         'qr_image_url': config['qr_image_url'],
         'updated_at': (row or {}).get('updated_at'),
-        'qr_source': 'database' if (row or {}).get('payment_qr_data') else ('environment' if not bool((row or {}).get('payment_qr_override')) and settings.payment_qr_image_url else 'none'),
+        'qr_source': 'cloudflare-r2' if (row or {}).get('payment_qr_object_key') else ('legacy-database' if (row or {}).get('payment_qr_data') else ('environment' if not bool((row or {}).get('payment_qr_override')) and settings.payment_qr_image_url else 'none')),
     }
 
 
@@ -338,6 +354,8 @@ async def update_admin_plan_config(
     content = None
     content_type = None
     filename = None
+    uploaded_key = None
+    old_key = None
     if qr is not None and qr.filename:
         content_type = (qr.content_type or '').lower().split(';', 1)[0].strip()
         if content_type not in ALLOWED_PAYMENT_MIME:
@@ -351,33 +369,58 @@ async def update_admin_plan_config(
             raise HTTPException(status_code=415, detail='Nội dung file không khớp với định dạng ảnh.')
         filename = (qr.filename or 'pro-plan-qr').replace('\\', '/').split('/')[-1][:180]
     try:
+        # Upload first, before opening a DB transaction. The bucket stays private;
+        # users receive the QR through /api/public/plan-config/qr.
+        if content is not None and not clear_qr:
+            if not r2_is_configured():
+                raise HTTPException(status_code=503, detail='Cloudflare R2 chưa được cấu hình. Hãy thiết lập các biến CLOUDFLARE_R2_* trong Render Environment.')
+            extension = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp'}[content_type]
+            uploaded_key = make_r2_key('payment-qr', f"pro-plan-{secrets.token_hex(16)}{extension}")
+            put_r2_bytes(uploaded_key, content, content_type)
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""SELECT payment_qr_data, payment_qr_mime_type, payment_qr_filename, payment_qr_override
+            cur.execute("""SELECT payment_qr_data, payment_qr_object_key, payment_qr_mime_type,
+                                  payment_qr_filename, payment_qr_override
                               FROM app_runtime_settings WHERE setting_key='pro_plan' FOR UPDATE""")
             current = cur.fetchone()
             if not current:
-                raise HTTPException(status_code=503, detail='Chưa có cấu hình gói Pro. Hãy chạy migration 019_plan_runtime_settings.sql trong Neon SQL Editor.')
+                raise HTTPException(status_code=503, detail='Chưa có cấu hình gói Pro. Hãy chạy migration 019 và 020 trong Neon SQL Editor.')
             current_data = current.get('payment_qr_data')
+            current_key = current.get('payment_qr_object_key')
             current_type = current.get('payment_qr_mime_type')
             current_name = current.get('payment_qr_filename')
             current_override = bool(current.get('payment_qr_override'))
+            old_key = current_key
             if clear_qr:
-                current_data = current_type = current_name = None
+                current_data = current_key = current_type = current_name = None
                 current_override = True
             elif content is not None:
-                current_data, current_type, current_name = content, content_type, filename
+                current_data = None
+                current_key = uploaded_key
+                current_type, current_name = content_type, filename
                 current_override = True
             cur.execute("""UPDATE app_runtime_settings
-                              SET payment_qr_data=%s, payment_qr_mime_type=%s, payment_qr_filename=%s,
-                                  payment_qr_override=%s, pro_plan_description=%s, pro_plan_price_label=%s, updated_at=now()
+                              SET payment_qr_data=%s, payment_qr_object_key=%s,
+                                  payment_qr_mime_type=%s, payment_qr_filename=%s,
+                                  payment_qr_override=%s, pro_plan_description=%s,
+                                  pro_plan_price_label=%s, updated_at=now()
                               WHERE setting_key='pro_plan'""",
-                        (current_data, current_type, current_name, current_override, description.strip(), price_label.strip()))
+                        (current_data, current_key, current_type, current_name, current_override, description.strip(), price_label.strip()))
     except HTTPException:
+        if uploaded_key:
+            delete_r2_object(uploaded_key)
         raise
+    except R2NotConfigured as exc:
+        if uploaded_key:
+            delete_r2_object(uploaded_key)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
+        if uploaded_key:
+            delete_r2_object(uploaded_key)
         log.exception('Could not save Pro plan configuration')
-        raise HTTPException(status_code=503, detail='Không lưu được cấu hình. Hãy kiểm tra đã chạy migration 019_plan_runtime_settings.sql chưa.') from exc
-    return {'ok': True, 'message': 'Đã lưu cấu hình gói Pro.'}
+        raise HTTPException(status_code=503, detail='Không lưu được cấu hình. Hãy kiểm tra migration 019/020 và cấu hình Cloudflare R2.') from exc
+    if old_key and (clear_qr or (uploaded_key and old_key != uploaded_key)):
+        delete_r2_object(old_key)
+    return {'ok': True, 'message': 'Đã lưu cấu hình gói Pro. Ảnh QR được lưu trong Cloudflare R2.'}
 
 
 @app.post('/api/user/payment-requests')
@@ -390,6 +433,8 @@ async def submit_payment_request(
         raise HTTPException(status_code=409, detail='Tài khoản của bạn đang ở gói Pro.')
     if not _effective_plan_config().get('qr_configured'):
         raise HTTPException(status_code=503, detail='Admin chưa cấu hình mã QR thanh toán. Vui lòng quay lại sau.')
+    if not r2_is_configured():
+        raise HTTPException(status_code=503, detail='Cloudflare R2 chưa được cấu hình. Vui lòng liên hệ admin.')
     content_type = (proof.content_type or '').lower().split(';', 1)[0].strip()
     if content_type not in ALLOWED_PAYMENT_MIME:
         raise HTTPException(status_code=415, detail='Chỉ chấp nhận ảnh JPG, PNG hoặc WebP làm bằng chứng thanh toán.')
@@ -401,24 +446,27 @@ async def submit_payment_request(
     if not _valid_image_signature(content, content_type):
         raise HTTPException(status_code=415, detail='Nội dung file không khớp với định dạng ảnh được hỗ trợ.')
     filename = (proof.filename or 'payment-proof').replace('\\', '/').split('/')[-1][:180]
+    extension = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp'}[content_type]
+    object_key = make_r2_key('payment-proofs', f"{secrets.token_hex(16)}{extension}", scope=str(user['user_id']))
     try:
+        put_r2_bytes(object_key, content, content_type)
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT payment_request_id FROM payment_requests WHERE user_id=%s AND status='pending' FOR UPDATE", (user['user_id'],))
-            if cur.fetchone():
-                raise HTTPException(status_code=409, detail='Bạn đã gửi bằng chứng thanh toán và đang chờ admin xác nhận.')
+            # Do not block repeated notifications while a prior request is pending.
+            # The review queue keeps each request separately with its own evidence.
             cur.execute("""INSERT INTO payment_requests
-                (user_id, requested_plan, status, note, proof_filename, proof_mime_type, proof_data)
-                VALUES (%s, 'Pro', 'pending', %s, %s, %s, %s) RETURNING payment_request_id, status, created_at""",
-                (user['user_id'], note.strip(), filename, content_type, content))
+                (user_id, requested_plan, status, note, proof_filename, proof_mime_type, proof_data, proof_object_key)
+                VALUES (%s, 'Pro', 'pending', %s, %s, %s, NULL, %s)
+                RETURNING payment_request_id, status, created_at""",
+                (user['user_id'], note.strip(), filename, content_type, object_key))
             row = cur.fetchone()
     except HTTPException:
+        delete_r2_object(object_key)
         raise
     except Exception as exc:
-        if getattr(exc, 'sqlstate', None) == '23505':
-            raise HTTPException(status_code=409, detail='Bạn đã gửi bằng chứng thanh toán và đang chờ admin xác nhận.') from exc
+        delete_r2_object(object_key)
         log.exception('Could not save Pro payment request')
-        raise HTTPException(status_code=503, detail='Không thể lưu bằng chứng thanh toán. Kiểm tra migration SQL 018.') from exc
-    return {'ok': True, 'payment_request': row, 'message': 'Đã gửi bằng chứng thanh toán. Admin sẽ kiểm tra trước khi kích hoạt gói Pro.'}
+        raise HTTPException(status_code=503, detail='Không thể lưu yêu cầu thanh toán. Hãy kiểm tra migration SQL 020 và cấu hình Cloudflare R2.') from exc
+    return {'ok': True, 'payment_request': row, 'message': 'Đã thông báo admin và gửi ảnh bằng chứng. Bạn vẫn có thể gửi thông báo/bằng chứng bổ sung nếu cần; Pro chỉ được kích hoạt sau khi admin xác nhận.'}
 
 
 @app.post('/api/user-auth/forgot-password')
@@ -492,7 +540,7 @@ def admin_payment_requests(status: str = Query(default='pending', regex='^(pendi
     params = () if status == 'all' else (status,)
     return fetch_all(f"""SELECT pr.payment_request_id,pr.user_id,u.username,u.email,pr.requested_plan,pr.status,
                                 pr.note,pr.created_at,pr.reviewed_at,pr.admin_note,
-                                (pr.proof_data IS NOT NULL) AS has_proof
+                                (pr.proof_data IS NOT NULL OR pr.proof_object_key IS NOT NULL) AS has_proof
                          FROM payment_requests pr JOIN app_users u ON u.user_id=pr.user_id
                          {where}
                          ORDER BY CASE WHEN pr.status='pending' THEN 0 ELSE 1 END, pr.created_at DESC
@@ -501,12 +549,21 @@ def admin_payment_requests(status: str = Query(default='pending', regex='^(pendi
 
 @app.get('/api/admin/payment-requests/{payment_request_id}/proof', dependencies=[Depends(require_admin)])
 def admin_payment_proof(payment_request_id: int):
-    row = fetch_one("SELECT proof_data,proof_mime_type,proof_filename FROM payment_requests WHERE payment_request_id=%s", (payment_request_id,))
-    if not row or not row.get('proof_data'):
+    row = fetch_one("SELECT proof_data,proof_object_key,proof_mime_type,proof_filename FROM payment_requests WHERE payment_request_id=%s", (payment_request_id,))
+    if not row or (not row.get('proof_object_key') and not row.get('proof_data')):
         raise HTTPException(status_code=404, detail='Không tìm thấy ảnh bằng chứng thanh toán.')
+    image_data = row.get('proof_data')
+    if row.get('proof_object_key'):
+        try:
+            image_data = get_r2_bytes(row['proof_object_key'])
+        except R2NotConfigured as exc:
+            raise HTTPException(status_code=503, detail='Cloudflare R2 chưa được cấu hình trên Render.') from exc
+        except Exception as exc:
+            log.exception('Could not retrieve payment evidence from private R2 bucket')
+            raise HTTPException(status_code=503, detail='Không tải được ảnh bằng chứng từ Cloudflare R2.') from exc
     filename = re.sub(r'[^A-Za-z0-9_.-]', '_', row.get('proof_filename') or 'payment-proof')
-    return Response(content=bytes(row['proof_data']), media_type=row.get('proof_mime_type') or 'application/octet-stream',
-                    headers={'Content-Disposition': f'inline; filename="{filename}"', 'Cache-Control': 'no-store'})
+    return Response(content=bytes(image_data), media_type=row.get('proof_mime_type') or 'application/octet-stream',
+                    headers={'Content-Disposition': f'inline; filename="{filename}"', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
 
 
 @app.post('/api/admin/payment-requests/{payment_request_id}/review', dependencies=[Depends(require_admin)])
