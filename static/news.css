@@ -352,11 +352,11 @@ body{background:#fff;color:#202124;font-size:14px}
 @media(max-width:640px){.user-plan-panel{padding:12px}.plan-comparison{grid-template-columns:1fr}.plan-panel-heading h3{font-size:16px}}
 
 
-/* v0.7.25: account dropdown and consolidated account center */
+/* v0.7.25+: account dropdown and consolidated account center */
 .account-menu{position:relative;display:flex;align-items:center}
 .account-menu-toggle{border:0;background:transparent;display:inline-flex;align-items:center;gap:7px;padding:9px 5px;color:#46645f;font:inherit;font-size:11px;font-weight:800;cursor:pointer;max-width:210px}
 .account-menu-toggle:hover{color:#db713f}
-.account-menu-toggle span{color:#78868b;font-size:14px}
+.account-menu-toggle .account-greeting{color:inherit;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.account-menu-chevron{flex:0 0 auto;width:14px;height:14px;stroke:#718188;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;fill:none;transition:transform .18s ease,color .18s ease}.account-menu-toggle[aria-expanded="true"] .account-menu-chevron{transform:rotate(180deg);color:#db713f}.account-menu-toggle:focus-visible{outline:2px solid #92b8ff;outline-offset:3px;border-radius:8px}
 .account-menu-dropdown{position:absolute;right:0;top:calc(100% + 10px);z-index:30;min-width:190px;padding:6px;background:#fff;border:1px solid #e3e6e7;border-radius:12px;box-shadow:0 16px 42px rgba(16,43,63,.17);display:grid;gap:3px}
 .account-menu-dropdown button{border:0;background:transparent;border-radius:8px;padding:11px 12px;text-align:left;color:var(--navy);font:inherit;font-size:12px;font-weight:750;cursor:pointer}
 .account-menu-dropdown button:hover{background:#f1f5f3}

@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="app-version" content="0.7.25">
+  <meta name="app-version" content="0.7.26">
   <meta name="description" content="Tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>News Radar — Doraemon</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.25">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.26">
 </head>
 <body>
   <header class="site-header">
@@ -77,7 +77,7 @@
           <p id="userPlanSummary" class="plan-summary">Gói Free đang hoạt động.</p>
           <div class="plan-comparison"><div><strong>Free</strong><span>Xem Radar, tìm kiếm và mở timeline công khai.</span></div><div class="pro-plan-card"><strong>Pro</strong><span>Follow topic/entity, tạo feed cá nhân và nhận bản tin mới qua Telegram.</span><small id="proPlanPriceLabel"></small><button class="auth-button plan-select-button" id="selectProPlanButton" type="button">Chọn gói Pro</button></div></div>
           <div id="paymentRequestStatus" class="payment-request-status" role="status" aria-live="polite"></div>
-          <div id="paymentQrWrap" class="payment-qr-wrap" hidden><h4>Thanh toán nâng cấp Pro</h4><p id="paymentInstructions" class="section-subtitle"></p><img id="paymentQrImage" class="payment-qr-image" alt="Mã QR thanh toán gói Pro" loading="lazy"><p class="payment-secure-note">Sau khi thanh toán, tải ảnh chụp giao dịch bên dưới. Gói Pro chỉ được kích hoạt sau khi admin xác nhận.</p></div>
+          <div id="paymentQrWrap" class="payment-qr-wrap" hidden><h4>Thanh toán nâng cấp Pro</h4><p id="paymentInstructions" class="section-subtitle"></p><img id="paymentQrImage" class="payment-qr-image" alt="Mã QR thanh toán gói Pro" loading="lazy"><p class="payment-secure-note">Gói Pro của bạn sẽ được kích hoạt trong vòng 1h sau khi hoàn tất thanh toán. Vui lòng dùng chức năng <strong>Thông báo admin</strong> nếu có yêu cầu gấp! Sau khi thanh toán, hãy đính kèm ảnh chụp giao dịch bên dưới để admin xác nhận.</p></div>
           <form id="paymentProofForm" class="payment-proof-form" hidden>
             <label class="auth-field" for="paymentProofFile"><span>Ảnh bằng chứng thanh toán (JPG, PNG, WebP; tối đa 3 MB)</span><input id="paymentProofFile" name="proof" type="file" accept="image/jpeg,image/png,image/webp" required></label>
             <label class="auth-field" for="paymentProofNote"><span>Ghi chú giao dịch (không bắt buộc)</span><input id="paymentProofNote" name="note" maxlength="1000" placeholder="Ví dụ: thời gian giao dịch hoặc nội dung chuyển khoản"></label>
@@ -201,6 +201,6 @@
       <a href="/" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/news.js?v=0.7.25" defer></script>
+  <script src="/static/news.js?v=0.7.26" defer></script>
 </body>
 </html>

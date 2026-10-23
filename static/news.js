@@ -251,7 +251,7 @@
       $('#authArea').innerHTML = '<button class="auth-button auth-button-secondary" type="button" data-auth-open="login">Đăng nhập</button><button class="auth-button" type="button" data-auth-open="register">Đăng ký</button>';
       return;
     }
-    $('#authArea').innerHTML = `<div class="account-menu" id="accountMenu"><button class="auth-user-name account-menu-toggle" type="button" id="accountMenuToggle" aria-haspopup="true" aria-expanded="false">Xin chào, ${esc(state.user.username)} <span aria-hidden="true">⌄</span></button><div class="account-menu-dropdown" id="accountMenuDropdown" hidden><button type="button" id="openAccountButton">Thông tin tài khoản</button><button type="button" id="logoutButton">Đăng xuất</button></div></div>`;
+    $('#authArea').innerHTML = `<div class="account-menu" id="accountMenu"><button class="auth-user-name account-menu-toggle" type="button" id="accountMenuToggle" aria-haspopup="true" aria-expanded="false"><span class="account-greeting">Xin chào, ${esc(state.user.username)}</span><svg class="account-menu-chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4"/></svg></button><div class="account-menu-dropdown" id="accountMenuDropdown" hidden><button type="button" id="openAccountButton">Thông tin tài khoản</button><button type="button" id="logoutButton">Đăng xuất</button></div></div>`;
     $('#accountIdentityLine').textContent = `${state.user.username}${state.user.email ? ` · ${state.user.email}` : ''} · Quản lý gói dịch vụ và thông báo Telegram`;
   }
   // Reset tokens remain in the URL fragment, not in the request URL or referrer.
@@ -354,26 +354,26 @@
     const qrUrl = safeImageHref(data.qr_image_url);
     const request = data.payment_request;
     const waiting = Boolean(request && request.status === 'pending');
-    $('#selectProPlanButton').hidden = isPro || !qrUrl || waiting;
+    $('#selectProPlanButton').hidden = isPro || !qrUrl;
     $('#selectProPlanButton').textContent = state.proPurchaseSelected ? 'Đã chọn gói Pro' : 'Chọn gói Pro';
-    $('#paymentQrWrap').hidden = isPro || !qrUrl || waiting || !state.proPurchaseSelected;
+    $('#paymentQrWrap').hidden = isPro || !qrUrl || !state.proPurchaseSelected;
     $('#paymentQrImage').src = qrUrl || '';
     $('#paymentQrImage').hidden = !qrUrl;
     $('#paymentInstructions').textContent = data.payment_instructions || '';
-    $('#paymentProofForm').hidden = isPro || !qrUrl || waiting || !state.proPurchaseSelected;
+    $('#paymentProofForm').hidden = isPro || !qrUrl || !state.proPurchaseSelected;
     const status = $('#paymentRequestStatus');
     status.className = 'payment-request-status';
     if (isPro) {
       status.textContent = 'Gói Pro đã được kích hoạt cho tài khoản của bạn.'; status.classList.add('success');
     } else if (waiting) {
-      status.textContent = `Yêu cầu nâng cấp Pro đang chờ admin xác nhận (gửi lúc ${localDateText(request.created_at, true)}).`;
+      status.textContent = `Yêu cầu nâng cấp Pro gần nhất đang chờ admin xác nhận (gửi lúc ${localDateText(request.created_at, true)}). Bạn vẫn có thể gửi thông báo/bằng chứng bổ sung nếu cần.`;
     } else if (request && request.status === 'rejected') {
       status.textContent = `Yêu cầu thanh toán trước đó chưa được duyệt.${request.admin_note ? ` Ghi chú của admin: ${request.admin_note}` : ''} Bạn có thể gửi bằng chứng mới sau khi kiểm tra lại.`;
       status.classList.add('error');
     } else if (!qrUrl && !isPro) {
       status.textContent = 'Mã QR thanh toán chưa được cấu hình. Vui lòng quay lại sau hoặc liên hệ admin.';
     } else if (request && request.status === 'approved') {
-      status.textContent = 'Yêu cầu gần nhất đã duyệt. Nếu gói hiển thị Free, hãy tải lại trang hoặc liên hệ admin.'; status.classList.add('success');
+      status.textContent = 'Yêu cầu gần nhất đã duyệt. Nếu gói hiển thị Free, hãy tải lại trang hoặc liên hệ admin. Bạn vẫn có thể gửi thêm thông báo/bằng chứng nếu cần.'; status.classList.add('success');
     } else if (!isPro && !state.proPurchaseSelected) { status.textContent = 'Chọn gói Pro để xem QR và hướng dẫn thanh toán.';
     } else status.textContent = '';
     $('#proOnlyFeed').hidden = !isPro;

@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Doraemon Mini Lakehouse · Admin</title>
-  <link rel="stylesheet" href="/static/style.css?v=0.7.25">
+  <link rel="stylesheet" href="/static/style.css?v=0.7.26">
 </head>
 <body>
 <div id="loginView" class="login-shell hidden">
@@ -53,7 +53,7 @@
     <section id="page-pipeline" class="page"><div class="section-intro"><div><h2>Pipeline & chất lượng dữ liệu</h2><p class="muted">Chạy thu thập ngay, theo dõi log và xử lý các vấn đề chất lượng.</p></div><button id="runPipelineBtn2" class="btn primary">▶ Chạy pipeline</button></div><div class="panel"><div class="panel-head"><div><h3>Lịch sử pipeline</h3><p class="muted">Tác vụ từ admin hoặc lịch GitHub Actions.</p></div><button id="refreshRunsBtn" class="btn secondary">Làm mới</button></div><div id="runsTable" class="table-wrap"></div></div><div class="panel"><div class="panel-head"><div><h3>Vấn đề chất lượng</h3><p class="muted">Thiếu thời gian, tiêu đề ngắn, thiếu nội dung và trùng tiêu đề.</p></div><label class="inline-check"><input id="openIssuesOnly" type="checkbox" checked> Chưa xử lý</label></div><div id="issuesTable" class="table-wrap"></div></div></section>
     <section id="page-users" class="page">
       <div class="section-intro"><div><h2>Người dùng & gói</h2><p class="muted">Duyệt bằng chứng thanh toán, cấp hoặc thu hồi quyền Pro. Yêu cầu thanh toán mới được ưu tiên hiển thị.</p></div><button id="refreshUsersBtn" class="btn secondary">↻ Làm mới</button></div>
-      <div class="panel plan-config-panel"><div class="panel-head"><div><h3>Cấu hình gói Pro</h3><p class="muted">Tải mã QR và mô tả thanh toán hiển thị trong Thông tin tài khoản của user. Ảnh QR được lưu riêng trong PostgreSQL.</p></div></div>
+      <div class="panel plan-config-panel"><div class="panel-head"><div><h3>Cấu hình gói Pro</h3><p class="muted">Tải mã QR và mô tả thanh toán hiển thị trong Thông tin tài khoản của user. Ảnh được lưu trong bucket Cloudflare R2 riêng tư.</p></div></div>
         <form id="proPlanConfigForm" class="form-grid" enctype="multipart/form-data">
           <label class="span-2">Ảnh QR thanh toán (JPG, PNG hoặc WebP; tối đa 3 MB)<input id="proPlanQrFile" name="qr" type="file" accept="image/jpeg,image/png,image/webp"></label>
           <div class="plan-config-preview-wrap span-2"><img id="proPlanQrPreview" alt="QR thanh toán hiện tại" hidden><p id="proPlanQrCurrentLabel" class="muted small-text">Chưa cấu hình ảnh QR.</p><label class="inline-check"><input id="clearProPlanQr" name="clear_qr" type="checkbox"> Xóa QR hiện tại (dùng khi muốn bỏ ảnh đã lưu)</label></div>
@@ -65,7 +65,7 @@
       <div class="panel"><div class="panel-head"><div><h3>🔔 Thanh toán đang chờ duyệt <span id="pendingPaymentCount" class="status warning">0</span></h3><p class="muted">Xem ảnh bằng chứng trước khi xác nhận thanh toán. Duyệt sẽ kích hoạt gói Pro.</p></div></div><div id="pendingPaymentsTable" class="table-wrap"></div></div>
       <div class="panel"><div class="panel-head"><div><h3>Danh sách tài khoản</h3><p class="muted">User có yêu cầu thanh toán chờ duyệt được sắp xếp lên đầu.</p></div></div><form id="userSearchForm" class="filter-row"><input id="userSearch" placeholder="Tìm username hoặc email..."><button class="btn secondary" type="submit">Tìm</button></form><div id="usersTable" class="table-wrap"></div></div>
     </section>
-    <footer class="footer">Doraemon Mini Lakehouse <span>·</span> News Radar 0.7.25 <span>·</span> Data stays in your configured PostgreSQL</footer>
+    <footer class="footer">Doraemon Mini Lakehouse <span>·</span> News Radar 0.7.26 <span>·</span> Data stays in your configured PostgreSQL</footer>
   </main>
 </div>
 <div id="busyOverlay" class="busy-overlay hidden"><div class="spinner"></div><span id="busyText">Đang xử lý...</span></div>
@@ -82,8 +82,8 @@
   </form>
 </dialog>
 <dialog id="paymentProofDialog" class="payment-proof-dialog">
-  <div class="proof-dialog-inner"><div class="dialog-header"><div><p class="eyebrow">PAYMENT REVIEW</p><h2 id="paymentProofTitle">Bằng chứng thanh toán</h2><p class="muted small-text">Ảnh được lưu riêng trong PostgreSQL và chỉ Admin mới có quyền xem.</p></div><button type="button" id="closePaymentProofDialog" class="icon-btn" aria-label="Đóng">×</button></div><div id="paymentProofError" class="error-text"></div><img id="paymentProofImage" alt="Bằng chứng thanh toán" /></div>
+  <div class="proof-dialog-inner"><div class="dialog-header"><div><p class="eyebrow">PAYMENT REVIEW</p><h2 id="paymentProofTitle">Bằng chứng thanh toán</h2><p class="muted small-text">Ảnh bằng chứng được lưu trong Cloudflare R2 riêng tư và chỉ Admin đã đăng nhập mới có quyền xem.</p></div><button type="button" id="closePaymentProofDialog" class="icon-btn" aria-label="Đóng">×</button></div><div id="paymentProofError" class="error-text"></div><img id="paymentProofImage" alt="Bằng chứng thanh toán" /></div>
 </dialog>
-<script src="/static/app.js?v=0.7.25"></script>
+<script src="/static/app.js?v=0.7.26"></script>
 </body>
 </html>

@@ -56,5 +56,5 @@
 .payment-proof-dialog::backdrop{background:#18223588;backdrop-filter:blur(3px)}.proof-dialog-inner{padding:20px;max-height:90vh;overflow:auto}.proof-dialog-inner .dialog-header{margin-bottom:12px}.proof-dialog-inner h2{margin:0;font-size:18px}.proof-dialog-inner img{display:block;max-width:100%;max-height:68vh;object-fit:contain;margin:0 auto;border:1px solid var(--line);border-radius:9px;background:#f8fafc}.proof-dialog-inner .error-text{color:#c0392b}
 
 
-/* v0.7.25: admin form for Pro plan QR configuration */
+/* v0.7.25+: admin form for Pro plan QR configuration */
 .plan-config-panel{margin-bottom:16px}.plan-config-panel .form-grid{align-items:start}.plan-config-panel .form-grid>label{display:flex;flex-direction:column;gap:7px;font-size:11px;font-weight:750;color:#515c71}.plan-config-panel input[type=file]{font:inherit;font-size:11px;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff}.plan-config-panel textarea{font:inherit;font-size:12px;line-height:1.55}.plan-config-preview-wrap .inline-check{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}.plan-config-preview-wrap .small-text{margin:0}.plan-config-panel .form-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
