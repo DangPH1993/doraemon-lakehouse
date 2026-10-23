@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Doraemon Mini Lakehouse · Admin</title>
-  <link rel="stylesheet" href="/static/style.css?v=0.7.8">
+  <link rel="stylesheet" href="/static/style.css?v=0.7.24">
 </head>
 <body>
 <div id="loginView" class="login-shell hidden">
@@ -31,6 +31,7 @@
       <button class="nav-item" data-page="entities"><span>◎</span>Quản lý Entity</button>
       <button class="nav-item" data-page="facts"><span>▦</span>Bảng FACT</button>
       <button class="nav-item" data-page="pipeline"><span>⟳</span>Pipeline & chất lượng</button>
+      <button class="nav-item" data-page="users"><span>♙</span>Người dùng & gói <span id="pendingPaymentBadge" class="nav-count-badge" hidden>0</span></button>
     </nav>
     <div class="sidebar-bottom"><div class="status-dot"></div><div><strong>Data workspace</strong><span id="dbStatus">Chưa kiểm tra kết nối</span></div><button id="logoutBtn" class="icon-btn" title="Đăng xuất">↪</button></div>
   </aside>
@@ -50,7 +51,12 @@
     <section id="page-timeline" class="page"><div class="section-intro"><div><h2>Topic Timeline</h2><p class="muted">Xem các bài báo của một topic theo trình tự thời gian, từ mốc cũ đến diễn biến mới nhất.</p></div></div><div class="panel"><div class="filter-row"><select id="topicTimelineSelect" aria-label="Chọn topic" style="min-width:260px;flex:1"><option value="">Chọn topic…</option></select><button id="loadTopicTimelineBtn" class="btn primary">Xem timeline</button></div><div id="topicTimelineSummary" class="muted small-text"></div><div id="topicTimelineContainer" class="topic-timeline"></div></div></section>
     <section id="page-facts" class="page"><div class="section-intro"><div><h2>FACT tables</h2><p class="muted">Các bảng phân tích đã tổng hợp; grain của từng bảng được cố định trong schema.</p></div></div><div class="filter-row"><select id="factSelect"><option value="fact_news_article">fact_news_article — một dòng/bài</option><option value="fact_topic_daily">fact_topic_daily — topic/ngày/nguồn</option><option value="fact_topic_trending">fact_topic_trending — topic nóng/ngày-tuần-tháng</option><option value="fact_entity_daily">fact_entity_daily — entity/ngày/nguồn</option><option value="fact_source_daily">fact_source_daily — nguồn/ngày</option></select><select id="factLimit"><option>50</option><option selected>100</option><option>250</option><option>500</option></select><button id="loadFactBtn" class="btn primary">Tải dữ liệu</button></div><div class="panel"><div id="factsTable" class="table-wrap"></div></div><div class="panel"><div class="panel-head"><div><h3>Data model catalog</h3><p class="muted">Mô tả, grain và trạng thái các bảng được quản lý trong schema.</p></div><button id="loadModelsBtn" class="btn secondary">Làm mới catalog</button></div><div id="modelCatalogTable" class="table-wrap"></div></div><div class="panel"><h3>Định nghĩa grain</h3><div class="grain-list"><div><code>fact_news_article</code><span>Mỗi bài báo được thu thập</span></div><div><code>fact_topic_daily</code><span>Mỗi ngày × topic × nguồn</span></div><div><code>fact_topic_trending</code><span>Mỗi kỳ ngày/tuần/tháng × topic (kèm thứ hạng và tăng trưởng)</span></div><div><code>fact_entity_daily</code><span>Mỗi ngày × entity × nguồn</span></div><div><code>fact_source_daily</code><span>Mỗi ngày × nguồn</span></div></div></div></section>
     <section id="page-pipeline" class="page"><div class="section-intro"><div><h2>Pipeline & chất lượng dữ liệu</h2><p class="muted">Chạy thu thập ngay, theo dõi log và xử lý các vấn đề chất lượng.</p></div><button id="runPipelineBtn2" class="btn primary">▶ Chạy pipeline</button></div><div class="panel"><div class="panel-head"><div><h3>Lịch sử pipeline</h3><p class="muted">Tác vụ từ admin hoặc lịch GitHub Actions.</p></div><button id="refreshRunsBtn" class="btn secondary">Làm mới</button></div><div id="runsTable" class="table-wrap"></div></div><div class="panel"><div class="panel-head"><div><h3>Vấn đề chất lượng</h3><p class="muted">Thiếu thời gian, tiêu đề ngắn, thiếu nội dung và trùng tiêu đề.</p></div><label class="inline-check"><input id="openIssuesOnly" type="checkbox" checked> Chưa xử lý</label></div><div id="issuesTable" class="table-wrap"></div></div></section>
-    <footer class="footer">Doraemon Mini Lakehouse <span>·</span> News Radar 0.7.8 <span>·</span> Data stays in your configured PostgreSQL</footer>
+    <section id="page-users" class="page">
+      <div class="section-intro"><div><h2>Người dùng & gói</h2><p class="muted">Duyệt bằng chứng thanh toán, cấp hoặc thu hồi quyền Pro. Yêu cầu thanh toán mới được ưu tiên hiển thị.</p></div><button id="refreshUsersBtn" class="btn secondary">↻ Làm mới</button></div>
+      <div class="panel"><div class="panel-head"><div><h3>🔔 Thanh toán đang chờ duyệt <span id="pendingPaymentCount" class="status warning">0</span></h3><p class="muted">Xem ảnh bằng chứng trước khi xác nhận thanh toán. Duyệt sẽ kích hoạt gói Pro.</p></div></div><div id="pendingPaymentsTable" class="table-wrap"></div></div>
+      <div class="panel"><div class="panel-head"><div><h3>Danh sách tài khoản</h3><p class="muted">User có yêu cầu thanh toán chờ duyệt được sắp xếp lên đầu.</p></div></div><form id="userSearchForm" class="filter-row"><input id="userSearch" placeholder="Tìm username hoặc email..."><button class="btn secondary" type="submit">Tìm</button></form><div id="usersTable" class="table-wrap"></div></div>
+    </section>
+    <footer class="footer">Doraemon Mini Lakehouse <span>·</span> News Radar 0.7.24 <span>·</span> Data stays in your configured PostgreSQL</footer>
   </main>
 </div>
 <div id="busyOverlay" class="busy-overlay hidden"><div class="spinner"></div><span id="busyText">Đang xử lý...</span></div>
@@ -66,6 +72,9 @@
     <div class="form-actions"><button type="button" id="cancelClassificationBtn" class="btn secondary">Hủy</button><button type="submit" class="btn primary">Lưu phân loại</button></div>
   </form>
 </dialog>
-<script src="/static/app.js?v=0.7.8"></script>
+<dialog id="paymentProofDialog" class="payment-proof-dialog">
+  <div class="proof-dialog-inner"><div class="dialog-header"><div><p class="eyebrow">PAYMENT REVIEW</p><h2 id="paymentProofTitle">Bằng chứng thanh toán</h2><p class="muted small-text">Ảnh được lưu riêng trong PostgreSQL và chỉ Admin mới có quyền xem.</p></div><button type="button" id="closePaymentProofDialog" class="icon-btn" aria-label="Đóng">×</button></div><div id="paymentProofError" class="error-text"></div><img id="paymentProofImage" alt="Bằng chứng thanh toán" /></div>
+</dialog>
+<script src="/static/app.js?v=0.7.24"></script>
 </body>
 </html>

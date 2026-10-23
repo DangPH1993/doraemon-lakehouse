@@ -47,3 +47,11 @@
 
 /* Server-side pagination shared by article, topic and entity catalogs. */
 .pagination-controls{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 2px 2px;color:var(--muted);font-size:11px}.pagination-buttons{display:flex;align-items:center;gap:7px}.pagination-buttons button:disabled{opacity:.45;cursor:not-allowed;pointer-events:none}.pagination-summary{line-height:1.5}
+
+
+/* v0.7.24: user plan and payment review */
+.nav-count-badge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;margin-left:auto;border-radius:999px;background:#d92d20;color:#fff;font-size:10px;font-weight:900;line-height:20px;box-shadow:0 0 0 2px #fff}
+.payment-pending-row{background:#fffaf0}.user-plan-select{min-width:90px;padding:7px 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font:inherit;font-size:11px}
+.payment-proof-dialog{width:min(820px,calc(100vw - 24px));max-height:90vh;padding:0;border:1px solid var(--line);border-radius:15px;background:#fff;color:var(--ink);box-shadow:0 25px 80px #17243a44}
+.payment-proof-dialog::backdrop{background:#18223588;backdrop-filter:blur(3px)}.proof-dialog-inner{padding:20px;max-height:90vh;overflow:auto}.proof-dialog-inner .dialog-header{margin-bottom:12px}.proof-dialog-inner h2{margin:0;font-size:18px}.proof-dialog-inner img{display:block;max-width:100%;max-height:68vh;object-fit:contain;margin:0 auto;border:1px solid var(--line);border-radius:9px;background:#f8fafc}.proof-dialog-inner .error-text{color:#c0392b}
+

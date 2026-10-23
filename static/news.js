@@ -17,7 +17,7 @@
     articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '', fieldCategory: '',
     dateFrom: initialToday, dateTo: initialToday,
     user: null, savedTimelines: [], picked: new Set(), followMeta: new Map(),
-    pendingFollow: null, followSaving: false, authMode: 'login', telegram: null
+    pendingFollow: null, followSaving: false, authMode: 'login', telegram: null, planInfo: null, openPlanAfterAuth: false, passwordResetToken: null, paymentProofSubmitting: false
   };
   $('#articleDateFrom').value = initialToday;
   $('#articleDateTo').value = initialToday;
@@ -253,33 +253,118 @@
     }
     $('#authArea').innerHTML = `<div class="auth-user"><span class="auth-user-name" title="${esc(state.user.username)}">Xin chào, ${esc(state.user.username)}</span><button class="auth-logout" type="button" id="logoutButton">Đăng xuất</button></div>`;
   }
+  // Reset tokens remain in the URL fragment, not in the request URL or referrer.
+  function readPasswordResetToken() {
+    const queryToken = new URLSearchParams(window.location.search).get('reset_token');
+    const fragment = String(window.location.hash || '').replace(/^#/, '');
+    return queryToken || new URLSearchParams(fragment).get('reset_token');
+  }
   function setAuthMode(mode) {
-    state.authMode = mode === 'register' ? 'register' : 'login';
+    state.authMode = ['register', 'forgot', 'reset'].includes(mode) ? mode : 'login';
     const registering = state.authMode === 'register';
-    $('#authTitle').textContent = registering ? 'Tạo tài khoản' : 'Đăng nhập';
+    const forgot = state.authMode === 'forgot';
+    const resetting = state.authMode === 'reset';
+    $('#authTitle').textContent = registering ? 'Tạo tài khoản' : forgot ? 'Quên mật khẩu' : resetting ? 'Đặt lại mật khẩu' : 'Đăng nhập';
     $('#authDescription').textContent = registering
-      ? 'Tạo tài khoản để lưu chủ đề và đối tượng muốn theo dõi.'
-      : 'Đăng nhập để xem feed cá nhân và các mục đang theo dõi.';
-    $('#authIdentifierLabel').textContent = registering ? 'Tên đăng nhập' : 'Tên đăng nhập hoặc email';
-    $('#authIdentifier').autocomplete = 'username';
+      ? 'Tạo tài khoản để xem Radar. Nâng cấp Pro để follow và nhận tin mới qua Telegram.'
+      : forgot ? 'Nhập email đã đăng ký. Nếu tài khoản tồn tại, bạn sẽ nhận được liên kết đặt lại mật khẩu.'
+      : resetting ? 'Liên kết đặt lại mật khẩu chỉ dùng một lần và hết hạn sau 30 phút.'
+      : 'Đăng nhập để xem feed cá nhân và quản lý gói dịch vụ.';
+    $('#authIdentifierLabel').textContent = registering ? 'Tên đăng nhập' : forgot ? 'Email đăng ký' : 'Tên đăng nhập hoặc email';
+    $('#authIdentifier').type = forgot ? 'email' : 'text';
+    $('#authIdentifier').placeholder = registering ? 'Tên đăng nhập' : forgot ? 'email@example.com' : 'Tên đăng nhập hoặc email';
+    $('#authIdentifier').autocomplete = registering || resetting ? 'new-password' : forgot ? 'email' : 'username';
     $('#authIdentifier').maxLength = registering ? 32 : 254;
+    $('#authIdentifier').required = !resetting;
+    $('#authIdentifier').closest('.auth-field').hidden = resetting;
     $('#authEmailField').hidden = !registering;
     $('#authEmail').required = registering;
-    $('#authPasswordConfirmField').hidden = !registering;
-    $('#authPasswordConfirm').required = registering;
-    $('#authPassword').autocomplete = registering ? 'new-password' : 'current-password';
-    $('#authPassword').minLength = registering ? 8 : 1;
-    $('#authSubmit').textContent = registering ? 'Tạo tài khoản' : 'Đăng nhập';
+    $('#authPassword').closest('.auth-field').hidden = forgot;
+    $('#authPassword').required = !forgot;
+    $('#authPassword').minLength = registering || resetting ? 8 : 1;
+    $('#authPassword').autocomplete = registering || resetting ? 'new-password' : 'current-password';
+    $('#authPassword').closest('.auth-field').querySelector('span').textContent = resetting ? 'Mật khẩu mới' : 'Mật khẩu';
+    $('#authPasswordConfirmField').hidden = !(registering || resetting);
+    $('#authPasswordConfirm').required = registering || resetting;
+    $('#authPasswordConfirmField').querySelector('span').textContent = resetting ? 'Nhập lại mật khẩu mới' : 'Nhập lại mật khẩu';
+    $('#authSubmit').textContent = registering ? 'Tạo tài khoản' : forgot ? 'Gửi liên kết đặt lại' : resetting ? 'Lưu mật khẩu mới' : 'Đăng nhập';
+    $('#authSwitchLine').hidden = forgot || resetting;
+    $('#forgotPasswordLine').hidden = state.authMode !== 'login';
     $('#authSwitchPrompt').textContent = registering ? 'Đã có tài khoản?' : 'Chưa có tài khoản?';
     $('#authSwitchMode').textContent = registering ? 'Đăng nhập' : 'Đăng ký';
     $('#authSwitchMode').dataset.switchAuth = registering ? 'login' : 'register';
     setFeedback('#authFeedback', '');
   }
   function openAuthModal(mode = 'login') {
-    setAuthMode(mode); $('#authForm').reset(); setAuthMode(mode);
-    $('#authModal').hidden = false; window.setTimeout(() => $('#authIdentifier').focus(), 0);
+    $('#authForm').reset(); setAuthMode(mode);
+    $('#authModal').hidden = false;
+    const focusTarget = mode === 'reset' ? $('#authPassword') : $('#authIdentifier');
+    window.setTimeout(() => focusTarget.focus(), 0);
   }
   function closeAuthModal() { $('#authModal').hidden = true; }
+  function openProUpgradePopup() { $('#proUpgradeModal').hidden = false; }
+  function closeProUpgradePopup() { $('#proUpgradeModal').hidden = true; }
+  async function openPlanPanel() {
+    if (!state.user) {
+      state.openPlanAfterAuth = true;
+      openAuthModal('login');
+      setFeedback('#authFeedback', 'Đăng nhập hoặc đăng ký để xem thông tin gói và gửi bằng chứng thanh toán.');
+      return;
+    }
+    await loadPlanInfo();
+    $('#myRadar').hidden = false;
+    $('#myPlanSection').scrollIntoView({behavior: 'smooth', block: 'center'});
+  }
+  function renderPlanInfo(data) {
+    state.planInfo = data;
+    if (state.user) state.user.plan = data.plan || 'Free';
+    const isPro = Boolean(state.user && state.user.plan === 'Pro');
+    $('#userPlanBadge').textContent = isPro ? 'PRO' : 'FREE';
+    $('#userPlanBadge').classList.toggle('pro', isPro);
+    $('#userPlanBadge').classList.toggle('free', !isPro);
+    $('#userPlanSummary').textContent = isPro
+      ? 'Gói Pro đang hoạt động. Bạn có thể follow topic/entity, sử dụng feed cá nhân và nhận thông báo tin mới qua Telegram khi đã kết nối bot.'
+      : 'Gói Free đang hoạt động. Bạn có thể xem Radar công khai; quyền follow và thông báo tin mới qua Telegram dành cho gói Pro.';
+    $('#proPlanPriceLabel').textContent = data.pro_price_label || 'Xem hướng dẫn thanh toán để biết mức phí Pro.';
+    const qrUrl = safeImageHref(data.qr_image_url);
+    const request = data.payment_request;
+    const waiting = Boolean(request && request.status === 'pending');
+    $('#paymentQrWrap').hidden = isPro || !qrUrl || waiting;
+    $('#paymentQrImage').src = qrUrl || '';
+    $('#paymentQrImage').hidden = !qrUrl;
+    $('#paymentInstructions').textContent = data.payment_instructions || '';
+    $('#paymentProofForm').hidden = isPro || !qrUrl || waiting;
+    const status = $('#paymentRequestStatus');
+    status.className = 'payment-request-status';
+    if (isPro) {
+      status.textContent = 'Gói Pro đã được kích hoạt cho tài khoản của bạn.'; status.classList.add('success');
+    } else if (waiting) {
+      status.textContent = `Yêu cầu nâng cấp Pro đang chờ admin xác nhận (gửi lúc ${localDateText(request.created_at, true)}).`;
+    } else if (request && request.status === 'rejected') {
+      status.textContent = `Yêu cầu thanh toán trước đó chưa được duyệt.${request.admin_note ? ` Ghi chú của admin: ${request.admin_note}` : ''} Bạn có thể gửi bằng chứng mới sau khi kiểm tra lại.`;
+      status.classList.add('error');
+    } else if (!qrUrl && !isPro) {
+      status.textContent = 'Mã QR thanh toán chưa được cấu hình. Vui lòng quay lại sau hoặc liên hệ admin.';
+    } else if (request && request.status === 'approved') {
+      status.textContent = 'Yêu cầu gần nhất đã duyệt. Nếu gói hiển thị Free, hãy tải lại trang hoặc liên hệ admin.'; status.classList.add('success');
+    } else status.textContent = '';
+    $('#proOnlyFeed').hidden = !isPro;
+    if (!isPro) {
+      $('#feedSummary').textContent = 'Feed cá nhân và follow dành cho gói Pro.';
+      $('#userFeedContainer').innerHTML = '<div class="message-card"><strong>Tính năng dành cho gói Pro</strong>Nâng cấp Pro để follow topic/entity, cá nhân hóa feed và nhận bản tin mới qua Telegram.</div>';
+      $('#telegramStatus').textContent = 'Thông báo Telegram dành cho gói Pro.';
+    }
+    syncFollowButtons();
+  }
+  async function loadPlanInfo() {
+    if (!state.user) return null;
+    const data = await getJSON('/api/user/plan');
+    renderPlanInfo(data);
+    return data;
+  }
+  async function loadPaymentPlanAfterAuth() {
+    if (state.openPlanAfterAuth) { state.openPlanAfterAuth = false; await openPlanPanel(); }
+  }
   async function restoreUser() {
     try { const data = await getJSON('/api/user-auth/me'); state.user = data.user; }
     catch (error) { state.user = null; if (error.status !== 401) console.warn('Could not restore News Radar session:', error.message); }
@@ -425,10 +510,17 @@
   }
 
   async function loadUserRadar() {
-    if (!state.user) { renderAuthArea(); return; }
+    if (!state.user) { renderAuthArea(); $('#myRadar').hidden = true; return; }
     renderAuthArea();
-    $('#userFeedContainer').innerHTML = '<div class="loading-card">Đang tải feed của bạn…</div>';
     try {
+      await loadPlanInfo();
+      if (!state.user || state.user.plan !== 'Pro') {
+        state.savedTimelines = []; state.picked.clear();
+        renderFollowTags(); syncFollowButtons();
+        return;
+      }
+      $('#proOnlyFeed').hidden = false;
+      $('#userFeedContainer').innerHTML = '<div class="loading-card">Đang tải feed của bạn…</div>';
       const savedData = await getJSON('/api/user/saved-timelines');
       state.savedTimelines = savedData.items || [];
       state.picked = new Set(state.savedTimelines.map(item => {
@@ -438,7 +530,7 @@
       renderFollowTags(); syncFollowButtons();
       await Promise.all([renderUserFeed(), loadTelegramSettings()]);
     } catch (error) {
-      setMessage('#userFeedContainer', 'Không tải được feed cá nhân', error.message, true);
+      setMessage('#userFeedContainer', 'Không tải được thông tin gói hoặc feed cá nhân', error.message, true);
     }
   }
   async function saveTimelines({silent = false} = {}) {
@@ -481,6 +573,10 @@
       return;
     }
     const key = keyFor(type, id);
+    if (state.user && state.user.plan !== 'Pro' && !state.picked.has(key)) {
+      openProUpgradePopup();
+      return;
+    }
     if (state.picked.has(key)) {
       state.picked.delete(key);
     } else {
@@ -498,7 +594,7 @@
   async function logout() {
     try { await sendJSON('/api/user-auth/logout', 'POST', {}); } catch (error) { console.warn('Logout request failed:', error.message); }
     state.user = null; state.savedTimelines = []; state.picked.clear(); state.followMeta.clear(); state.pendingFollow = null;
-    state.telegram = null; $('#openTelegramLink').hidden = true; $('#telegramEnabled').checked = false; $('#telegramEnabled').disabled = true;
+    state.telegram = null; state.planInfo = null; state.openPlanAfterAuth = false; $('#proOnlyFeed').hidden = true; $('#userPlanBadge').textContent = 'FREE'; $('#userPlanBadge').classList.add('free'); $('#userPlanBadge').classList.remove('pro'); $('#openTelegramLink').hidden = true; $('#telegramEnabled').checked = false; $('#telegramEnabled').disabled = true;
     renderAuthArea(); $('#userFeedContainer').innerHTML = ''; $('#savedTimelineTags').innerHTML = ''; $('#telegramStatus').textContent = 'Đăng nhập để cấu hình Telegram.'; syncFollowButtons(); updateSelectionCount();
   }
 
@@ -506,6 +602,10 @@
     const authOpen = event.target.closest('[data-auth-open]'); if (authOpen) { openAuthModal(authOpen.dataset.authOpen); return; }
     const authClose = event.target.closest('[data-auth-close]'); if (authClose) { closeAuthModal(); return; }
     const authSwitch = event.target.closest('[data-switch-auth]'); if (authSwitch) { openAuthModal(authSwitch.dataset.switchAuth); return; }
+    if (event.target.closest('#forgotPasswordLink')) { openAuthModal('forgot'); return; }
+    if (event.target.closest('#openPlanButton')) { await openPlanPanel(); return; }
+    if (event.target.closest('#proUpgradeOpenPlan')) { closeProUpgradePopup(); await openPlanPanel(); return; }
+    if (event.target.closest('[data-pro-close]')) { closeProUpgradePopup(); return; }
     if (event.target.closest('#logoutButton')) { await logout(); return; }
     if (event.target.closest('#openTimelinePicker')) {
       $('#timelinePickerDetails').open = true;
@@ -573,17 +673,56 @@
   });
   $('#authForm').addEventListener('submit', async event => {
     event.preventDefault();
-    const registering = state.authMode === 'register';
-    const usernameOrIdentifier = $('#authIdentifier').value.trim(); const password = $('#authPassword').value;
-    if (registering && password !== $('#authPasswordConfirm').value) { setFeedback('#authFeedback', 'Hai lần nhập mật khẩu chưa khớp.'); return; }
-    const body = registering ? {username: usernameOrIdentifier, email: $('#authEmail').value.trim(), password} : {identifier: usernameOrIdentifier, password};
-    $('#authSubmit').disabled = true; setFeedback('#authFeedback', registering ? 'Đang tạo tài khoản…' : 'Đang đăng nhập…');
+    const mode = state.authMode;
+    const identifier = $('#authIdentifier').value.trim();
+    const password = $('#authPassword').value;
+    if ((mode === 'register' || mode === 'reset') && password !== $('#authPasswordConfirm').value) {
+      setFeedback('#authFeedback', 'Hai lần nhập mật khẩu chưa khớp.'); return;
+    }
+    $('#authSubmit').disabled = true;
     try {
+      if (mode === 'forgot') {
+        setFeedback('#authFeedback', 'Đang gửi email nếu tài khoản tồn tại…');
+        const result = await sendJSON('/api/user-auth/forgot-password', 'POST', {email: identifier});
+        setFeedback('#authFeedback', result.message || 'Nếu email tồn tại, hướng dẫn đã được gửi.', true);
+        return;
+      }
+      if (mode === 'reset') {
+        if (!state.passwordResetToken && !readPasswordResetToken()) throw new Error('Thiếu mã đặt lại mật khẩu. Hãy mở liên kết trong email hoặc yêu cầu liên kết mới.');
+        setFeedback('#authFeedback', 'Đang cập nhật mật khẩu…');
+        const result = await sendJSON('/api/user-auth/reset-password', 'POST', {token: state.passwordResetToken || readPasswordResetToken(), new_password: password});
+        history.replaceState({}, '', location.pathname + location.search);
+        state.passwordResetToken = null; $('#authForm').reset(); setAuthMode('login');
+        setFeedback('#authFeedback', result.message || 'Đã đổi mật khẩu. Hãy đăng nhập.', true);
+        return;
+      }
+      const registering = mode === 'register';
+      const body = registering ? {username: identifier, email: $('#authEmail').value.trim(), password} : {identifier, password};
+      setFeedback('#authFeedback', registering ? 'Đang tạo tài khoản…' : 'Đang đăng nhập…');
       const data = await sendJSON(registering ? '/api/user-auth/register' : '/api/user-auth/login', 'POST', body);
       state.user = data.user; closeAuthModal(); renderAuthArea(); await loadUserRadar();
       if (state.pendingFollow) { const pending = state.pendingFollow; state.pendingFollow = null; if (!state.picked.has(keyFor(pending.type, pending.id))) await toggleFollow(pending.type, pending.id, pending.name); }
+      await loadPaymentPlanAfterAuth();
     } catch (error) { setFeedback('#authFeedback', error.message); }
     finally { $('#authSubmit').disabled = false; }
+  });
+  $('#paymentProofForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!state.user || state.user.plan === 'Pro' || state.paymentProofSubmitting) return;
+    const file = $('#paymentProofFile').files[0];
+    if (!file) { setFeedback('#paymentRequestStatus', 'Hãy chọn ảnh bằng chứng thanh toán.'); return; }
+    if (file.size > 3 * 1024 * 1024) { setFeedback('#paymentRequestStatus', 'Ảnh quá lớn. Vui lòng chọn ảnh nhỏ hơn 3 MB.'); return; }
+    state.paymentProofSubmitting = true; $('#submitPaymentProof').disabled = true;
+    setFeedback('#paymentRequestStatus', 'Đang gửi bằng chứng thanh toán…');
+    try {
+      const formData = new FormData(); formData.append('proof', file); formData.append('note', $('#paymentProofNote').value.trim());
+      const response = await fetch('/api/user/payment-requests', {method:'POST', body:formData, credentials:'same-origin', headers:{'Accept':'application/json'}});
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `Không gửi được yêu cầu (${response.status})`);
+      $('#paymentProofForm').reset(); await loadPlanInfo();
+      setFeedback('#paymentRequestStatus', result.message || 'Đã gửi bằng chứng thanh toán.', true);
+    } catch (error) { setFeedback('#paymentRequestStatus', error.message); $('#paymentRequestStatus').classList.add('error'); }
+    finally { state.paymentProofSubmitting = false; $('#submitPaymentProof').disabled = false; }
   });
   $('#authModal').addEventListener('click', event => { if (event.target.id === 'authModal') closeAuthModal(); });
   document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#authModal').hidden) closeAuthModal(); });
@@ -593,6 +732,13 @@
     const jobs = [loadHotTopics(), loadArticles(1)];
     if (state.user) jobs.push(loadUserRadar());
     await Promise.all(jobs);
+    const resetToken = readPasswordResetToken();
+    if (resetToken) {
+      state.passwordResetToken = resetToken;
+      openAuthModal('reset');
+      // Remove the fragment after capturing it so it is not left in browser history/address bar.
+      history.replaceState({}, '', location.pathname + location.search);
+    }
   }
   initialize();
 })();

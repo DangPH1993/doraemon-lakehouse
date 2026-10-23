@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="app-version" content="0.7.23">
+  <meta name="app-version" content="0.7.24">
   <meta name="description" content="Tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>News Radar — Doraemon</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.23">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.24">
 </head>
 <body>
   <header class="site-header">
@@ -21,6 +21,7 @@
       <a href="#myRadar" id="myRadarNav" hidden>Feed của bạn</a>
     </nav>
     <div class="header-actions">
+      <button class="auth-button auth-button-secondary" id="openPlanButton" type="button">Thông tin gói</button>
       <div class="auth-area" id="authArea" aria-live="polite">
         <button class="auth-button auth-button-secondary" type="button" data-auth-open="login">Đăng nhập</button>
         <button class="auth-button" type="button" data-auth-open="register">Đăng ký</button>
@@ -44,7 +45,19 @@
         <p class="auth-feedback" id="authFeedback" role="status" aria-live="polite"></p>
         <button class="auth-submit" id="authSubmit" type="submit">Đăng nhập</button>
       </form>
-      <p class="auth-switch-line"><span id="authSwitchPrompt">Chưa có tài khoản?</span> <button type="button" id="authSwitchMode" data-switch-auth="register">Đăng ký</button></p>
+      <p class="auth-switch-line" id="authSwitchLine"><span id="authSwitchPrompt">Chưa có tài khoản?</span> <button type="button" id="authSwitchMode" data-switch-auth="register">Đăng ký</button></p>
+      <p class="auth-switch-line" id="forgotPasswordLine"><button type="button" id="forgotPasswordLink">Quên mật khẩu?</button></p>
+    </section>
+  </div>
+
+  <div class="auth-modal" id="proUpgradeModal" hidden>
+    <div class="auth-backdrop" data-pro-close="true"></div>
+    <section class="auth-dialog pro-upgrade-dialog" role="dialog" aria-modal="true" aria-labelledby="proUpgradeTitle">
+      <button class="auth-close" type="button" data-pro-close="true" aria-label="Đóng">×</button>
+      <p class="eyebrow">NEWS RADAR PRO</p>
+      <h2 id="proUpgradeTitle">Nâng cấp để theo dõi tin tức</h2>
+      <p class="auth-description">Vui lòng nâng cấp lên gói Pro để follow tin tức và nhận thông báo tin mới qua telegram!</p>
+      <button class="auth-submit" id="proUpgradeOpenPlan" type="button">Xem thông tin gói Pro</button>
     </section>
   </div>
 
@@ -121,6 +134,19 @@
         <div><p class="eyebrow">YOUR PERSONAL FEED</p><h2>Feed của bạn</h2><p class="section-subtitle">Mỗi topic/entity hiển thị 5 bài mới nhất. Mở danh sách riêng để xem đầy đủ.</p></div>
         <button class="auth-button" id="openTimelinePicker" type="button">Cấu hình follow</button>
       </div>
+      <section class="user-plan-panel" id="myPlanSection" aria-labelledby="myPlanTitle">
+        <div class="plan-panel-heading"><div><p class="eyebrow">SUBSCRIPTION</p><h3 id="myPlanTitle">Thông tin gói</h3><p class="section-subtitle">Quản lý gói Free/Pro và gửi bằng chứng thanh toán để admin xác nhận.</p></div><span class="plan-badge free" id="userPlanBadge">FREE</span></div>
+        <p id="userPlanSummary" class="plan-summary">Gói Free: xem tin tức công khai. Follow và thông báo Telegram dành cho gói Pro.</p>
+        <div class="plan-comparison"><div><strong>Free</strong><span>Xem Radar, tìm kiếm và mở timeline công khai.</span></div><div class="pro-plan-card"><strong>Pro</strong><span>Follow topic/entity, tạo feed cá nhân và nhận bản tin mới qua Telegram.</span><small id="proPlanPriceLabel"></small></div></div>
+        <div id="paymentRequestStatus" class="payment-request-status" role="status" aria-live="polite"></div>
+        <div id="paymentQrWrap" class="payment-qr-wrap" hidden><h4>Thanh toán nâng cấp Pro</h4><p id="paymentInstructions" class="section-subtitle"></p><img id="paymentQrImage" class="payment-qr-image" alt="Mã QR thanh toán gói Pro" loading="lazy"><p class="payment-secure-note">Sau khi thanh toán, tải ảnh chụp giao dịch bên dưới. Gói Pro chỉ được kích hoạt sau khi admin xác nhận.</p></div>
+        <form id="paymentProofForm" class="payment-proof-form" hidden>
+          <label class="auth-field" for="paymentProofFile"><span>Ảnh bằng chứng thanh toán (JPG, PNG, WebP; tối đa 3 MB)</span><input id="paymentProofFile" name="proof" type="file" accept="image/jpeg,image/png,image/webp" required></label>
+          <label class="auth-field" for="paymentProofNote"><span>Ghi chú giao dịch (không bắt buộc)</span><input id="paymentProofNote" name="note" maxlength="1000" placeholder="Ví dụ: thời gian giao dịch hoặc nội dung chuyển khoản"></label>
+          <button class="auth-button" id="submitPaymentProof" type="submit">Tôi đã thanh toán — gửi bằng chứng</button>
+        </form>
+      </section>
+      <div id="proOnlyFeed">
       <div class="feed-summary" id="feedSummary">Đang tải feed cá nhân…</div>
       <div id="userFeedContainer" class="radar-list personal-feed-list" aria-live="polite"><div class="loading-card">Đang tải feed của bạn…</div></div>
       <div class="pagination-row"><button class="text-action" id="refreshUserFeed" type="button">Làm mới feed ↻</button></div>
@@ -150,6 +176,7 @@
           <p class="telegram-help">Cách kết nối: tạo liên kết, mở bot Telegram và bấm Start. Sau đó quay lại đây, kiểm tra kết nối, bật thông báo và lưu cấu hình. Liên kết hết hạn sau 15 phút.</p>
         </div>
       </details>
+      </div>
     </section>
       </aside>
     </div>
@@ -160,6 +187,6 @@
       <a href="/" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/news.js?v=0.7.23" defer></script>
+  <script src="/static/news.js?v=0.7.24" defer></script>
 </body>
 </html>
