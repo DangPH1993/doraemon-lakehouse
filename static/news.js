@@ -17,7 +17,7 @@
     articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '', fieldCategory: '',
     dateFrom: initialToday, dateTo: initialToday,
     user: null, savedTimelines: [], picked: new Set(), followMeta: new Map(),
-    pendingFollow: null, followSaving: false, authMode: 'login', telegram: null, planInfo: null, openPlanAfterAuth: false, passwordResetToken: null, paymentProofSubmitting: false
+    pendingFollow: null, followSaving: false, authMode: 'login', telegram: null, planInfo: null, openPlanAfterAuth: false, passwordResetToken: null, paymentProofSubmitting: false, proPurchaseSelected: false
   };
   $('#articleDateFrom').value = initialToday;
   $('#articleDateTo').value = initialToday;
@@ -251,7 +251,8 @@
       $('#authArea').innerHTML = '<button class="auth-button auth-button-secondary" type="button" data-auth-open="login">Đăng nhập</button><button class="auth-button" type="button" data-auth-open="register">Đăng ký</button>';
       return;
     }
-    $('#authArea').innerHTML = `<div class="auth-user"><span class="auth-user-name" title="${esc(state.user.username)}">Xin chào, ${esc(state.user.username)}</span><button class="auth-logout" type="button" id="logoutButton">Đăng xuất</button></div>`;
+    $('#authArea').innerHTML = `<div class="account-menu" id="accountMenu"><button class="auth-user-name account-menu-toggle" type="button" id="accountMenuToggle" aria-haspopup="true" aria-expanded="false">Xin chào, ${esc(state.user.username)} <span aria-hidden="true">⌄</span></button><div class="account-menu-dropdown" id="accountMenuDropdown" hidden><button type="button" id="openAccountButton">Thông tin tài khoản</button><button type="button" id="logoutButton">Đăng xuất</button></div></div>`;
+    $('#accountIdentityLine').textContent = `${state.user.username}${state.user.email ? ` · ${state.user.email}` : ''} · Quản lý gói dịch vụ và thông báo Telegram`;
   }
   // Reset tokens remain in the URL fragment, not in the request URL or referrer.
   function readPasswordResetToken() {
@@ -304,17 +305,41 @@
   function closeAuthModal() { $('#authModal').hidden = true; }
   function openProUpgradePopup() { $('#proUpgradeModal').hidden = false; }
   function closeProUpgradePopup() { $('#proUpgradeModal').hidden = true; }
-  async function openPlanPanel() {
+  function setAccountTab(tab = 'plan') {
+    const selected = tab === 'telegram' ? 'telegram' : 'plan';
+    $('#accountPlanTabButton').classList.toggle('active', selected === 'plan');
+    $('#accountTelegramTabButton').classList.toggle('active', selected === 'telegram');
+    $('#accountPlanTabButton').setAttribute('aria-selected', String(selected === 'plan'));
+    $('#accountTelegramTabButton').setAttribute('aria-selected', String(selected === 'telegram'));
+    $('#accountPlanPanel').hidden = selected !== 'plan';
+    $('#accountTelegramPanel').hidden = selected !== 'telegram';
+    if (selected === 'telegram') {
+      if (!(state.user && state.user.plan === 'Pro')) {
+        $('#telegramStatus').textContent = 'Kết nối và nhận thông báo Telegram là quyền lợi của gói Pro. Hãy nâng cấp tại tab Gói dịch vụ.';
+        $('#telegramEnabled').checked = false;
+        $('#telegramEnabled').disabled = true;
+        $('#createTelegramLink').disabled = true;
+        $('#saveTelegramSettings').disabled = true;
+      }
+    }
+  }
+  async function openAccountModal(tab = 'plan') {
     if (!state.user) {
       state.openPlanAfterAuth = true;
       openAuthModal('login');
-      setFeedback('#authFeedback', 'Đăng nhập hoặc đăng ký để xem thông tin gói và gửi bằng chứng thanh toán.');
+      setFeedback('#authFeedback', 'Đăng nhập hoặc đăng ký để xem thông tin tài khoản.');
       return;
     }
-    await loadPlanInfo();
-    $('#myRadar').hidden = false;
-    $('#myPlanSection').scrollIntoView({behavior: 'smooth', block: 'center'});
+    $('#accountMenuDropdown').hidden = true;
+    $('#accountMenuToggle').setAttribute('aria-expanded', 'false');
+    $('#accountModal').hidden = false;
+    setAccountTab(tab);
+    try { await loadPlanInfo(); } catch (error) { setFeedback('#paymentRequestStatus', error.message); }
+    if (tab === 'telegram' && state.user.plan === 'Pro') await loadTelegramSettings();
+    $('#accountModal .account-dialog').scrollTop = 0;
   }
+  function closeAccountModal() { $('#accountModal').hidden = true; }
+  async function openPlanPanel() { return openAccountModal('plan'); }
   function renderPlanInfo(data) {
     state.planInfo = data;
     if (state.user) state.user.plan = data.plan || 'Free';
@@ -329,11 +354,13 @@
     const qrUrl = safeImageHref(data.qr_image_url);
     const request = data.payment_request;
     const waiting = Boolean(request && request.status === 'pending');
-    $('#paymentQrWrap').hidden = isPro || !qrUrl || waiting;
+    $('#selectProPlanButton').hidden = isPro || !qrUrl || waiting;
+    $('#selectProPlanButton').textContent = state.proPurchaseSelected ? 'Đã chọn gói Pro' : 'Chọn gói Pro';
+    $('#paymentQrWrap').hidden = isPro || !qrUrl || waiting || !state.proPurchaseSelected;
     $('#paymentQrImage').src = qrUrl || '';
     $('#paymentQrImage').hidden = !qrUrl;
     $('#paymentInstructions').textContent = data.payment_instructions || '';
-    $('#paymentProofForm').hidden = isPro || !qrUrl || waiting;
+    $('#paymentProofForm').hidden = isPro || !qrUrl || waiting || !state.proPurchaseSelected;
     const status = $('#paymentRequestStatus');
     status.className = 'payment-request-status';
     if (isPro) {
@@ -347,13 +374,15 @@
       status.textContent = 'Mã QR thanh toán chưa được cấu hình. Vui lòng quay lại sau hoặc liên hệ admin.';
     } else if (request && request.status === 'approved') {
       status.textContent = 'Yêu cầu gần nhất đã duyệt. Nếu gói hiển thị Free, hãy tải lại trang hoặc liên hệ admin.'; status.classList.add('success');
+    } else if (!isPro && !state.proPurchaseSelected) { status.textContent = 'Chọn gói Pro để xem QR và hướng dẫn thanh toán.';
     } else status.textContent = '';
     $('#proOnlyFeed').hidden = !isPro;
     if (!isPro) {
       $('#feedSummary').textContent = 'Feed cá nhân và follow dành cho gói Pro.';
       $('#userFeedContainer').innerHTML = '<div class="message-card"><strong>Tính năng dành cho gói Pro</strong>Nâng cấp Pro để follow topic/entity, cá nhân hóa feed và nhận bản tin mới qua Telegram.</div>';
-      $('#telegramStatus').textContent = 'Thông báo Telegram dành cho gói Pro.';
-    }
+      $('#telegramStatus').textContent = 'Kết nối và nhận thông báo Telegram là quyền lợi của gói Pro. Hãy nâng cấp tại tab Gói dịch vụ.';
+      $('#telegramEnabled').checked = false; $('#telegramEnabled').disabled = true; $('#createTelegramLink').disabled = true; $('#saveTelegramSettings').disabled = true;
+    } else { $('#saveTelegramSettings').disabled = false; }
     syncFollowButtons();
   }
   async function loadPlanInfo() {
@@ -528,7 +557,7 @@
         return keyFor(item.type, item.id);
       }));
       renderFollowTags(); syncFollowButtons();
-      await Promise.all([renderUserFeed(), loadTelegramSettings()]);
+      await renderUserFeed();
     } catch (error) {
       setMessage('#userFeedContainer', 'Không tải được thông tin gói hoặc feed cá nhân', error.message, true);
     }
@@ -594,7 +623,7 @@
   async function logout() {
     try { await sendJSON('/api/user-auth/logout', 'POST', {}); } catch (error) { console.warn('Logout request failed:', error.message); }
     state.user = null; state.savedTimelines = []; state.picked.clear(); state.followMeta.clear(); state.pendingFollow = null;
-    state.telegram = null; state.planInfo = null; state.openPlanAfterAuth = false; $('#proOnlyFeed').hidden = true; $('#userPlanBadge').textContent = 'FREE'; $('#userPlanBadge').classList.add('free'); $('#userPlanBadge').classList.remove('pro'); $('#openTelegramLink').hidden = true; $('#telegramEnabled').checked = false; $('#telegramEnabled').disabled = true;
+    state.telegram = null; state.planInfo = null; state.openPlanAfterAuth = false; state.proPurchaseSelected = false; $('#accountModal').hidden = true; $('#proOnlyFeed').hidden = true; $('#userPlanBadge').textContent = 'FREE'; $('#userPlanBadge').classList.add('free'); $('#userPlanBadge').classList.remove('pro'); $('#openTelegramLink').hidden = true; $('#telegramEnabled').checked = false; $('#telegramEnabled').disabled = true;
     renderAuthArea(); $('#userFeedContainer').innerHTML = ''; $('#savedTimelineTags').innerHTML = ''; $('#telegramStatus').textContent = 'Đăng nhập để cấu hình Telegram.'; syncFollowButtons(); updateSelectionCount();
   }
 
@@ -603,15 +632,25 @@
     const authClose = event.target.closest('[data-auth-close]'); if (authClose) { closeAuthModal(); return; }
     const authSwitch = event.target.closest('[data-switch-auth]'); if (authSwitch) { openAuthModal(authSwitch.dataset.switchAuth); return; }
     if (event.target.closest('#forgotPasswordLink')) { openAuthModal('forgot'); return; }
-    if (event.target.closest('#openPlanButton')) { await openPlanPanel(); return; }
-    if (event.target.closest('#proUpgradeOpenPlan')) { closeProUpgradePopup(); await openPlanPanel(); return; }
+    const accountMenuToggle = event.target.closest('#accountMenuToggle');
+    if (accountMenuToggle) {
+      const menu = $('#accountMenuDropdown'); menu.hidden = !menu.hidden;
+      accountMenuToggle.setAttribute('aria-expanded', String(!menu.hidden)); return;
+    }
+    if (event.target.closest('#openAccountButton')) { await openAccountModal('plan'); return; }
+    const accountTab = event.target.closest('[data-account-tab]');
+    if (accountTab) { setAccountTab(accountTab.dataset.accountTab); if (accountTab.dataset.accountTab === 'telegram' && state.user && state.user.plan === 'Pro') await loadTelegramSettings(); return; }
+    if (event.target.closest('[data-account-close]')) { closeAccountModal(); return; }
+    if (!event.target.closest('#accountMenu')) { const menu = $('#accountMenuDropdown'); if (menu) { menu.hidden = true; $('#accountMenuToggle')?.setAttribute('aria-expanded', 'false'); } }
+    if (event.target.closest('#proUpgradeOpenPlan')) { closeProUpgradePopup(); await openAccountModal('plan'); return; }
     if (event.target.closest('[data-pro-close]')) { closeProUpgradePopup(); return; }
-    if (event.target.closest('#logoutButton')) { await logout(); return; }
+    if (event.target.closest('#logoutButton')) { closeAccountModal(); await logout(); return; }
     if (event.target.closest('#openTimelinePicker')) {
       $('#timelinePickerDetails').open = true;
       $('#timelinePickerDetails').scrollIntoView({behavior:'smooth', block:'center'}); return;
     }
     if (event.target.closest('#saveTimelinesButton')) { await saveTimelines(); return; }
+    if (event.target.closest('#selectProPlanButton')) { state.proPurchaseSelected = true; await loadPlanInfo(); $('#paymentQrWrap').scrollIntoView({behavior:'smooth',block:'center'}); return; }
     const toggle = event.target.closest('[data-toggle-follow]');
     if (toggle) { await toggleFollow(toggle.dataset.toggleFollow, toggle.dataset.followId, toggle.dataset.followName); return; }
     const remove = event.target.closest('[data-remove-follow]');
@@ -725,7 +764,7 @@
     finally { state.paymentProofSubmitting = false; $('#submitPaymentProof').disabled = false; }
   });
   $('#authModal').addEventListener('click', event => { if (event.target.id === 'authModal') closeAuthModal(); });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#authModal').hidden) closeAuthModal(); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#authModal').hidden) closeAuthModal(); if (event.key === 'Escape' && !$('#accountModal').hidden) closeAccountModal(); if (event.key === 'Escape' && !$('#proUpgradeModal').hidden) closeProUpgradePopup(); });
 
   async function initialize() {
     await restoreUser();

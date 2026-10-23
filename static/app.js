@@ -104,8 +104,41 @@
   async function loadUsersPage(){
     $('#pendingPaymentsTable').innerHTML='<div class="loading-card">Đang tải yêu cầu thanh toán…</div>';
     $('#usersTable').innerHTML='<div class="loading-card">Đang tải danh sách tài khoản…</div>';
-    await Promise.all([loadPendingPayments(),loadUsers(),loadPaymentSummary()]);
+    await Promise.all([loadPendingPayments(),loadUsers(),loadPaymentSummary(),loadPlanConfig()]);
   }
+  async function loadPlanConfig(){
+    try {
+      const data=await api('/api/admin/plan-config');
+      $('#proPlanDescription').value=data.description||'';
+      $('#proPlanPriceLabel').value=data.price_label||'';
+      const preview=$('#proPlanQrPreview');
+      if(data.qr_image_url){preview.src=data.qr_image_url;preview.hidden=false;$('#proPlanQrCurrentLabel').textContent=data.qr_source==='database'?'QR hiện tại đang lưu trong PostgreSQL.': 'QR hiện tại lấy từ biến môi trường PAYMENT_QR_IMAGE_URL.';}
+      else {preview.removeAttribute('src');preview.hidden=true;$('#proPlanQrCurrentLabel').textContent='Chưa cấu hình ảnh QR.';}
+      $('#clearProPlanQr').checked=false;
+      $('#proPlanConfigStatus').textContent='';
+    } catch(err) { $('#proPlanConfigStatus').textContent=err.message||'Không tải được cấu hình gói Pro.'; }
+  }
+  $('#proPlanQrFile').addEventListener('change',()=>{if($('#proPlanQrFile').files.length)$('#clearProPlanQr').checked=false;});
+  $('#clearProPlanQr').addEventListener('change',()=>{if($('#clearProPlanQr').checked)$('#proPlanQrFile').value='';});
+  $('#proPlanConfigForm').addEventListener('submit',async e=>{
+    e.preventDefault();
+    const file=$('#proPlanQrFile').files[0];
+    if(file&&file.size>3*1024*1024){toast('Ảnh QR vượt quá 3 MB','error');return;}
+    const form=new FormData();
+    form.append('description',$('#proPlanDescription').value.trim());
+    form.append('price_label',$('#proPlanPriceLabel').value.trim());
+    form.append('clear_qr',$('#clearProPlanQr').checked?'true':'false');
+    if(file)form.append('qr',file);
+    $('#saveProPlanConfigBtn').disabled=true;$('#proPlanConfigStatus').textContent='Đang lưu cấu hình…';
+    try{
+      const response=await fetch('/api/admin/plan-config',{method:'PUT',headers:{Authorization:`Bearer ${token}`,Accept:'application/json'},body:form});
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(data.detail||`HTTP ${response.status}`);
+      $('#proPlanQrFile').value='';$('#clearProPlanQr').checked=false;
+      toast(data.message||'Đã lưu cấu hình gói Pro','success');await loadPlanConfig();
+    }catch(err){$('#proPlanConfigStatus').textContent=err.message;toast(err.message,'error');}
+    finally{$('#saveProPlanConfigBtn').disabled=false;}
+  });
   async function openPaymentProof(id, username){
     $('#paymentProofError').textContent=''; $('#paymentProofTitle').textContent=`Bằng chứng thanh toán · ${username||`#${id}`}`;
     $('#paymentProofImage').removeAttribute('src');

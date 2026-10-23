@@ -349,5 +349,38 @@ body{background:#fff;color:#202124;font-size:14px}
 .plan-badge{flex:0 0 auto;padding:6px 10px;border-radius:999px;font-size:9px;font-weight:900;letter-spacing:.5px}.plan-badge.free{background:#eef1f4;color:#596575}.plan-badge.pro{background:#fff0ce;color:#93600b;border:1px solid #f4d997}
 .plan-summary{font-size:11px;line-height:1.7;color:#596575;margin:12px 0}.plan-comparison{display:grid;grid-template-columns:1fr 1fr;gap:8px}.plan-comparison>div{display:flex;flex-direction:column;gap:6px;padding:11px;border:1px solid #e6e9ef;border-radius:10px;background:#fafbfc}.plan-comparison strong{color:#344354;font-size:12px}.plan-comparison span{font-size:10px;color:#667386;line-height:1.6}.plan-comparison .pro-plan-card{background:#fffaf0;border-color:#f0dfb7}.plan-comparison .pro-plan-card strong{color:#966413}.plan-comparison small{font-size:10px;color:#966413;font-weight:800}
 .payment-request-status{font-size:11px;line-height:1.6;color:#596575;margin:12px 0 0}.payment-request-status:empty{display:none}.payment-request-status.success{color:#188056}.payment-request-status.error{color:#b42318}.payment-qr-wrap{margin-top:14px;padding-top:13px;border-top:1px solid #e9ecef}.payment-qr-wrap h4{margin:0 0 6px;font-size:12px;color:var(--navy)}.payment-qr-wrap .section-subtitle{font-size:10px;line-height:1.7}.payment-qr-image{display:block;width:min(100%,270px);max-height:290px;object-fit:contain;margin:12px auto;padding:8px;border:1px solid #e4e7ec;border-radius:12px;background:#fff}.payment-secure-note{font-size:10px;color:#6b7787;line-height:1.65}.payment-proof-form{margin-top:13px}.payment-proof-form .auth-field{margin-bottom:11px}.payment-proof-form input[type=file]{font-size:10px;padding:9px}.payment-proof-form .auth-button{width:100%;font-size:10px;white-space:normal}.pro-upgrade-dialog{width:min(100%,390px)}#forgotPasswordLine{margin-top:4px}.pro-only-note{font-size:11px;color:#7a8490}
-@media(max-width:640px){.user-plan-panel{padding:12px}.plan-comparison{grid-template-columns:1fr}.plan-panel-heading h3{font-size:16px}.header-actions #openPlanButton{font-size:9px;padding:8px 9px}}
+@media(max-width:640px){.user-plan-panel{padding:12px}.plan-comparison{grid-template-columns:1fr}.plan-panel-heading h3{font-size:16px}}
 
+
+/* v0.7.25: account dropdown and consolidated account center */
+.account-menu{position:relative;display:flex;align-items:center}
+.account-menu-toggle{border:0;background:transparent;display:inline-flex;align-items:center;gap:7px;padding:9px 5px;color:#46645f;font:inherit;font-size:11px;font-weight:800;cursor:pointer;max-width:210px}
+.account-menu-toggle:hover{color:#db713f}
+.account-menu-toggle span{color:#78868b;font-size:14px}
+.account-menu-dropdown{position:absolute;right:0;top:calc(100% + 10px);z-index:30;min-width:190px;padding:6px;background:#fff;border:1px solid #e3e6e7;border-radius:12px;box-shadow:0 16px 42px rgba(16,43,63,.17);display:grid;gap:3px}
+.account-menu-dropdown button{border:0;background:transparent;border-radius:8px;padding:11px 12px;text-align:left;color:var(--navy);font:inherit;font-size:12px;font-weight:750;cursor:pointer}
+.account-menu-dropdown button:hover{background:#f1f5f3}
+.account-modal{z-index:120}
+.account-dialog{width:min(760px,calc(100vw - 24px));padding:26px;max-height:min(92vh,900px);overflow:auto}
+.account-dialog h2{font-size:28px}
+.account-dialog .auth-description{margin-bottom:17px}
+.account-tabs{display:flex;gap:7px;padding:5px;background:#f0f2ef;border-radius:12px;margin:0 0 18px}
+.account-tab{flex:1;border:1px solid transparent;border-radius:9px;background:transparent;padding:11px;color:#5f7477;font:inherit;font-size:12px;font-weight:800;cursor:pointer}
+.account-tab.active{background:#fff;border-color:#e1e6e2;color:var(--navy);box-shadow:0 2px 8px #142c390b}
+.account-tab-panel[hidden]{display:none!important}
+.account-plan-card{margin:0;padding:19px;box-shadow:none}
+.account-plan-card .plan-comparison{grid-template-columns:1fr 1fr}
+.account-plan-card .plan-comparison>div{padding:14px}
+.account-plan-card .plan-comparison span{font-size:11px}
+.account-plan-card .payment-qr-image{width:min(100%,320px);max-height:350px}
+.account-telegram-card{border:1px solid #e3e7e4;border-radius:15px;background:#fff;padding:20px}
+.account-telegram-card .section-subtitle{margin-top:0;margin-bottom:14px}
+.account-telegram-card .telegram-help{margin-bottom:0}
+.plan-config-preview-wrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px;border:1px solid var(--line);border-radius:10px;background:#fbfcfd}
+.plan-config-preview-wrap img{max-width:180px;max-height:180px;object-fit:contain;border:1px solid var(--line);border-radius:8px;background:#fff;padding:6px}
+#proPlanDescription{width:100%;min-height:110px;resize:vertical;border:1px solid #d9dfe7;border-radius:8px;padding:10px;font:inherit;font-size:12px;line-height:1.55;color:var(--ink);background:#fff}
+#proPlanConfigStatus{align-self:center;line-height:1.5}
+.account-plan-card #paymentInstructions{white-space:pre-line}
+@media(max-width:640px){.account-dialog{padding:22px 14px}.account-plan-card{padding:12px}.account-plan-card .plan-comparison{grid-template-columns:1fr}.account-menu-toggle{max-width:120px;font-size:9px}.account-menu-dropdown{min-width:170px}.header-actions{gap:4px}.account-tabs{gap:4px}.account-tab{font-size:11px;padding:10px 6px}.account-telegram-card{padding:13px}}
+
+.account-plan-card .plan-select-button{margin-top:6px;padding:9px 11px;white-space:normal;font-size:11px}
