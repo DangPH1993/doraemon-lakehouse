@@ -37,5 +37,16 @@ class Settings:
     telegram_bot_username: str = os.getenv('TELEGRAM_BOT_USERNAME', '').strip().lstrip('@')
     telegram_webhook_secret: str = os.getenv('TELEGRAM_WEBHOOK_SECRET', '').strip()
     telegram_digest_max_articles: int = int(os.getenv('TELEGRAM_DIGEST_MAX_ARTICLES', '12'))
+    # Subscription / payment configuration. The QR image must be publicly reachable via HTTPS.
+    payment_qr_image_url: str = os.getenv('PAYMENT_QR_IMAGE_URL', '').strip()
+    payment_instructions: str = os.getenv('PAYMENT_INSTRUCTIONS', 'Quét mã QR, hoàn tất thanh toán và tải ảnh chụp giao dịch để admin xác nhận.').strip()
+    pro_plan_price_label: str = os.getenv('PRO_PLAN_PRICE_LABEL', '').strip()
+    public_app_url: str = os.getenv('PUBLIC_APP_URL', '').strip().rstrip('/')
+    smtp_host: str = os.getenv('SMTP_HOST', '').strip()
+    smtp_port: int = int(os.getenv('SMTP_PORT', '587'))
+    smtp_username: str = os.getenv('SMTP_USERNAME', '').strip()
+    smtp_password: str = os.getenv('SMTP_PASSWORD', '')
+    smtp_from_email: str = os.getenv('SMTP_FROM_EMAIL', '').strip()
+    smtp_starttls: bool = os.getenv('SMTP_STARTTLS', 'true').strip().lower() in {'1','true','yes','on'}
 
 settings = Settings()

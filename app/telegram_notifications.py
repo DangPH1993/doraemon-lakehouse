@@ -16,7 +16,6 @@ import requests
 
 from .config import settings
 from .db import fetch_all, get_conn
-from . import cloudflare_lakehouse as cf_lakehouse
 
 log = logging.getLogger("mini-lakehouse.telegram")
 TELEGRAM_API_ROOT = "https://api.telegram.org/bot"
@@ -144,7 +143,7 @@ WITH matches AS (
     JOIN topics t ON t.topic_id=ust.topic_id AND t.status='active' AND t.topic_type='event'
     JOIN article_topics at ON at.topic_id=t.topic_id
     JOIN news_articles a ON a.article_id=at.article_id AND a.is_excluded=false
-    WHERE u.telegram_enabled=true AND u.telegram_chat_id IS NOT NULL
+    WHERE u.plan='Pro' AND u.telegram_enabled=true AND u.telegram_chat_id IS NOT NULL
       AND u.telegram_notifications_since IS NOT NULL
       AND a.collected_at >= u.telegram_notifications_since
       AND a.collected_at >= now() - interval '90 days'
@@ -160,7 +159,7 @@ WITH matches AS (
     JOIN entities e ON e.entity_id=ust.entity_id AND e.status='active'
     JOIN article_entities ae ON ae.entity_id=e.entity_id
     JOIN news_articles a ON a.article_id=ae.article_id AND a.is_excluded=false
-    WHERE u.telegram_enabled=true AND u.telegram_chat_id IS NOT NULL
+    WHERE u.plan='Pro' AND u.telegram_enabled=true AND u.telegram_chat_id IS NOT NULL
       AND u.telegram_notifications_since IS NOT NULL
       AND a.collected_at >= u.telegram_notifications_since
       AND a.collected_at >= now() - interval '90 days'
@@ -195,84 +194,6 @@ ORDER BY user_id, row_num
 """
 
 
-def _send_iceberg_telegram_digests(limit: int) -> dict:
-    """Send Telegram digests from Iceberg articles; PostgreSQL stores only users/follows/delivery markers."""
-    users = fetch_all("""SELECT user_id,telegram_chat_id,telegram_notifications_since
-                       FROM app_users WHERE telegram_enabled=true AND telegram_chat_id IS NOT NULL
-                         AND telegram_notifications_since IS NOT NULL ORDER BY user_id""")
-    stats = {"status":"completed","users_attempted":0,"messages_sent":0,"articles_sent":0,"failed_users":0}
-    for user in users:
-        user_id=int(user['user_id']); chat_id=str(user['telegram_chat_id']); since=user['telegram_notifications_since']
-        saved=fetch_all("SELECT timeline_type AS type,coalesce(topic_id,entity_id)::bigint AS id,display_order FROM user_saved_timelines WHERE user_id=%s ORDER BY display_order",(user_id,))
-        followed=[]
-        for item in saved:
-            try:
-                if item['type']=='topic':
-                    rows=cf_lakehouse.query("SELECT topic_id AS id,name FROM topics WHERE topic_id=? AND status='active' AND topic_type='event'",[int(item['id'])])
-                else:
-                    rows=cf_lakehouse.query("SELECT entity_id AS id,canonical_name AS name FROM entities WHERE entity_id=? AND status='active'",[int(item['id'])])
-            except Exception as exc:
-                log.exception("Telegram Iceberg digest catalog read failed")
-                raise RuntimeError("Could not read the Iceberg catalog for Telegram digest") from exc
-            if rows:
-                followed.append({"type":item['type'],"id":int(item['id']),"name":rows[0].get('name') or '',"display_order":int(item['display_order'] or 0)})
-        if not followed:
-            continue
-        values_sql=','.join('(CAST(? AS VARCHAR),CAST(? AS BIGINT),CAST(? AS VARCHAR),CAST(? AS INTEGER))' for _ in followed)
-        params=[]
-        for item in followed:
-            params.extend([item['type'],item['id'],item['name'],item['display_order']])
-        params.extend([since, max(100,limit*40)])
-        sql=f"""WITH followed(follow_type,follow_id,follow_name,display_order) AS (VALUES {values_sql}), matches AS (
-          SELECT f.follow_type,f.follow_id,f.follow_name,f.display_order,a.article_id,a.title,a.url,a.published_at,a.collected_at,
-                 s.name AS source_name,a.is_excluded
-          FROM followed f JOIN article_topics rel ON f.follow_type='topic' AND rel.topic_id=f.follow_id
-          JOIN news_articles a ON a.article_id=rel.article_id JOIN data_sources s ON s.source_id=a.source_id
-          WHERE a.is_excluded=false AND a.collected_at>=? AND a.collected_at>=current_timestamp-INTERVAL '90 days'
-          UNION ALL
-          SELECT f.follow_type,f.follow_id,f.follow_name,f.display_order,a.article_id,a.title,a.url,a.published_at,a.collected_at,
-                 s.name AS source_name,a.is_excluded
-          FROM followed f JOIN article_entities rel ON f.follow_type='entity' AND rel.entity_id=f.follow_id
-          JOIN news_articles a ON a.article_id=rel.article_id JOIN data_sources s ON s.source_id=a.source_id
-          WHERE a.is_excluded=false AND a.collected_at>=? AND a.collected_at>=current_timestamp-INTERVAL '90 days'
-        ) SELECT * FROM matches ORDER BY collected_at ASC,article_id ASC LIMIT ?"""
-        params2=params[:-2]+[since,since,params[-1]]
-        try:
-            rows=cf_lakehouse.query(sql,params2)
-        except Exception as exc:
-            log.exception("Telegram Iceberg digest query failed")
-            raise RuntimeError("Could not query Iceberg articles for Telegram digest") from exc
-        delivered=fetch_all("SELECT article_id FROM user_telegram_deliveries WHERE user_id=%s AND sent_at>=now()-interval '90 days'",(user_id,))
-        delivered_ids={int(x['article_id']) for x in delivered}
-        by_article={}
-        for item in rows:
-            aid=int(item['article_id'])
-            if aid in delivered_ids: continue
-            row=by_article.setdefault(aid,{"article_id":aid,"title":item['title'],"url":item['url'],
-                "published_at":item.get('published_at'),"collected_at":item.get('collected_at'),"source_name":item.get('source_name'),
-                "matched_topics":[],"matched_entities":[]})
-            key='matched_topics' if item['follow_type']=='topic' else 'matched_entities'
-            match={"id":int(item['follow_id']),"name":item.get('follow_name') or ''}
-            if not any(int(x.get('id',0))==match['id'] for x in row[key]): row[key].append(match)
-        user_rows=sorted(by_article.values(),key=lambda x:(str(x.get('collected_at') or ''),int(x['article_id'])))[:limit]
-        if not user_rows: continue
-        stats['users_attempted']+=1
-        message, article_ids=build_digest(user_rows)
-        if not message or not article_ids: continue
-        try:
-            send_telegram_text(chat_id,message)
-            with get_conn() as conn, conn.cursor() as cur:
-                cur.executemany("INSERT INTO user_telegram_deliveries(user_id,article_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
-                                [(user_id,article_id) for article_id in article_ids])
-            stats['messages_sent']+=1; stats['articles_sent']+=len(article_ids)
-        except Exception as exc:
-            stats['failed_users']+=1
-            log.exception("Telegram Iceberg digest failed for user_id=%s: %s",user_id,str(exc)[:240])
-    if stats['failed_users']: stats['status']='partial'
-    if not stats['messages_sent'] and not stats['failed_users']: stats['status']='no_pending_articles'
-    return stats
-
-
 def send_telegram_digests() -> dict:
     """Send one bounded digest per enabled user and record each successful delivery."""
     if not settings.telegram_bot_token:
@@ -280,8 +201,6 @@ def send_telegram_digests() -> dict:
         return {"status": "skipped_missing_token", "users_attempted": 0, "messages_sent": 0, "articles_sent": 0, "failed_users": 0}
 
     limit = max(1, min(int(settings.telegram_digest_max_articles), 20))
-    if cf_lakehouse.direct_writes_enabled() and cf_lakehouse.lakehouse_reads_enabled():
-        return _send_iceberg_telegram_digests(limit)
     rows = fetch_all(_PENDING_SQL, (limit,))
     if not rows:
         log.info("Telegram digest: no undelivered article matches for enabled users.")

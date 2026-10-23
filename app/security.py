@@ -98,7 +98,7 @@ async def require_user(
         raise HTTPException(status_code=401, detail='Vui lòng đăng nhập để sử dụng chức năng này.')
     from .db import fetch_one
     user = fetch_one(
-        'SELECT user_id, username, email FROM app_users WHERE user_id=%s AND is_active=true',
+        'SELECT user_id, username, email, plan FROM app_users WHERE user_id=%s AND is_active=true',
         (claims['sub'],),
     )
     if not user:

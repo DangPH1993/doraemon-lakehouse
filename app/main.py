@@ -1,15 +1,16 @@
 from __future__ import annotations
-import json, logging, threading, secrets, hmac, re
+import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl
 from datetime import date, timedelta
 from typing import Literal
 import re
 from urllib.parse import urlparse
 import requests
-from fastapi import FastAPI, Depends, HTTPException, Query, Body, Request, Response, Header
+from fastapi import FastAPI, Depends, HTTPException, Query, Body, Request, Response, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from email.message import EmailMessage
 from .config import settings
 from .db import get_conn, fetch_all, fetch_one
 from .security import (issue_token, require_admin, hash_password, verify_password, issue_user_token, require_user)
@@ -22,7 +23,7 @@ from .field_categories import FIELD_CATEGORIES, LEGACY_BROAD_TOPIC_LABELS, is_br
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.23',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.24',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -52,6 +53,27 @@ class UserRegisterBody(BaseModel):
 class UserLoginBody(BaseModel):
     identifier: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=128)
+
+class ForgotPasswordBody(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    @field_validator('email')
+    @classmethod
+    def valid_reset_email(cls, value):
+        value = value.strip().lower()
+        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', value):
+            raise ValueError('Email chưa đúng định dạng.')
+        return value
+
+class ResetPasswordBody(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    new_password: str = Field(min_length=8, max_length=128)
+
+class UserPlanBody(BaseModel):
+    plan: Literal['Free', 'Pro']
+
+class PaymentReviewBody(BaseModel):
+    decision: Literal['approve', 'reject']
+    note: str = Field(default='', max_length=1000)
 
 class SavedTimelineRef(BaseModel):
     type: Literal['topic', 'entity']
@@ -157,7 +179,7 @@ def register_user(body: UserRegisterBody, request: Request, response: Response):
         user = fetch_one("""INSERT INTO app_users(username, username_normalized, email, email_normalized, password_hash, last_login_at)
                              VALUES (%s, %s, %s, %s, %s, now())
                              ON CONFLICT DO NOTHING
-                             RETURNING user_id, username, email""",
+                             RETURNING user_id, username, email, plan""",
                          (username, username_normalized, email, email, hash_password(body.password)))
     except Exception as exc:
         log.exception('User registration failed')
@@ -174,7 +196,7 @@ def login_user(body: UserLoginBody, request: Request, response: Response):
         raise HTTPException(status_code=503, detail='Máy chủ chưa cấu hình SESSION_SECRET.')
     identifier = body.identifier.strip().lower()
     try:
-        user = fetch_one("""SELECT user_id, username, email, password_hash
+        user = fetch_one("""SELECT user_id, username, email, plan, password_hash
                              FROM app_users
                              WHERE (username_normalized=%s OR email_normalized=%s) AND is_active=true""",
                          (identifier, identifier))
@@ -189,7 +211,7 @@ def login_user(body: UserLoginBody, request: Request, response: Response):
         log.exception('User login timestamp could not be updated')
         raise HTTPException(status_code=503, detail='Không thể cập nhật phiên đăng nhập lúc này.') from exc
     _set_user_cookie(response, request, issue_user_token(user['user_id'], user['username']))
-    return {'user': {'user_id': user['user_id'], 'username': user['username'], 'email': user['email']}, 'expires_in': 604800}
+    return {'user': {'user_id': user['user_id'], 'username': user['username'], 'email': user['email'], 'plan': user.get('plan', 'Free')}, 'expires_in': 604800}
 
 
 @app.post('/api/user-auth/logout')
@@ -203,8 +225,224 @@ def current_user(user: dict = Depends(require_user)):
     return {'user': user}
 
 
+# Subscription, payment evidence, and password recovery.
+MAX_PAYMENT_PROOF_BYTES = 3 * 1024 * 1024
+ALLOWED_PAYMENT_MIME = {'image/jpeg', 'image/png', 'image/webp'}
+
+
+def _ensure_pro_user(user: dict) -> None:
+    if str(user.get('plan') or 'Free') != 'Pro':
+        raise HTTPException(status_code=403, detail='Vui lòng nâng cấp lên gói Pro để follow tin tức và nhận thông báo tin mới qua telegram!')
+
+
+def _valid_image_signature(content: bytes, content_type: str) -> bool:
+    if content_type == 'image/jpeg': return content.startswith(b'\xff\xd8\xff')
+    if content_type == 'image/png': return content.startswith(b'\x89PNG\r\n\x1a\n')
+    if content_type == 'image/webp': return len(content) >= 12 and content[:4] == b'RIFF' and content[8:12] == b'WEBP'
+    return False
+
+
+@app.get('/api/user/plan')
+def get_user_plan(user: dict = Depends(require_user)):
+    latest = fetch_one("""SELECT payment_request_id, requested_plan, status, note, created_at, reviewed_at, admin_note
+                          FROM payment_requests WHERE user_id=%s ORDER BY created_at DESC, payment_request_id DESC LIMIT 1""", (user['user_id'],))
+    return {
+        'plan': user.get('plan') or 'Free',
+        'pro_price_label': settings.pro_plan_price_label or None,
+        'qr_image_url': settings.payment_qr_image_url or None,
+        'payment_instructions': settings.payment_instructions,
+        'payment_request': latest,
+        'can_follow': user.get('plan') == 'Pro',
+    }
+
+
+@app.post('/api/user/payment-requests')
+async def submit_payment_request(
+    proof: UploadFile = File(...),
+    note: str = Form(default='', max_length=1000),
+    user: dict = Depends(require_user),
+):
+    if user.get('plan') == 'Pro':
+        raise HTTPException(status_code=409, detail='Tài khoản của bạn đang ở gói Pro.')
+    if not settings.payment_qr_image_url:
+        raise HTTPException(status_code=503, detail='Admin chưa cấu hình mã QR thanh toán. Vui lòng quay lại sau.')
+    content_type = (proof.content_type or '').lower().split(';', 1)[0].strip()
+    if content_type not in ALLOWED_PAYMENT_MIME:
+        raise HTTPException(status_code=415, detail='Chỉ chấp nhận ảnh JPG, PNG hoặc WebP làm bằng chứng thanh toán.')
+    content = await proof.read(MAX_PAYMENT_PROOF_BYTES + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail='Ảnh bằng chứng đang trống.')
+    if len(content) > MAX_PAYMENT_PROOF_BYTES:
+        raise HTTPException(status_code=413, detail='Ảnh quá lớn. Vui lòng chọn ảnh nhỏ hơn 3 MB.')
+    if not _valid_image_signature(content, content_type):
+        raise HTTPException(status_code=415, detail='Nội dung file không khớp với định dạng ảnh được hỗ trợ.')
+    filename = (proof.filename or 'payment-proof').replace('\\', '/').split('/')[-1][:180]
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT payment_request_id FROM payment_requests WHERE user_id=%s AND status='pending' FOR UPDATE", (user['user_id'],))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail='Bạn đã gửi bằng chứng thanh toán và đang chờ admin xác nhận.')
+            cur.execute("""INSERT INTO payment_requests
+                (user_id, requested_plan, status, note, proof_filename, proof_mime_type, proof_data)
+                VALUES (%s, 'Pro', 'pending', %s, %s, %s, %s) RETURNING payment_request_id, status, created_at""",
+                (user['user_id'], note.strip(), filename, content_type, content))
+            row = cur.fetchone()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if getattr(exc, 'sqlstate', None) == '23505':
+            raise HTTPException(status_code=409, detail='Bạn đã gửi bằng chứng thanh toán và đang chờ admin xác nhận.') from exc
+        log.exception('Could not save Pro payment request')
+        raise HTTPException(status_code=503, detail='Không thể lưu bằng chứng thanh toán. Kiểm tra migration SQL 018.') from exc
+    return {'ok': True, 'payment_request': row, 'message': 'Đã gửi bằng chứng thanh toán. Admin sẽ kiểm tra trước khi kích hoạt gói Pro.'}
+
+
+@app.post('/api/user-auth/forgot-password')
+def forgot_password(body: ForgotPasswordBody, request: Request):
+    if not (settings.smtp_host and settings.smtp_from_email):
+        raise HTTPException(status_code=503, detail='Chức năng quên mật khẩu chưa được cấu hình SMTP. Quản trị viên cần cấu hình SMTP_HOST và SMTP_FROM_EMAIL.')
+    email = body.email.strip().lower()
+    user = fetch_one("SELECT user_id, username, email FROM app_users WHERE email_normalized=%s AND is_active=true", (email,))
+    # Return the same result whether an account exists or not, avoiding account enumeration.
+    if user:
+        recent = fetch_one("SELECT count(*)::int AS n FROM user_password_reset_tokens WHERE user_id=%s AND created_at>now()-interval '2 minutes'", (user['user_id'],))
+        if int((recent or {}).get('n') or 0) >= 1:
+            return {'ok': True, 'message': 'Nếu email đã đăng ký trong hệ thống, hướng dẫn đặt lại mật khẩu sẽ được gửi đến hộp thư.'}
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+        try:
+            fetch_one("DELETE FROM user_password_reset_tokens WHERE user_id=%s AND consumed_at IS NULL RETURNING token_hash", (user['user_id'],))
+            fetch_one("""INSERT INTO user_password_reset_tokens(token_hash,user_id,expires_at)
+                         VALUES (%s,%s,now()+interval '30 minutes') RETURNING token_hash""", (token_hash, user['user_id']))
+            base = settings.public_app_url or str(request.base_url).rstrip('/')
+            reset_url = f"{base}/news#reset_token={raw_token}"
+            message = EmailMessage()
+            message['Subject'] = 'Đặt lại mật khẩu News Radar'
+            message['From'] = settings.smtp_from_email
+            message['To'] = user['email']
+            message.set_content(f"Xin chào {user['username']},\n\nBạn đã yêu cầu đặt lại mật khẩu News Radar. Mở liên kết sau trong vòng 30 phút:\n{reset_url}\n\nNếu bạn không yêu cầu, hãy bỏ qua email này.")
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
+                if settings.smtp_starttls:
+                    smtp.starttls(context=ssl.create_default_context())
+                if settings.smtp_username:
+                    smtp.login(settings.smtp_username, settings.smtp_password)
+                smtp.send_message(message)
+        except Exception as exc:
+            log.exception('Password reset email could not be sent')
+            try: fetch_one("DELETE FROM user_password_reset_tokens WHERE token_hash=%s RETURNING token_hash", (token_hash,))
+            except Exception: log.exception('Could not remove unused password reset token')
+            raise HTTPException(status_code=503, detail='Không gửi được email đặt lại mật khẩu. Kiểm tra cấu hình SMTP.') from exc
+    return {'ok': True, 'message': 'Nếu email đã đăng ký trong hệ thống, hướng dẫn đặt lại mật khẩu sẽ được gửi đến hộp thư.'}
+
+
+@app.post('/api/user-auth/reset-password')
+def reset_password(body: ResetPasswordBody):
+    token_hash = hashlib.sha256(body.token.encode('utf-8')).hexdigest()
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT user_id FROM user_password_reset_tokens
+                           WHERE token_hash=%s AND consumed_at IS NULL AND expires_at>now() FOR UPDATE""", (token_hash,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=400, detail='Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Hãy yêu cầu liên kết mới.')
+            cur.execute("UPDATE app_users SET password_hash=%s WHERE user_id=%s", (hash_password(body.new_password), row['user_id']))
+            cur.execute("UPDATE user_password_reset_tokens SET consumed_at=now() WHERE token_hash=%s", (token_hash,))
+            cur.execute("UPDATE user_password_reset_tokens SET consumed_at=now() WHERE user_id=%s AND consumed_at IS NULL", (row['user_id'],))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception('Password reset failed')
+        raise HTTPException(status_code=503, detail='Không thể đổi mật khẩu lúc này. Vui lòng thử lại sau.') from exc
+    return {'ok': True, 'message': 'Đã đổi mật khẩu. Bạn có thể đăng nhập bằng mật khẩu mới.'}
+
+
+@app.get('/api/admin/payment-summary', dependencies=[Depends(require_admin)])
+def admin_payment_summary():
+    row = fetch_one("SELECT count(*)::int AS pending_count FROM payment_requests WHERE status='pending'")
+    return {'pending_count': int((row or {}).get('pending_count') or 0)}
+
+
+@app.get('/api/admin/payment-requests', dependencies=[Depends(require_admin)])
+def admin_payment_requests(status: str = Query(default='pending', regex='^(pending|approved|rejected|all)$'), limit: int = Query(default=100, ge=1, le=500)):
+    where = '' if status == 'all' else 'WHERE pr.status=%s'
+    params = () if status == 'all' else (status,)
+    return fetch_all(f"""SELECT pr.payment_request_id,pr.user_id,u.username,u.email,pr.requested_plan,pr.status,
+                                pr.note,pr.created_at,pr.reviewed_at,pr.admin_note,
+                                (pr.proof_data IS NOT NULL) AS has_proof
+                         FROM payment_requests pr JOIN app_users u ON u.user_id=pr.user_id
+                         {where}
+                         ORDER BY CASE WHEN pr.status='pending' THEN 0 ELSE 1 END, pr.created_at DESC
+                         LIMIT %s""", (*params, limit))
+
+
+@app.get('/api/admin/payment-requests/{payment_request_id}/proof', dependencies=[Depends(require_admin)])
+def admin_payment_proof(payment_request_id: int):
+    row = fetch_one("SELECT proof_data,proof_mime_type,proof_filename FROM payment_requests WHERE payment_request_id=%s", (payment_request_id,))
+    if not row or not row.get('proof_data'):
+        raise HTTPException(status_code=404, detail='Không tìm thấy ảnh bằng chứng thanh toán.')
+    filename = re.sub(r'[^A-Za-z0-9_.-]', '_', row.get('proof_filename') or 'payment-proof')
+    return Response(content=bytes(row['proof_data']), media_type=row.get('proof_mime_type') or 'application/octet-stream',
+                    headers={'Content-Disposition': f'inline; filename="{filename}"', 'Cache-Control': 'no-store'})
+
+
+@app.post('/api/admin/payment-requests/{payment_request_id}/review', dependencies=[Depends(require_admin)])
+def review_payment_request(payment_request_id: int, body: PaymentReviewBody):
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT payment_request_id,user_id,status FROM payment_requests WHERE payment_request_id=%s FOR UPDATE", (payment_request_id,))
+            row = cur.fetchone()
+            if not row: raise HTTPException(status_code=404, detail='Không tìm thấy yêu cầu thanh toán.')
+            if row['status'] != 'pending': raise HTTPException(status_code=409, detail='Yêu cầu này đã được xử lý trước đó.')
+            next_status = 'approved' if body.decision == 'approve' else 'rejected'
+            cur.execute("UPDATE payment_requests SET status=%s,reviewed_at=now(),reviewed_by=%s,admin_note=%s WHERE payment_request_id=%s",
+                        (next_status, settings.admin_username, body.note.strip(), payment_request_id))
+            if body.decision == 'approve':
+                cur.execute("UPDATE app_users SET plan='Pro',plan_updated_at=now(),plan_updated_by=%s WHERE user_id=%s", (settings.admin_username, row['user_id']))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception('Payment request review failed')
+        raise HTTPException(status_code=503, detail='Không thể duyệt thanh toán. Kiểm tra migration SQL 018.') from exc
+    return {'ok': True, 'status': next_status, 'plan': 'Pro' if body.decision == 'approve' else None}
+
+
+@app.get('/api/admin/users', dependencies=[Depends(require_admin)])
+def admin_list_users(q: str | None = None, limit: int = Query(default=200, ge=1, le=500)):
+    search = (q or '').strip()
+    where = 'WHERE (u.username ILIKE %s OR u.email ILIKE %s)' if search else ''
+    params = (f'%{search}%', f'%{search}%') if search else ()
+    return fetch_all(f"""WITH latest_payment AS (
+                           SELECT DISTINCT ON (user_id) payment_request_id,user_id,status,requested_plan,created_at
+                           FROM payment_requests ORDER BY user_id,created_at DESC,payment_request_id DESC
+                         )
+                         SELECT u.user_id,u.username,u.email,u.plan,u.is_active,u.created_at,u.last_login_at,
+                                lp.payment_request_id,lp.status AS payment_status,lp.requested_plan,lp.created_at AS payment_created_at
+                         FROM app_users u LEFT JOIN latest_payment lp ON lp.user_id=u.user_id
+                         {where}
+                         ORDER BY CASE WHEN lp.status='pending' THEN 0 ELSE 1 END, lp.created_at DESC NULLS LAST, u.created_at DESC
+                         LIMIT %s""", (*params, limit))
+
+
+@app.patch('/api/admin/users/{user_id}/plan', dependencies=[Depends(require_admin)])
+def admin_set_user_plan(user_id: int, body: UserPlanBody):
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE app_users SET plan=%s,plan_updated_at=now(),plan_updated_by=%s,telegram_enabled=CASE WHEN %s='Free' THEN false ELSE telegram_enabled END WHERE user_id=%s RETURNING user_id,username,email,plan",
+                        (body.plan, settings.admin_username, body.plan, user_id))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail='Không tìm thấy tài khoản người dùng.')
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception('Could not manually change user plan')
+        raise HTTPException(status_code=503, detail='Không thể cập nhật gói. Kiểm tra migration SQL 018.') from exc
+    return {'ok': True, 'user': row}
+
+
 @app.get('/api/user/timeline-options')
 def user_timeline_options(user: dict = Depends(require_user)):
+    _ensure_pro_user(user)
     topics = fetch_all("""SELECT t.topic_id AS id, t.name, coalesce(t.description,'') AS description,
                                 count(DISTINCT a.article_id)::int AS article_count,
                                 count(DISTINCT a.source_id)::int AS source_count
@@ -231,6 +469,8 @@ def user_timeline_options(user: dict = Depends(require_user)):
 
 @app.get('/api/user/saved-timelines')
 def get_saved_timelines(user: dict = Depends(require_user)):
+    if user.get('plan') != 'Pro':
+        return {'items': []}
     items = fetch_all("""SELECT timeline_kind AS type, id, name, display_order, article_count
                          FROM (
                            SELECT 'topic'::text AS timeline_kind, t.topic_id::bigint AS id, t.name,
@@ -262,6 +502,11 @@ def replace_saved_timelines(body: SaveTimelinesBody, user: dict = Depends(requir
         if key not in seen:
             seen.add(key)
             items.append(item)
+    if user.get('plan') != 'Pro' and items:
+        existing = fetch_all("SELECT timeline_type AS type,coalesce(topic_id,entity_id)::bigint AS id FROM user_saved_timelines WHERE user_id=%s", (user['user_id'],))
+        existing_keys = {(str(x['type']), int(x['id'])) for x in existing}
+        if any((x.type, x.id) not in existing_keys for x in items):
+            raise HTTPException(status_code=403, detail='Vui lòng nâng cấp lên gói Pro để follow tin tức và nhận thông báo tin mới qua telegram!')
     topic_ids = [item.id for item in items if item.type == 'topic']
     entity_ids = [item.id for item in items if item.type == 'entity']
     valid_topics = set()
@@ -316,6 +561,7 @@ def get_user_telegram_settings(user: dict = Depends(require_user)):
 
 @app.post('/api/user/telegram/link')
 def create_user_telegram_link(user: dict = Depends(require_user)):
+    _ensure_pro_user(user)
     if not (settings.telegram_bot_token and re.fullmatch(r'[A-Za-z0-9_]{5,32}', settings.telegram_bot_username or '') and settings.telegram_webhook_secret):
         raise HTTPException(status_code=503, detail='Máy chủ chưa cấu hình Telegram. Quản trị viên cần đặt TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME và TELEGRAM_WEBHOOK_SECRET.')
     code = secrets.token_urlsafe(24)
@@ -339,6 +585,7 @@ def create_user_telegram_link(user: dict = Depends(require_user)):
 
 @app.put('/api/user/telegram/settings')
 def update_user_telegram_settings(body: TelegramSettingsBody, user: dict = Depends(require_user)):
+    _ensure_pro_user(user)
     try:
         current = fetch_one('SELECT telegram_chat_id, telegram_enabled FROM app_users WHERE user_id=%s AND is_active=true', (user['user_id'],))
         if not current:
@@ -363,6 +610,7 @@ def update_user_telegram_settings(body: TelegramSettingsBody, user: dict = Depen
 
 @app.delete('/api/user/telegram/link')
 def unlink_user_telegram(user: dict = Depends(require_user)):
+    _ensure_pro_user(user)
     try:
         row = fetch_one(
             "UPDATE app_users SET telegram_chat_id=NULL, telegram_enabled=false, telegram_notifications_since=NULL, "
@@ -676,6 +924,7 @@ def public_daily_articles(
 @app.get('/api/user/feed')
 def user_news_feed(user: dict = Depends(require_user)):
     """Return followed topic/entity groups with at most five latest articles per group."""
+    _ensure_pro_user(user)
     rows = fetch_all("""WITH followed AS (
           SELECT 'topic'::text AS follow_type, t.topic_id::bigint AS follow_id,
                  t.name AS follow_name, ust.display_order
