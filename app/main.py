@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import requests
 from fastapi import FastAPI, Depends, HTTPException, Query, Body, Request, Response, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from email.message import EmailMessage
@@ -23,7 +23,7 @@ from .field_categories import FIELD_CATEGORIES, LEGACY_BROAD_TOPIC_LABELS, is_br
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.24',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.25',description='News Radar with GenAI entity-quality validation and physical cleanup for rejected Entities, required-field Topics, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -242,18 +242,142 @@ def _valid_image_signature(content: bytes, content_type: str) -> bool:
     return False
 
 
+def _get_plan_config_row():
+    try:
+        return fetch_one("""SELECT payment_qr_data, payment_qr_mime_type, payment_qr_filename, payment_qr_override,
+                                 pro_plan_description, pro_plan_price_label, updated_at
+                          FROM app_runtime_settings WHERE setting_key='pro_plan'""")
+    except Exception:
+        # Preserve the legacy environment-based configuration if migration 019
+        # has not been applied yet. Admin save routes still clearly require it.
+        log.warning('Plan runtime settings unavailable; using environment defaults', exc_info=True)
+        return None
+
+
+def _effective_plan_config(request: Request | None = None) -> dict:
+    row = _get_plan_config_row() or {}
+    has_db_qr = bool(row.get('payment_qr_data'))
+    env_qr = (settings.payment_qr_image_url or '').strip() or None
+    fallback_qr = None if bool(row.get('payment_qr_override')) else env_qr
+    qr_url = None
+    if has_db_qr and request is not None:
+        version = row.get('updated_at')
+        version_key = str(int(version.timestamp())) if hasattr(version, 'timestamp') else 'current'
+        configured_base = (settings.public_app_url or '').strip().rstrip('/')
+        if not configured_base or 'YOUR-NEWS-RADAR-DOMAIN' in configured_base or not configured_base.startswith('https://'):
+            configured_base = str(request.base_url).rstrip('/')
+        public_base = configured_base
+        qr_url = f"{public_base}/api/public/plan-config/qr?v={version_key}"
+    elif fallback_qr:
+        qr_url = fallback_qr
+    return {
+        'pro_price_label': (row.get('pro_plan_price_label') or '').strip() or settings.pro_plan_price_label or None,
+        'qr_image_url': qr_url,
+        'qr_configured': has_db_qr or bool(fallback_qr),
+        'payment_instructions': row.get('pro_plan_description') if row.get('pro_plan_description') is not None else settings.payment_instructions,
+        'qr_data': row.get('payment_qr_data'),
+        'qr_mime_type': row.get('payment_qr_mime_type'),
+        'qr_filename': row.get('payment_qr_filename'),
+        'updated_at': row.get('updated_at'),
+    }
+
+
+@app.get('/api/public/plan-config/qr')
+def public_plan_qr():
+    config = _get_plan_config_row() or {}
+    image_data = config.get('payment_qr_data')
+    image_type = config.get('payment_qr_mime_type')
+    if image_data and image_type in ALLOWED_PAYMENT_MIME:
+        return Response(content=bytes(image_data), media_type=image_type,
+                        headers={'Cache-Control': 'public, max-age=300', 'X-Content-Type-Options': 'nosniff'})
+    if not config.get('payment_qr_override') and settings.payment_qr_image_url:
+        return RedirectResponse(settings.payment_qr_image_url, status_code=307)
+    raise HTTPException(status_code=404, detail='QR thanh toán chưa được cấu hình.')
+
+
 @app.get('/api/user/plan')
-def get_user_plan(user: dict = Depends(require_user)):
+def get_user_plan(request: Request, user: dict = Depends(require_user)):
     latest = fetch_one("""SELECT payment_request_id, requested_plan, status, note, created_at, reviewed_at, admin_note
                           FROM payment_requests WHERE user_id=%s ORDER BY created_at DESC, payment_request_id DESC LIMIT 1""", (user['user_id'],))
+    config = _effective_plan_config(request)
     return {
         'plan': user.get('plan') or 'Free',
-        'pro_price_label': settings.pro_plan_price_label or None,
-        'qr_image_url': settings.payment_qr_image_url or None,
-        'payment_instructions': settings.payment_instructions,
+        'pro_price_label': config['pro_price_label'],
+        'qr_image_url': config['qr_image_url'],
+        'payment_instructions': config['payment_instructions'],
         'payment_request': latest,
         'can_follow': user.get('plan') == 'Pro',
     }
+
+
+@app.get('/api/admin/plan-config', dependencies=[Depends(require_admin)])
+def get_admin_plan_config(request: Request):
+    row = fetch_one("""SELECT payment_qr_data, payment_qr_mime_type, payment_qr_filename, payment_qr_override,
+                             pro_plan_description, pro_plan_price_label, updated_at
+                      FROM app_runtime_settings WHERE setting_key='pro_plan'""")
+    config = _effective_plan_config(request)
+    return {
+        'description': (row.get('pro_plan_description') if row and row.get('pro_plan_description') is not None else settings.payment_instructions),
+        'price_label': ((row.get('pro_plan_price_label') or settings.pro_plan_price_label or '') if row else settings.pro_plan_price_label),
+        'qr_configured': bool((row or {}).get('payment_qr_data')) or (not bool((row or {}).get('payment_qr_override')) and bool(settings.payment_qr_image_url)),
+        'qr_mime_type': (row or {}).get('payment_qr_mime_type'),
+        'qr_filename': (row or {}).get('payment_qr_filename'),
+        'qr_image_url': config['qr_image_url'],
+        'updated_at': (row or {}).get('updated_at'),
+        'qr_source': 'database' if (row or {}).get('payment_qr_data') else ('environment' if not bool((row or {}).get('payment_qr_override')) and settings.payment_qr_image_url else 'none'),
+    }
+
+
+@app.put('/api/admin/plan-config', dependencies=[Depends(require_admin)])
+async def update_admin_plan_config(
+    description: str = Form(default='', max_length=5000),
+    price_label: str = Form(default='', max_length=120),
+    qr: UploadFile | None = File(default=None),
+    clear_qr: bool = Form(default=False),
+):
+    content = None
+    content_type = None
+    filename = None
+    if qr is not None and qr.filename:
+        content_type = (qr.content_type or '').lower().split(';', 1)[0].strip()
+        if content_type not in ALLOWED_PAYMENT_MIME:
+            raise HTTPException(status_code=415, detail='QR chỉ chấp nhận ảnh JPG, PNG hoặc WebP.')
+        content = await qr.read(MAX_PAYMENT_PROOF_BYTES + 1)
+        if not content:
+            raise HTTPException(status_code=400, detail='File QR đang trống.')
+        if len(content) > MAX_PAYMENT_PROOF_BYTES:
+            raise HTTPException(status_code=413, detail='Ảnh QR vượt quá 3 MB.')
+        if not _valid_image_signature(content, content_type):
+            raise HTTPException(status_code=415, detail='Nội dung file không khớp với định dạng ảnh.')
+        filename = (qr.filename or 'pro-plan-qr').replace('\\', '/').split('/')[-1][:180]
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT payment_qr_data, payment_qr_mime_type, payment_qr_filename, payment_qr_override
+                              FROM app_runtime_settings WHERE setting_key='pro_plan' FOR UPDATE""")
+            current = cur.fetchone()
+            if not current:
+                raise HTTPException(status_code=503, detail='Chưa có cấu hình gói Pro. Hãy chạy migration 019_plan_runtime_settings.sql trong Neon SQL Editor.')
+            current_data = current.get('payment_qr_data')
+            current_type = current.get('payment_qr_mime_type')
+            current_name = current.get('payment_qr_filename')
+            current_override = bool(current.get('payment_qr_override'))
+            if clear_qr:
+                current_data = current_type = current_name = None
+                current_override = True
+            elif content is not None:
+                current_data, current_type, current_name = content, content_type, filename
+                current_override = True
+            cur.execute("""UPDATE app_runtime_settings
+                              SET payment_qr_data=%s, payment_qr_mime_type=%s, payment_qr_filename=%s,
+                                  payment_qr_override=%s, pro_plan_description=%s, pro_plan_price_label=%s, updated_at=now()
+                              WHERE setting_key='pro_plan'""",
+                        (current_data, current_type, current_name, current_override, description.strip(), price_label.strip()))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception('Could not save Pro plan configuration')
+        raise HTTPException(status_code=503, detail='Không lưu được cấu hình. Hãy kiểm tra đã chạy migration 019_plan_runtime_settings.sql chưa.') from exc
+    return {'ok': True, 'message': 'Đã lưu cấu hình gói Pro.'}
 
 
 @app.post('/api/user/payment-requests')
@@ -264,7 +388,7 @@ async def submit_payment_request(
 ):
     if user.get('plan') == 'Pro':
         raise HTTPException(status_code=409, detail='Tài khoản của bạn đang ở gói Pro.')
-    if not settings.payment_qr_image_url:
+    if not _effective_plan_config().get('qr_configured'):
         raise HTTPException(status_code=503, detail='Admin chưa cấu hình mã QR thanh toán. Vui lòng quay lại sau.')
     content_type = (proof.content_type or '').lower().split(';', 1)[0].strip()
     if content_type not in ALLOWED_PAYMENT_MIME:
