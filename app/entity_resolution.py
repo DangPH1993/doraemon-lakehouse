@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 from .processing import normalize_space, norm_name
 from .entity_names import entity_normalized_key
+from .entity_rules import is_administrative_location
 
 # Longest forms first. These are honorific/role prefixes, not identity-bearing words.
 _PERSON_TITLE_PREFIXES = sorted((
@@ -56,6 +57,11 @@ def entity_name_variants(name: str, entity_type: str = 'UNKNOWN', aliases: Itera
 
     def add(value: str) -> None:
         value = normalize_space(str(value or '')).strip(' ,.;:-')
+        # Do not persist or generate a short PERSON alias that is also a country or
+        # administrative place (e.g. Nga, Anh, Mỹ). Such aliases cause unrelated news
+        # to be linked to a person who happens to have the same final name token.
+        if typ == 'PERSON' and len(norm_name(value).split()) == 1 and is_administrative_location(value):
+            return
         if value and norm_name(value) and all(norm_name(value) != norm_name(old) for old in candidates):
             candidates.append(value)
 
@@ -140,6 +146,9 @@ def resolve_entity_in_lookup(name: str, entity_type: str, lookup: dict[str, Any]
     typ = str(entity_type or 'UNKNOWN').upper().strip()
     input_norm = norm_name(name)
     preferred_norm = norm_name(strip_person_title(name)) if typ == 'PERSON' else input_norm
+    # A bare country/place name must never resolve to a PERSON through a surname alias.
+    if typ == 'PERSON' and len(input_norm.split()) == 1 and is_administrative_location(name):
+        return None, True
     variants = entity_name_variants(name, entity_type, aliases)
     for variant in variants:
         normalized_candidates = list(dict.fromkeys((
@@ -151,9 +160,11 @@ def resolve_entity_in_lookup(name: str, entity_type: str, lookup: dict[str, Any]
                 continue
             ids = set(lookup['canonical_to_ids'].get(normalized, set()))
             ids.update(lookup['alias_to_ids'].get(normalized, set()))
+            collision_prone_place_alias = len(norm_name(variant).split()) == 1 and is_administrative_location(variant)
             compatible = {
                 eid for eid in ids
                 if _type_compatible(entity_type, lookup['entities_by_id'][eid].get('entity_type', 'UNKNOWN'))
+                and not (collision_prone_place_alias and str(lookup['entities_by_id'][eid].get('entity_type') or 'UNKNOWN').upper().strip() == 'PERSON')
             }
             if len(compatible) == 1:
                 return next(iter(compatible)), False
@@ -168,6 +179,10 @@ def resolve_entity_in_lookup(name: str, entity_type: str, lookup: dict[str, Any]
 
 def resolve_entity_in_database(conn, name: str, entity_type: str, aliases: Iterable[str] | None = None) -> tuple[dict[str, Any] | None, bool]:
     """Resolve a surface form against indexed canonical-name and alias columns in PostgreSQL."""
+    typ = str(entity_type or 'UNKNOWN').upper().strip()
+    input_norm = norm_name(name)
+    if typ == 'PERSON' and len(input_norm.split()) == 1 and is_administrative_location(name):
+        return None, True
     variants = entity_name_variants(name, entity_type, aliases)
     normalized_variants = []
     for value in variants:
@@ -193,11 +208,16 @@ def resolve_entity_in_database(conn, name: str, entity_type: str, aliases: Itera
     by_rank: dict[int, dict[int, dict[str, Any]]] = {}
     for match in matches:
         by_rank.setdefault(int(match['variant_rank']), {})[int(match['entity_id'])] = dict(match)
-    typ = str(entity_type or 'UNKNOWN').upper().strip()
-    input_norm = norm_name(name)
     preferred_norm = norm_name(strip_person_title(name)) if typ == 'PERSON' else input_norm
     for rank in sorted(by_rank):
         candidates = by_rank[rank]
+        variant_norm = normalized_variants[rank - 1] if 0 < rank <= len(normalized_variants) else ''
+        collision_prone_place_alias = len(variant_norm.split()) == 1 and is_administrative_location(variant_norm)
+        if collision_prone_place_alias:
+            candidates = {eid: row for eid, row in candidates.items()
+                          if str(row.get('entity_type') or 'UNKNOWN').upper().strip() != 'PERSON'}
+        if not candidates:
+            continue
         if len(candidates) == 1:
             row = dict(next(iter(candidates.values())))
             row['_resolution_method'] = 'exact'

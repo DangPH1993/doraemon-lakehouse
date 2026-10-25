@@ -238,6 +238,12 @@ def is_grounded_entity(name: str, aliases, article_text: str, entity_type: str =
         cn = norm_name(candidate)
         if not cn or cn in seen or cn not in source_norm:
             continue
+        # Critical precision guard: a one-word country/place name is not enough
+        # evidence for a multi-word person. For example, the alias "Nga" from
+        # "Quỳnh Nga" must not link Russia-related news to that person. The full
+        # name (or a non-colliding explicit alias) can still ground the person.
+        if typ == 'PERSON' and len(cn.split()) == 1 and is_administrative_location(candidate):
+            continue
         seen.add(cn)
         if structured:
             return True
