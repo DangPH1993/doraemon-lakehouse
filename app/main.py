@@ -26,7 +26,7 @@ from .r2_storage import (R2NotConfigured, delete_object as delete_r2_object, get
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.26',description='News Radar with Pro subscriptions, Cloudflare R2 payment images, password recovery, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.27',description='News Radar with Pro subscriptions, Cloudflare R2 payment images, password recovery, entity cloud, and ID-exact Topic/Entity timelines.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -914,6 +914,38 @@ def public_news_overview():
         """, (settings.timezone, settings.timezone))
     return row or {'articles_today': 0, 'enabled_sources': 0,
                    'active_event_topics': 0, 'ranked_events_today': 0}
+
+
+@app.get('/api/public/news/entity-cloud')
+def public_entity_cloud(
+    limit: int = Query(default=30, ge=5, le=60),
+):
+    """Return the most-mentioned active entities in the rolling last 24 hours.
+
+    Counts distinct, non-excluded articles, not raw mentions, so one article that repeats
+    the same entity cannot inflate its bubble size. Results are read-only and public.
+    """
+    items = fetch_all("""SELECT e.entity_id,
+                              e.canonical_name AS name,
+                              e.entity_type,
+                              coalesce(e.description, '') AS description,
+                              count(DISTINCT a.article_id)::int AS article_count,
+                              count(DISTINCT a.source_id)::int AS source_count,
+                              max(coalesce(a.published_at, a.collected_at)) AS latest_at
+                       FROM entities e
+                       JOIN article_entities ae ON ae.entity_id=e.entity_id
+                       JOIN news_articles a ON a.article_id=ae.article_id
+                       WHERE e.status='active'
+                         AND nullif(btrim(e.canonical_name), '') IS NOT NULL
+                         AND a.is_excluded=false
+                         AND (a.published_at >= now() - interval '24 hours'
+                              OR (a.published_at IS NULL AND a.collected_at >= now() - interval '24 hours'))
+                       GROUP BY e.entity_id, e.canonical_name, e.entity_type, e.description
+                       ORDER BY count(DISTINCT a.article_id) DESC,
+                                max(coalesce(a.published_at, a.collected_at)) DESC,
+                                e.canonical_name ASC
+                       LIMIT %s""", (limit,))
+    return {'window_hours': 24, 'items': items, 'count': len(items)}
 
 
 @app.get('/api/public/news/hot-topics')
