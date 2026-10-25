@@ -107,13 +107,17 @@
       return;
     }
     const tones = ['blue','teal','violet','orange','green','slate'];
-    container.innerHTML = items.map((entity, index) => {
+    // Shuffle the ranked top 20 for a cloud-like scatter while preserving counts/size.
+    const cloudItems = items.slice(0, 20).map((item) => ({...item, _cloudKey: Math.random()}))
+      .sort((a, b) => a._cloudKey - b._cloudKey);
+    container.innerHTML = cloudItems.map((entity, index) => {
       const count = Math.max(1, Number(entity.article_count || 1));
       // Diameter grows approximately with sqrt(article count), so bubble area communicates volume.
       const size = Math.min(142, Math.max(58, Math.round(40 + Math.sqrt(count) * 18)));
       const longName = String(entity.name || '').length > 19 ? ' is-long' : '';
+      const lift = Math.floor(Math.random() * 15) - 7;
       const title = `${entity.name || 'Entity'} · ${num(count)} bài báo trong 24 giờ · ${num(entity.source_count)} nguồn`;
-      return `<button type="button" class="entity-bubble tone-${tones[index % tones.length]}${longName}" style="--bubble-size:${size}px" data-open-timeline="entity" data-timeline-id="${Number(entity.entity_id)}" data-timeline-name="${esc(entity.name)}" title="${esc(title)}" aria-label="Mở timeline ${esc(entity.name)}; ${num(count)} bài báo trong 24 giờ">
+      return `<button type="button" class="entity-bubble tone-${tones[index % tones.length]}${longName}" style="--bubble-size:${size}px;--cloud-lift:${lift}px" data-open-timeline="entity" data-timeline-id="${Number(entity.entity_id)}" data-timeline-name="${esc(entity.name)}" title="${esc(title)}" aria-label="Mở timeline ${esc(entity.name)}; ${num(count)} bài báo trong 24 giờ">
         <span class="entity-bubble-name">${esc(entity.name)}</span><span class="entity-bubble-count">${num(count)} bài</span>
       </button>`;
     }).join('');
@@ -123,7 +127,7 @@
     if (!container) return;
     container.innerHTML = '<div class="entity-cloud-loading">Đang tải entity nổi bật…</div>';
     try {
-      const data = await getJSON('/api/public/news/entity-cloud?limit=30');
+      const data = await getJSON('/api/public/news/entity-cloud?limit=20');
       renderEntityCloud(data.items || []);
     } catch (error) {
       container.innerHTML = `<div class="entity-cloud-empty">Không tải được entity nổi bật: ${esc(error.message)}. Vui lòng thử tải lại trang.</div>`;
