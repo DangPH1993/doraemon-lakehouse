@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="app-version" content="0.7.26">
+  <meta name="app-version" content="0.7.27">
   <meta name="description" content="Tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>News Radar — Doraemon</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.26">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.27">
 </head>
 <body>
   <header class="site-header">
@@ -115,6 +115,14 @@
         <input id="radarSearch" type="search" placeholder="Tìm một sự kiện, nhân vật, doanh nghiệp…" maxlength="150" autocomplete="off">
         <button type="submit">Tìm kiếm</button>
       </form>
+      <section class="entity-cloud-section" id="entityCloudSection" aria-labelledby="entityCloudTitle">
+        <div class="entity-cloud-heading">
+          <div><p class="eyebrow">ENTITY RADAR · LAST 24 HOURS</p><h2 id="entityCloudTitle">Entity nổi bật trong 24 giờ</h2><p class="section-subtitle">Entity xuất hiện trong nhiều bài báo sẽ có bubble lớn hơn. Nhấn vào một entity để mở timeline.</p></div>
+          <span class="entity-cloud-window">24 giờ gần nhất</span>
+        </div>
+        <div id="entityCloud" class="entity-cloud" aria-live="polite"><div class="entity-cloud-loading">Đang tải entity nổi bật…</div></div>
+        <p class="entity-cloud-legend"><span class="entity-cloud-legend-dot"></span> Kích thước bubble thể hiện số bài báo có nhắc đến entity.</p>
+      </section>
       <p class="search-hint">Ví dụ: kinh tế Việt Nam, Nvidia, bầu cử Mỹ, biến đổi khí hậu</p>
     </section>
 
@@ -201,6 +209,6 @@
       <a href="/" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/news.js?v=0.7.26" defer></script>
+  <script src="/static/news.js?v=0.7.27" defer></script>
 </body>
 </html>

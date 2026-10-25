@@ -100,6 +100,36 @@
     }
   }
 
+  function renderEntityCloud(items) {
+    const container = $('#entityCloud');
+    if (!items.length) {
+      container.innerHTML = '<div class="entity-cloud-empty">Chưa có entity nổi bật trong 24 giờ gần nhất. Các bubble sẽ xuất hiện khi bài báo được liên kết với entity chuẩn.</div>';
+      return;
+    }
+    const tones = ['blue','teal','violet','orange','green','slate'];
+    container.innerHTML = items.map((entity, index) => {
+      const count = Math.max(1, Number(entity.article_count || 1));
+      // Diameter grows approximately with sqrt(article count), so bubble area communicates volume.
+      const size = Math.min(142, Math.max(58, Math.round(40 + Math.sqrt(count) * 18)));
+      const longName = String(entity.name || '').length > 19 ? ' is-long' : '';
+      const title = `${entity.name || 'Entity'} · ${num(count)} bài báo trong 24 giờ · ${num(entity.source_count)} nguồn`;
+      return `<button type="button" class="entity-bubble tone-${tones[index % tones.length]}${longName}" style="--bubble-size:${size}px" data-open-timeline="entity" data-timeline-id="${Number(entity.entity_id)}" data-timeline-name="${esc(entity.name)}" title="${esc(title)}" aria-label="Mở timeline ${esc(entity.name)}; ${num(count)} bài báo trong 24 giờ">
+        <span class="entity-bubble-name">${esc(entity.name)}</span><span class="entity-bubble-count">${num(count)} bài</span>
+      </button>`;
+    }).join('');
+  }
+  async function loadEntityCloud() {
+    const container = $('#entityCloud');
+    if (!container) return;
+    container.innerHTML = '<div class="entity-cloud-loading">Đang tải entity nổi bật…</div>';
+    try {
+      const data = await getJSON('/api/public/news/entity-cloud?limit=30');
+      renderEntityCloud(data.items || []);
+    } catch (error) {
+      container.innerHTML = `<div class="entity-cloud-empty">Không tải được entity nổi bật: ${esc(error.message)}. Vui lòng thử tải lại trang.</div>`;
+    }
+  }
+
   function renderPagination(target, pagination, type) {
     if (!pagination || !pagination.total) { $(target).innerHTML = ''; return; }
     const start = pagination.start ?? ((pagination.page - 1) * pagination.page_size + 1);
@@ -768,7 +798,7 @@
 
   async function initialize() {
     await restoreUser();
-    const jobs = [loadHotTopics(), loadArticles(1)];
+    const jobs = [loadHotTopics(), loadEntityCloud(), loadArticles(1)];
     if (state.user) jobs.push(loadUserRadar());
     await Promise.all(jobs);
     const resetToken = readPasswordResetToken();

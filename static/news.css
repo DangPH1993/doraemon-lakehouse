@@ -384,3 +384,23 @@ body{background:#fff;color:#202124;font-size:14px}
 @media(max-width:640px){.account-dialog{padding:22px 14px}.account-plan-card{padding:12px}.account-plan-card .plan-comparison{grid-template-columns:1fr}.account-menu-toggle{max-width:120px;font-size:9px}.account-menu-dropdown{min-width:170px}.header-actions{gap:4px}.account-tabs{gap:4px}.account-tab{font-size:11px;padding:10px 6px}.account-telegram-card{padding:13px}}
 
 .account-plan-card .plan-select-button{margin-top:6px;padding:9px 11px;white-space:normal;font-size:11px}
+
+
+/* v0.7.27: rolling 24-hour entity bubble cloud under the search field */
+.entity-cloud-section{width:min(900px,100%);margin:24px 0 0;padding:18px 20px 13px;border:1px solid #e8eaed;border-radius:18px;background:linear-gradient(180deg,#fff 0%,#fbfcff 100%);box-shadow:0 5px 20px rgba(32,33,36,.035);text-align:left}
+.entity-cloud-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:10px}
+.entity-cloud-heading .eyebrow{margin:0 0 5px;color:#5f6368;font-size:9px;letter-spacing:1.2px;font-weight:800}
+.entity-cloud-heading h2{margin:0;color:#202124;font-size:16px;line-height:1.35;font-weight:750;letter-spacing:-.25px}
+.entity-cloud-heading .section-subtitle{margin:4px 0 0;max-width:550px;font-size:10px;line-height:1.55;color:#70757a}
+.entity-cloud-window{flex:0 0 auto;border:1px solid #dbe7fd;border-radius:999px;padding:6px 9px;background:#f2f6ff;color:#3568b8;font-size:9px;font-weight:750;white-space:nowrap}
+.entity-cloud{display:flex;align-items:center;justify-content:center;align-content:center;flex-wrap:wrap;gap:10px 12px;min-height:82px;padding:8px 0 3px}
+.entity-bubble{width:var(--bubble-size);height:var(--bubble-size);flex:0 0 var(--bubble-size);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:8px;border:1px solid transparent;border-radius:50%;overflow:hidden;text-align:center;cursor:pointer;color:#18364a;box-shadow:0 3px 9px rgba(36,57,72,.08);transition:transform .16s ease,box-shadow .16s ease,filter .16s ease;font:inherit}
+.entity-bubble:hover,.entity-bubble:focus-visible{transform:translateY(-3px) scale(1.04);box-shadow:0 8px 18px rgba(36,57,72,.16);outline:2px solid #8ab4f8;outline-offset:2px;filter:saturate(1.08)}
+.entity-bubble.tone-blue{background:#e8f0fe;border-color:#d4e2fd;color:#174ea6}.entity-bubble.tone-teal{background:#e0f2f1;border-color:#c5e7e3;color:#0b625b}.entity-bubble.tone-violet{background:#f0e9ff;border-color:#e1d4ff;color:#6741a5}.entity-bubble.tone-orange{background:#fff0e2;border-color:#ffdfc3;color:#a64b12}.entity-bubble.tone-green{background:#e6f4ea;border-color:#cce8d3;color:#137333}.entity-bubble.tone-slate{background:#eef2f6;border-color:#dde4ed;color:#425466}
+.entity-bubble-name{display:-webkit-box;width:100%;max-height:3.6em;overflow:hidden;overflow-wrap:anywhere;font-size:clamp(9px,1vw,12px);font-weight:800;line-height:1.2;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.entity-bubble.is-long .entity-bubble-name{font-size:9px;line-height:1.15}
+.entity-bubble-count{flex:0 0 auto;font-size:9px;line-height:1;font-weight:750;opacity:.77;white-space:nowrap}
+.entity-cloud-legend{display:flex;justify-content:center;align-items:center;gap:6px;margin:8px 0 0;color:#80868b;font-size:9px;line-height:1.5}
+.entity-cloud-legend-dot{width:7px;height:7px;border-radius:50%;background:#8ab4f8;box-shadow:0 0 0 3px #e8f0fe}
+.entity-cloud-loading,.entity-cloud-empty{width:100%;padding:16px 8px;text-align:center;color:#70757a;font-size:11px;line-height:1.6}
+@media(max-width:640px){.entity-cloud-section{padding:14px 11px 11px;margin-top:19px;border-radius:14px}.entity-cloud-heading{gap:8px}.entity-cloud-heading h2{font-size:14px}.entity-cloud-heading .section-subtitle{font-size:9px}.entity-cloud-window{font-size:8px;padding:5px 7px}.entity-cloud{gap:7px;min-height:70px}.entity-bubble{padding:5px;box-shadow:0 2px 6px rgba(36,57,72,.07)}.entity-bubble-name{font-size:9px}.entity-bubble-count{font-size:8px}.entity-bubble.is-long .entity-bubble-name{font-size:8px}.search-hint{margin-top:11px}}
