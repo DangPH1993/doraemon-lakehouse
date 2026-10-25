@@ -100,28 +100,133 @@
     }
   }
 
+  let lastEntityCloudItems = [];
+  let entityCloudResizeTimer = null;
+
+  function entityBubbleBaseSize(entity) {
+    const count = Math.max(1, Number(entity.article_count || 1));
+    return Math.min(142, Math.max(58, Math.round(40 + Math.sqrt(count) * 18)));
+  }
+
+  function layoutEntityCloud(container, items) {
+    if (!container || !items.length) return;
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    if (!width || !height) {
+      window.requestAnimationFrame(() => layoutEntityCloud(container, items));
+      return;
+    }
+
+    const cx = width / 2;
+    const cy = height / 2;
+    const gap = width < 420 ? 4 : 7;
+    const responsiveScale = Math.min(1, Math.max(0.54, width / 600));
+    const indexed = items.map((item, index) => ({ item, index, base: entityBubbleBaseSize(item) }))
+      .sort((a, b) => b.base - a.base);
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    const phase = Math.random() * Math.PI * 2;
+    let packed = null;
+
+    // Place larger bubbles first and fill from the center outward. Retry at
+    // slightly smaller scales on narrow screens so every bubble stays inside
+    // the circular cloud without overlaps.
+    for (const compression of [1, 0.96, 0.92, 0.88, 0.84, 0.80, 0.76, 0.72, 0.68, 0.64]) {
+      const scale = responsiveScale * compression;
+      const placed = [];
+      let failed = false;
+      for (const entry of indexed) {
+        const size = Math.max(width < 420 ? 34 : 40, Math.round(entry.base * scale));
+        const allowedRadius = Math.max(0, Math.min(width, height) / 2 - size / 2 - 7);
+        let found = null;
+        const candidates = 5200;
+        for (let trial = 0; trial < candidates; trial++) {
+          const rho = Math.sqrt(trial / candidates);
+          const angle = trial * goldenAngle + entry.index * 1.61803398875 + phase;
+          const x = cx + Math.cos(angle) * rho * allowedRadius;
+          const y = cy + Math.sin(angle) * rho * allowedRadius;
+          let overlaps = false;
+          for (const other of placed) {
+            const dx = x - other.x;
+            const dy = y - other.y;
+            const minDistance = (size + other.size) / 2 + gap;
+            if (dx * dx + dy * dy < minDistance * minDistance) {
+              overlaps = true;
+              break;
+            }
+          }
+          if (!overlaps) {
+            found = { index: entry.index, x, y, size };
+            break;
+          }
+        }
+        if (!found) {
+          failed = true;
+          break;
+        }
+        placed.push(found);
+      }
+      if (!failed) {
+        packed = placed;
+        break;
+      }
+    }
+
+    // Defensive fallback: a smaller, still circular arrangement if unusual
+    // viewport dimensions prevent the normal packing pass.
+    if (!packed) {
+      packed = indexed.map((entry, i) => {
+        const angle = phase + i * goldenAngle;
+        const radius = Math.min(width, height) * 0.31 * Math.sqrt((i + 1) / indexed.length);
+        const size = Math.max(30, Math.round(entry.base * responsiveScale * 0.58));
+        return {
+          index: entry.index,
+          x: Math.max(size / 2 + 3, Math.min(width - size / 2 - 3, cx + Math.cos(angle) * radius)),
+          y: Math.max(size / 2 + 3, Math.min(height - size / 2 - 3, cy + Math.sin(angle) * radius)),
+          size,
+        };
+      });
+    }
+
+    for (const position of packed) {
+      const bubble = container.querySelector(`[data-cloud-index="${position.index}"]`);
+      if (!bubble) continue;
+      bubble.style.left = `${position.x}px`;
+      bubble.style.top = `${position.y}px`;
+      bubble.style.width = `${position.size}px`;
+      bubble.style.height = `${position.size}px`;
+      bubble.style.setProperty('--bubble-size', `${position.size}px`);
+    }
+  }
+
   function renderEntityCloud(items) {
     const container = $('#entityCloud');
     if (!items.length) {
+      lastEntityCloudItems = [];
       container.innerHTML = '<div class="entity-cloud-empty">Chưa có entity nổi bật trong 24 giờ gần nhất. Các bubble sẽ xuất hiện khi bài báo được liên kết với entity chuẩn.</div>';
       return;
     }
     const tones = ['blue','teal','violet','orange','green','slate'];
-    // Shuffle the ranked top 20 for a cloud-like scatter while preserving counts/size.
+    // Shuffle the ranked top 20 for a varied cloud while packing bubbles into a circle.
     const cloudItems = items.slice(0, 20).map((item) => ({...item, _cloudKey: Math.random()}))
       .sort((a, b) => a._cloudKey - b._cloudKey);
+    lastEntityCloudItems = cloudItems;
     container.innerHTML = cloudItems.map((entity, index) => {
       const count = Math.max(1, Number(entity.article_count || 1));
-      // Diameter grows approximately with sqrt(article count), so bubble area communicates volume.
-      const size = Math.min(142, Math.max(58, Math.round(40 + Math.sqrt(count) * 18)));
       const longName = String(entity.name || '').length > 19 ? ' is-long' : '';
-      const lift = Math.floor(Math.random() * 15) - 7;
       const title = `${entity.name || 'Entity'} · ${num(count)} bài báo trong 24 giờ · ${num(entity.source_count)} nguồn`;
-      return `<button type="button" class="entity-bubble tone-${tones[index % tones.length]}${longName}" style="--bubble-size:${size}px;--cloud-lift:${lift}px" data-open-timeline="entity" data-timeline-id="${Number(entity.entity_id)}" data-timeline-name="${esc(entity.name)}" title="${esc(title)}" aria-label="Mở timeline ${esc(entity.name)}; ${num(count)} bài báo trong 24 giờ">
+      return `<button type="button" class="entity-bubble tone-${tones[index % tones.length]}${longName}" data-cloud-index="${index}" data-open-timeline="entity" data-timeline-id="${Number(entity.entity_id)}" data-timeline-name="${esc(entity.name)}" title="${esc(title)}" aria-label="Mở timeline ${esc(entity.name)}; ${num(count)} bài báo trong 24 giờ">
         <span class="entity-bubble-name">${esc(entity.name)}</span><span class="entity-bubble-count">${num(count)} bài</span>
       </button>`;
     }).join('');
+    layoutEntityCloud(container, cloudItems);
   }
+  window.addEventListener('resize', () => {
+    if (entityCloudResizeTimer) window.clearTimeout(entityCloudResizeTimer);
+    entityCloudResizeTimer = window.setTimeout(() => {
+      const container = $('#entityCloud');
+      if (container && lastEntityCloudItems.length) layoutEntityCloud(container, lastEntityCloudItems);
+    }, 120);
+  });
   async function loadEntityCloud() {
     const container = $('#entityCloud');
     if (!container) return;
