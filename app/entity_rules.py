@@ -116,6 +116,43 @@ def is_numeric_or_date_entity(name: str) -> bool:
 _NON_ENTITY_FOLDED = {_fold(x) for x in _NON_ENTITY_PHRASES}
 _REGION_FOLDED = {_fold(x) for x in _BROAD_REGIONS}
 
+# Publisher/byline labels are not followable story entities. Keep this list deliberately
+# conservative and supplement it with common Vietnamese publisher prefixes.
+_MEDIA_SOURCE_NAMES = {
+    'vtv', 'vtv vn', 'vtv vietnam', 'vtv go', 'vtv24', 'vtv 24',
+    'bao thanh nien', 'thanh nien', 'bao 24h', 'bao 24 h',
+    'vnexpress', 'vnexpress net', 'tuoi tre', 'tuoi tre online', 'dan tri',
+    'vietnamnet', 'vietnam net', 'lao dong', 'cong an nhan dan',
+    'bao nhan dan', 'nhan dan', 'bao chinh phu', 'bao moi', 'kenh 14',
+    'zing news', 'zingnews', 'bbc', 'bbc news', 'cnn', 'reuters', 'associated press',
+    'ap news', 'bloomberg', 'the guardian', 'the new york times', 'washington post',
+    'financial times', 'al jazeera', 'the independent', 'abc news', 'cbs news',
+    'fox news', 'sky news', 'nikkei asia', 'the times', 'the telegraph',
+}
+_MEDIA_SOURCE_FOLDED = {_fold(x) for x in _MEDIA_SOURCE_NAMES}
+_MEDIA_SOURCE_TYPES = {'SOURCE', 'NEWS_SOURCE', 'MEDIA_SOURCE', 'MEDIA_OUTLET', 'NEWS_OUTLET', 'PUBLISHER', 'PUBLICATION'}
+
+
+def is_media_source_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
+    """Return True for publisher/source labels, which are not story-follow entities."""
+    raw = normalize_space(str(name or '')).strip()
+    folded = _fold(raw)
+    if not folded:
+        return False
+    if str(entity_type or 'UNKNOWN').upper().strip() in _MEDIA_SOURCE_TYPES:
+        return True
+    if folded in _MEDIA_SOURCE_FOLDED:
+        return True
+    # Examples include "Báo Thanh Niên", "Báo 24h" and similar news outlets.
+    if re.match(r'^(?:Báo|Kênh)\s+\S', raw, flags=re.IGNORECASE):
+        return True
+    # A bare publisher domain such as VTV.vn or VnExpress.net is a source label.
+    if re.fullmatch(r'(?:www\.)?[a-z0-9-]+\.(?:vn|com|net|org|tv|news|io)', raw, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+
 
 def is_administrative_location(name: str) -> bool:
     """Return True for countries/provinces/cities, not specifically named landmarks."""
@@ -142,6 +179,8 @@ def should_track_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
     normalized = norm_name(name)
     folded = _fold(normalized)
     if len(normalized) < 2 or len(normalized) > 180:
+        return False
+    if is_media_source_entity(name, entity_type):
         return False
     if is_numeric_or_date_entity(name):
         return False

@@ -15,7 +15,7 @@ from .config import settings
 from .db import get_conn, fetch_all, fetch_one
 from .security import (issue_token, require_admin, hash_password, verify_password, issue_user_token, require_user)
 from .processing import canonicalize_url, hash_text, norm_name, slugify
-from .entity_rules import should_track_entity
+from .entity_rules import should_track_entity, is_media_source_entity
 from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
@@ -26,7 +26,7 @@ from .r2_storage import (R2NotConfigured, delete_object as delete_r2_object, get
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.27',description='News Radar with Pro subscriptions, Cloudflare R2 payment images, password recovery, entity cloud, and ID-exact Topic/Entity timelines.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.28',description='News Radar with a 20-item randomized 24-hour entity cloud and deterministic known-entity reconciliation.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -918,14 +918,14 @@ def public_news_overview():
 
 @app.get('/api/public/news/entity-cloud')
 def public_entity_cloud(
-    limit: int = Query(default=30, ge=5, le=60),
+    limit: int = Query(default=20, ge=5, le=20),
 ):
-    """Return the most-mentioned active entities in the rolling last 24 hours.
+    """Return the top 20 story entities in the rolling 24-hour news window.
 
-    Counts distinct, non-excluded articles, not raw mentions, so one article that repeats
-    the same entity cannot inflate its bubble size. Results are read-only and public.
+    Counts distinct included articles (not raw mentions); publisher/source labels are excluded
+    because source names are metadata, not story entities users should follow.
     """
-    items = fetch_all("""SELECT e.entity_id,
+    candidates = fetch_all("""SELECT e.entity_id,
                               e.canonical_name AS name,
                               e.entity_type,
                               coalesce(e.description, '') AS description,
@@ -944,8 +944,11 @@ def public_entity_cloud(
                        ORDER BY count(DISTINCT a.article_id) DESC,
                                 max(coalesce(a.published_at, a.collected_at)) DESC,
                                 e.canonical_name ASC
-                       LIMIT %s""", (limit,))
-    return {'window_hours': 24, 'items': items, 'count': len(items)}
+                       LIMIT 300""")
+    items = [item for item in candidates
+             if should_track_entity(str(item.get('name') or ''), str(item.get('entity_type') or 'UNKNOWN'))
+             and not is_media_source_entity(str(item.get('name') or ''), str(item.get('entity_type') or 'UNKNOWN'))][:limit]
+    return {'window_hours': 24, 'items': items, 'count': len(items), 'limit': limit}
 
 
 @app.get('/api/public/news/hot-topics')

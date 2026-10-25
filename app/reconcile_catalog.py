@@ -28,6 +28,7 @@ from psycopg.rows import dict_row
 from .config import settings
 from .db import get_conn, get_lock_database_url
 from .field_categories import is_broad_field_topic
+from .entity_rules import is_media_source_entity, should_track_entity
 from .processing import norm_name
 
 log = logging.getLogger('mini-lakehouse.reconcile')
@@ -146,7 +147,9 @@ def load_recent_entities() -> list[dict]:
                        GROUP BY e.entity_id,e.canonical_name,e.entity_type,e.normalized_name,e.origin,e.description,e.created_at
                        ORDER BY max(coalesce(a.published_at,a.collected_at)) DESC,count(DISTINCT a.article_id) DESC,e.entity_id
                        LIMIT %s""", (WINDOW_HOURS, MAX_ENTITIES))
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+    return [row for row in rows if should_track_entity(str(row.get('name') or ''), str(row.get('entity_type') or 'UNKNOWN'))
+            and not is_media_source_entity(str(row.get('name') or ''), str(row.get('entity_type') or 'UNKNOWN'))]
 
 
 
@@ -186,7 +189,10 @@ def load_entities_for_quality_review() -> list[dict]:
                        WHERE e.status='active' AND e.origin='discovered'
                        ORDER BY coalesce(ctx.last_seen_at,e.created_at) DESC NULLS LAST,e.entity_id DESC
                        LIMIT %s""", (MAX_ENTITIES,))
-        return [dict(row) for row in cur.fetchall()]
+        rows = [dict(row) for row in cur.fetchall()]
+    # Keep all other discovered candidates for GenAI quality review, including generic/date-like
+    # labels that should be rejected and physically removed by the existing quality process.
+    return [row for row in rows if not is_media_source_entity(str(row.get('name') or ''), str(row.get('entity_type') or 'UNKNOWN'))]
 
 
 def _entity_quality_fingerprint(item: dict) -> str:
@@ -697,7 +703,7 @@ def _merge_topic(cur, source_id: int, target_id: int, reason: str) -> bool:
     return True
 
 
-def _merge_entity(cur, source_id: int, target_id: int, reason: str) -> bool:
+def _merge_entity(cur, source_id: int, target_id: int, reason: str, *, allow_type_mismatch: bool = False) -> bool:
     source_id = _resolve_canonical(cur, 'entity', source_id)
     target_id = _resolve_canonical(cur, 'entity', target_id)
     if source_id == target_id:
@@ -709,11 +715,13 @@ def _merge_entity(cur, source_id: int, target_id: int, reason: str) -> bool:
     source, target = rows[source_id], rows[target_id]
     source_type = str(source.get('entity_type') or 'UNKNOWN').upper()
     target_type = str(target.get('entity_type') or 'UNKNOWN').upper()
-    if source_type != target_type and 'UNKNOWN' not in {source_type, target_type}:
+    if source_type != target_type and 'UNKNOWN' not in {source_type, target_type} and not allow_type_mismatch:
         return False
     if target_type == 'UNKNOWN' and source_type != 'UNKNOWN':
         cur.execute('UPDATE entities SET entity_type=%s,updated_at=now() WHERE entity_id=%s', (source_type, target_id))
     source_name = str(source.get('canonical_name') or '')
+    cur.execute('SELECT DISTINCT article_id FROM article_entities WHERE entity_id=%s', (source_id,))
+    affected_article_ids = [int(row['article_id']) for row in cur.fetchall()]
     cur.execute("""INSERT INTO article_entities(article_id,entity_id,mention_text,confidence,created_at)
                    SELECT article_id,%s,mention_text,max(confidence),min(created_at) FROM article_entities WHERE entity_id=%s
                    GROUP BY article_id,mention_text
@@ -740,7 +748,70 @@ def _merge_entity(cur, source_id: int, target_id: int, reason: str) -> bool:
     cur.execute("UPDATE entities SET status='archived',updated_at=now() WHERE entity_id=%s", (source_id,))
     cur.execute("""INSERT INTO catalog_reconciliation_merges(object_type,source_id,target_id,reason)
                    VALUES('entity',%s,%s,%s) ON CONFLICT(object_type,source_id) DO UPDATE SET target_id=excluded.target_id,merged_at=now(),reason=excluded.reason""", (source_id, target_id, reason[:500]))
+    if affected_article_ids:
+        cur.execute("""UPDATE fact_news_article f
+                       SET detected_entity_count=(SELECT count(DISTINCT ae.entity_id)::int
+                                                  FROM article_entities ae WHERE ae.article_id=f.article_id)
+                       WHERE f.article_id=ANY(%s::bigint[])""", (affected_article_ids,))
     return True
+
+
+def _remove_discovered_media_sources() -> int:
+    """Remove already-created discovered publisher labels; keep articles and their sources."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT e.entity_id AS id,e.canonical_name AS name,e.entity_type,
+                              coalesce(e.description,'') AS description,e.origin,
+                              coalesce((SELECT array_agg(a.alias ORDER BY a.alias)
+                                        FROM entity_aliases a WHERE a.entity_id=e.entity_id),ARRAY[]::text[]) AS aliases
+                       FROM entities e
+                       WHERE e.origin='discovered' AND e.status='active'""")
+        candidates = [dict(row) for row in cur.fetchall()]
+        rejected = [row for row in candidates
+                    if is_media_source_entity(str(row.get('name') or ''), str(row.get('entity_type') or 'UNKNOWN'))]
+        for row in rejected:
+            _persist_rejection_tombstone(cur, row)
+        return _delete_discovered_entities(cur, [int(row['id']) for row in rejected])
+
+
+def _merge_bigbang_case_duplicates() -> int:
+    """Deterministically merge case-only BIGBANG/Bigbang duplicates before GenAI pairing."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT e.entity_id AS id,e.canonical_name AS name,e.entity_type,
+                              count(DISTINCT a.article_id)::int AS article_count
+                       FROM entities e
+                       LEFT JOIN article_entities ae ON ae.entity_id=e.entity_id
+                       LEFT JOIN news_articles a ON a.article_id=ae.article_id AND a.is_excluded=false
+                       WHERE e.status='active' AND lower(btrim(e.canonical_name))='bigbang'
+                       GROUP BY e.entity_id,e.canonical_name,e.entity_type
+                       ORDER BY count(DISTINCT a.article_id) DESC,e.entity_id ASC""")
+        rows = [dict(row) for row in cur.fetchall()]
+        if len(rows) < 2:
+            return 0
+        target_id = int(rows[0]['id'])
+        merged_count = 0
+        for item in rows[1:]:
+            source_id = int(item['id'])
+            if source_id == target_id:
+                continue
+            if _merge_entity(cur, source_id, target_id,
+                             'Deterministic case-insensitive reconciliation: Bigbang/BIGBANG',
+                             allow_type_mismatch=True):
+                merged_count += 1
+                log.info('Deterministically merged entity %s (%s) into %s (%s) as Bigbang/BIGBANG alias',
+                         source_id, item.get('name'), target_id, rows[0].get('name'))
+        if merged_count:
+            # Rebuild the target's daily FACT grain from distinct article links so a story
+            # attached to both case variants is counted once after the merge.
+            cur.execute('DELETE FROM fact_entity_daily WHERE entity_id=%s', (target_id,))
+            cur.execute("""INSERT INTO fact_entity_daily(stat_date,entity_id,source_id,article_count,updated_at)
+                           SELECT coalesce((a.published_at at time zone %s)::date,
+                                           (a.collected_at at time zone %s)::date),
+                                  %s,a.source_id,count(DISTINCT a.article_id),now()
+                           FROM article_entities ae JOIN news_articles a ON a.article_id=ae.article_id
+                           WHERE ae.entity_id=%s AND a.is_excluded=false
+                           GROUP BY 1,3""",
+                        (settings.timezone, settings.timezone, target_id, target_id))
+        return merged_count
 
 
 def _record_decision(pair: dict, model_decision: dict, stats: dict) -> None:
@@ -807,13 +878,15 @@ def run_reconciliation() -> dict:
     ensure_schema()
     stats = {'status': 'running', 'window_hours': WINDOW_HOURS, 'topics_seen': 0, 'entities_seen': 0,
              'topic_pairs_checked': 0, 'entity_pairs_checked': 0, 'topic_merges': 0, 'entity_merges': 0,
-             'llm_calls': 0, 'message': ''}
+             'media_source_entities_removed': 0, 'llm_calls': 0, 'message': ''}
     if not settings.openai_api_key:
         raise RuntimeError('OPENAI_API_KEY is not configured for catalog reconciliation')
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO catalog_reconciliation_runs(status,window_hours) VALUES('running',%s) RETURNING run_id", (WINDOW_HOURS,))
         run_id = int(cur.fetchone()['run_id'])
     try:
+        stats['media_source_entities_removed'] = _remove_discovered_media_sources()
+        stats['entity_merges'] += _merge_bigbang_case_duplicates()
         topics = load_recent_topics()
         quality_candidates = load_entities_for_quality_review()
         quality_keep_ids = validate_discovered_entities(quality_candidates, stats)
@@ -829,7 +902,9 @@ def run_reconciliation() -> dict:
         _process_kind('topic', topics, stats)
         _process_kind('entity', entities, stats)
         stats['status'] = 'success'
-        stats['message'] = 'Catalog reconciliation finished; discovered entity quality decisions are GenAI-validated and cached.'
+        stats['message'] = ('Catalog reconciliation finished; discovered entity quality decisions are GenAI-validated and cached. '
+                            f"Removed {stats['media_source_entities_removed']} discovered publisher/source labels; "
+                            'case-only Bigbang/BIGBANG duplicates were merged deterministically.')
         return stats
     except Exception as exc:
         stats['status'] = 'failed'
