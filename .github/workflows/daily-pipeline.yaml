@@ -1,7 +1,6 @@
 name: Mini Lakehouse Ingestion
 
 on:
-  schedule:
   workflow_dispatch:
 
 permissions:
