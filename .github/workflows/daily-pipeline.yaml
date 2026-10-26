@@ -2,7 +2,6 @@ name: Mini Lakehouse Ingestion
 
 on:
   schedule:
-    - cron: "17 * * * *" # Hourly; GitHub cron is evaluated in UTC
   workflow_dispatch:
 
 permissions:
