@@ -1,0 +1,36 @@
+name: Pro Subscription Expiry
+
+on:
+  schedule:
+    - cron: "13 * * * *" # Hourly; GitHub Actions uses UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pro-subscription-expiry
+  cancel-in-progress: false
+
+jobs:
+  expire-pro-plans:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Downgrade expired Pro subscriptions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "Missing GitHub secret DATABASE_URL"; exit 1; fi
+          python -m scripts.expire_pro_plans
