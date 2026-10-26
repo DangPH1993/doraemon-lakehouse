@@ -27,8 +27,8 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.42',description='RSS ingestion rejects duplicate normalized headlines across all sources; public listing/search also deduplicates historical rows.')
-app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
+app=FastAPI(title='Tìm Tin Tức',version='0.7.43',description='RSS ingestion rejects duplicate normalized headlines across all sources; public listing/search also deduplicates historical rows. Health endpoint accepts GET and HEAD for uptime monitors.')
+app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
 
@@ -142,7 +142,7 @@ def public_news_page():
 @app.get('/news/following')
 def public_following_page(): return FileResponse('static/following.html')
 
-@app.get('/health')
+@app.api_route('/health', methods=['GET', 'HEAD'])
 def health(): return {'status':'ok','app':'doraemon-mini-lakehouse','version':app.version}
 @app.get('/api/health/ready')
 def ready():
