@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="app-version" content="0.7.32">
+  <meta name="app-version" content="0.7.33">
   <meta name="description" content="Tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>News Radar — Doraemon</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.32">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.33">
 </head>
 <body>
   <header class="site-header">
@@ -115,12 +115,6 @@
         <input id="radarSearch" type="search" placeholder="Tìm một sự kiện, nhân vật, doanh nghiệp…" maxlength="150" autocomplete="off">
         <button type="submit">Tìm kiếm</button>
       </form>
-      <section class="entity-cloud-section" id="entityCloudSection" aria-label="Entity nổi bật trong 24 giờ">
-        <div class="entity-cloud-heading">
-          <span class="entity-cloud-window">24 giờ gần nhất</span>
-        </div>
-        <div id="entityCloud" class="entity-cloud" aria-live="polite"><div class="entity-cloud-loading">Đang tải entity nổi bật…</div></div>
-      </section>
     </section>
 
     <div class="radar-layout" id="radarLayout">
@@ -130,6 +124,12 @@
       <div id="searchResults" class="radar-list" aria-live="polite"></div>
       <div id="searchPagination" class="pagination-row"></div>
     </section>
+      <section class="entity-cloud-section" id="entityCloudSection" aria-label="Entity nổi bật trong 24 giờ">
+        <div class="entity-cloud-heading">
+          <span class="entity-cloud-window">24 giờ gần nhất</span>
+        </div>
+        <div id="entityCloud" class="entity-cloud" aria-live="polite"><div class="entity-cloud-loading">Đang tải entity nổi bật…</div></div>
+      </section>
     <section class="content-section articles-section" id="articles">
       <div class="section-heading articles-heading">
         <div><p class="eyebrow">LATEST HEADLINES</p><h2>Tin tức trong ngày</h2><p class="section-subtitle" id="articleDateLabel">Các bài mới được xuất bản hôm nay, theo giờ Việt Nam.</p></div>
@@ -206,6 +206,6 @@
       <a href="/" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/news.js?v=0.7.32" defer></script>
+  <script src="/static/news.js?v=0.7.33" defer></script>
 </body>
 </html>

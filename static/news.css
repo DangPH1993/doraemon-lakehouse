@@ -385,6 +385,10 @@ body{background:#fff;color:#202124;font-size:14px}
 .account-plan-card .plan-select-button{margin-top:6px;padding:9px 11px;white-space:normal;font-size:11px}
 
 
+/* v0.7.33: entity cloud sits above daily articles and aligns with the featured-news sidebar. */
+.radar-main-column > .entity-cloud-section{margin-top:0;margin-bottom:24px;width:100%;}
+@media(max-width:1050px){.radar-main-column > .entity-cloud-section{margin-bottom:18px}}
+
 /* v0.7.29: frameless circular entity bubble cloud */
 .entity-cloud-section{width:min(900px,100%);margin:16px 0 0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;text-align:left}
 .entity-cloud-heading{display:flex;align-items:center;justify-content:flex-end;gap:14px;margin:0 0 4px}
