@@ -476,10 +476,41 @@ def conditional_feed_headers(source: dict) -> dict[str, str]:
     return headers
 
 
+def filter_duplicate_headlines(prepared: list[dict], known_urls: set[str],
+                              known_headline_hashes: set[str]) -> tuple[list[dict], int, int]:
+    """Reject items whose URL already exists or whose exact normalized headline is known.
+
+    Headline hashes are global across RSS sources and have no time cutoff: once an exact
+    normalized title has been ingested, later copies are skipped before raw payload/image
+    lookup work. Within a feed response, only the first occurrence is retained.
+    Returns (accepted_items, skipped_existing_url_count, skipped_duplicate_headline_count).
+    """
+    accepted = []
+    seen_urls: set[str] = set()
+    seen_headlines: set[str] = set()
+    skipped_existing_urls = 0
+    skipped_duplicate_headlines = 0
+    for item in prepared:
+        canonical = item['canonical_url']
+        headline_hash = hash_text(item['title'])
+        if canonical in known_urls or canonical in seen_urls:
+            skipped_existing_urls += 1
+            seen_headlines.add(headline_hash)
+            continue
+        if headline_hash in known_headline_hashes or headline_hash in seen_headlines:
+            skipped_duplicate_headlines += 1
+            continue
+        seen_urls.add(canonical)
+        seen_headlines.add(headline_hash)
+        accepted.append(item)
+    return accepted, skipped_existing_urls, skipped_duplicate_headlines
+
+
 def process_source(source: dict, rules: list[dict], entity_lookup=None, active_topics=None) -> dict:
     source_started = time.monotonic()
     log.info('Source started: %s; feed=%s', source['name'], source['feed_url'])
     result = {'seen': 0, 'inserted': 0, 'updated': 0, 'skipped_existing': 0,
+              'skipped_duplicate_headline': 0,
               'skipped_outside_window': 0, 'skipped_undated': 0,
               'feed_not_modified': False, 'entity_mentions': 0, 'new_entities': 0,
               'event_topics_assigned': 0, 'quality_issues': 0, 'image_urls_from_rss': 0,
@@ -548,13 +579,33 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
                  source['name'], result['seen'], result['skipped_outside_window'], result['skipped_undated'], time.monotonic()-source_started)
         return result
 
-    # One batch lookup per source replaces SELECT-per-entry. Unique constraint remains the
-    # final concurrency-safe guard when inserting rows.
+    # Batch-check existing URLs for this source and headline hashes across every source.
+    # Exact normalized duplicate titles are rejected at ingestion, not merely hidden later
+    # by the public listing. This prevents raw_feed_items, image lookups, entities and FACTs
+    # being created for a duplicate copy.
     urls = list(dict.fromkeys(item['canonical_url'] for item in prepared))
+    headline_hashes = list(dict.fromkeys(hash_text(item['title']) for item in prepared))
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("select canonical_url from news_articles where source_id=%s and canonical_url = any(%s)",
                     (source['source_id'], urls))
         known_urls = {row['canonical_url'] for row in cur.fetchall()}
+        cur.execute("select headline_hash from news_articles where headline_hash = any(%s)",
+                    (headline_hashes,))
+        known_headline_hashes = {row['headline_hash'] for row in cur.fetchall()}
+
+    prepared, skipped_existing_urls, skipped_duplicate_headlines = filter_duplicate_headlines(
+        prepared, known_urls, known_headline_hashes
+    )
+    result['skipped_existing'] += skipped_existing_urls
+    result['skipped_duplicate_headline'] += skipped_duplicate_headlines
+    if not prepared:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("update data_sources set last_run_at=now(),last_status='success',last_error=null,updated_at=now() where source_id=%s",
+                        (source['source_id'],))
+        log.info('Source %s: no new articles after deduplication; skipped_existing_url=%s; skipped_duplicate_headline=%s; elapsed=%.1fs',
+                 source['name'], result['skipped_existing'], result['skipped_duplicate_headline'],
+                 time.monotonic()-source_started)
+        return result
 
     # Resolve missing publisher image metadata only for genuinely new articles. This is
     # bounded per source and concurrent so an RSS entry without an image cannot stall the
@@ -656,11 +707,11 @@ def process_source(source: dict, rules: list[dict], entity_lookup=None, active_t
         with conn.cursor() as cur:
             cur.execute("update data_sources set last_run_at=now(),last_status='success',last_error=null,updated_at=now() where source_id=%s",
                         (source['source_id'],))
-    log.info('Source %s: entries=%s, within_window=%s, inserted=%s, skipped_existing=%s, skipped_old=%s, skipped_undated=%s, event_topics=%s',
+    log.info('Source %s: entries=%s, within_window=%s, inserted=%s, skipped_existing=%s, skipped_duplicate_headline=%s, skipped_old=%s, skipped_undated=%s, event_topics=%s',
              source['name'], result['seen'], len(prepared), result['inserted'], result['skipped_existing'],
-             result['skipped_outside_window'], result['skipped_undated'], result['event_topics_assigned'])
-    log.info('Source finished: %s; inserted=%s; image_urls_from_rss=%s; image_urls_from_og=%s; image_lookup_failed=%s; elapsed=%.1fs',
-             source['name'], result['inserted'], result.get('image_urls_from_rss', 0),
+             result['skipped_duplicate_headline'], result['skipped_outside_window'], result['skipped_undated'], result['event_topics_assigned'])
+    log.info('Source finished: %s; inserted=%s; skipped_duplicate_headline=%s; image_urls_from_rss=%s; image_urls_from_og=%s; image_lookup_failed=%s; elapsed=%.1fs',
+             source['name'], result['inserted'], result['skipped_duplicate_headline'], result.get('image_urls_from_rss', 0),
              result.get('image_urls_from_og', 0), result.get('image_lookup_failed', 0),
              time.monotonic()-source_started)
     return result
@@ -951,7 +1002,7 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
         active_topics = load_active_topics(conn)
     if source_ids is not None:
         sources=[s for s in sources if s['source_id'] in source_ids]
-    totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'image_urls_from_rss':0,'image_urls_from_og':0,'image_lookup_failed':0,'article_images_backfilled':{},'raw_rows_purged':0,'source_errors':[]}
+    totals={'run_id':run_id,'sources':len(sources),'entries_seen':0,'entries_skipped_existing':0,'entries_skipped_duplicate_headline':0,'entries_skipped_outside_window':0,'entries_skipped_undated':0,'feeds_not_modified':0,'articles_inserted':0,'articles_updated':0,'entity_mentions':0,'new_entity_mentions':0,'event_topics_assigned':0,'event_topics_backfilled':0,'topic_candidates':0,'quality_issues':0,'image_urls_from_rss':0,'image_urls_from_og':0,'image_lookup_failed':0,'article_images_backfilled':{},'raw_rows_purged':0,'source_errors':[]}
     log.info('Pipeline run %s started: sources=%s; active_topics=%s; active_entity_cache=%s; lookback_hours=%s; backfill_batch=%s',
              run_id, len(sources), len(active_topics), len(entity_lookup['entities_by_id']), settings.pipeline_lookback_hours,
              settings.event_topic_backfill_batch_size)
@@ -960,8 +1011,8 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
             source_run_started = time.monotonic()
             try:
                 stats=process_source(source,rules,entity_lookup=entity_lookup,active_topics=active_topics)
-                for key in ('seen','inserted','updated','skipped_existing','skipped_outside_window','skipped_undated','feed_not_modified','entity_mentions','new_entities','event_topics_assigned','quality_issues','image_urls_from_rss','image_urls_from_og','image_lookup_failed'):
-                    mapkey={'seen':'entries_seen','inserted':'articles_inserted','updated':'articles_updated','skipped_existing':'entries_skipped_existing','skipped_outside_window':'entries_skipped_outside_window','skipped_undated':'entries_skipped_undated','feed_not_modified':'feeds_not_modified','new_entities':'new_entity_mentions'}.get(key,key)
+                for key in ('seen','inserted','updated','skipped_existing','skipped_duplicate_headline','skipped_outside_window','skipped_undated','feed_not_modified','entity_mentions','new_entities','event_topics_assigned','quality_issues','image_urls_from_rss','image_urls_from_og','image_lookup_failed'):
+                    mapkey={'seen':'entries_seen','inserted':'articles_inserted','updated':'articles_updated','skipped_existing':'entries_skipped_existing','skipped_duplicate_headline':'entries_skipped_duplicate_headline','skipped_outside_window':'entries_skipped_outside_window','skipped_undated':'entries_skipped_undated','feed_not_modified':'feeds_not_modified','new_entities':'new_entity_mentions'}.get(key,key)
                     totals[mapkey] += int(bool(stats[key])) if key == 'feed_not_modified' else stats[key]
                 log.info('Stage source complete: %s; elapsed=%.1fs', source['name'], time.monotonic()-source_run_started)
             except Exception as exc:

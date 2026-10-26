@@ -26,7 +26,7 @@ from .r2_storage import (R2NotConfigured, delete_object as delete_r2_object, get
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.34',description='News Radar with reduced top whitespace above the entity cloud, aligned with the featured-news heading.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.36',description='RSS ingestion rejects duplicate normalized headlines across all sources; public listing/search also deduplicates historical rows.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -1079,11 +1079,55 @@ def public_daily_articles(
 
     from_sql = " FROM news_articles a JOIN data_sources s ON s.source_id=a.source_id"
     where_sql = " WHERE " + " AND ".join(where)
-    total_row = fetch_one("SELECT count(*)::int AS total" + from_sql + where_sql, vals)
+
+    # Cross-source duplicates have different canonical URLs, so the ingestion unique
+    # constraint intentionally retains each source's original record. Public list/search
+    # results collapse exact normalized headline hashes within a rolling 72-hour window.
+    # The representative is chosen deterministically: higher quality, image available,
+    # richer summary, then newest publication/collection time. Only rows matching the
+    # current filters compete, so source/content-specific searches still work as expected.
+    dedupe_cte = """WITH filtered_candidates AS (
+          SELECT a.article_id, a.headline_hash,
+                 coalesce(a.quality_score, 0) AS quality_score,
+                 (a.image_url IS NOT NULL) AS has_image,
+                 length(coalesce(a.summary, '')) AS summary_length,
+                 coalesce(a.published_at, a.collected_at) AS timeline_at
+          """ + from_sql + where_sql + """
+        ), deduped_candidates AS (
+          SELECT candidate.article_id
+          FROM filtered_candidates candidate
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM filtered_candidates other
+            WHERE other.headline_hash = candidate.headline_hash
+              AND other.article_id <> candidate.article_id
+              AND other.timeline_at >= candidate.timeline_at - INTERVAL '72 hours'
+              AND other.timeline_at <= candidate.timeline_at + INTERVAL '72 hours'
+              AND (
+                other.quality_score > candidate.quality_score
+                OR (other.quality_score = candidate.quality_score
+                    AND other.has_image AND NOT candidate.has_image)
+                OR (other.quality_score = candidate.quality_score
+                    AND other.has_image = candidate.has_image
+                    AND other.summary_length > candidate.summary_length)
+                OR (other.quality_score = candidate.quality_score
+                    AND other.has_image = candidate.has_image
+                    AND other.summary_length = candidate.summary_length
+                    AND other.timeline_at > candidate.timeline_at)
+                OR (other.quality_score = candidate.quality_score
+                    AND other.has_image = candidate.has_image
+                    AND other.summary_length = candidate.summary_length
+                    AND other.timeline_at = candidate.timeline_at
+                    AND other.article_id > candidate.article_id)
+              )
+          )
+        ) """
+
+    total_row = fetch_one(dedupe_cte + " SELECT count(*)::int AS total FROM deduped_candidates", vals)
     total = int((total_row or {}).get('total', 0))
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
-    items = fetch_all("""SELECT a.article_id, a.title, a.url, a.image_url, a.author, a.language,
+    items = fetch_all(dedupe_cte + """SELECT a.article_id, a.title, a.url, a.image_url, a.author, a.language,
                               left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
                               a.published_at, a.collected_at,
                               coalesce(a.published_at,a.collected_at) AS timeline_at,
@@ -1126,8 +1170,11 @@ def public_daily_articles(
                                             ELSE source_entity.entity_id END
                                           WHERE ae.article_id=a.article_id
                                         ) resolved), '[]'::json) AS entity_refs
-                       """ + from_sql + where_sql +
-                       " ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC LIMIT %s OFFSET %s",
+                       FROM news_articles a
+                       JOIN data_sources s ON s.source_id=a.source_id
+                       JOIN deduped_candidates dc ON dc.article_id=a.article_id
+                       ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC
+                       LIMIT %s OFFSET %s""",
                        vals + [page_size, (page - 1) * page_size])
     return {'date': today,
             'date_from': effective_date_from.isoformat() if effective_date_from else None,
