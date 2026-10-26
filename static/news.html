@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="app-version" content="0.7.36">
+  <meta name="app-version" content="0.7.37">
   <meta name="description" content="Tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>News Radar — Doraemon</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.36">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.37">
 </head>
 <body>
   <header class="site-header">
@@ -75,7 +75,8 @@
         <div class="user-plan-panel account-plan-card" id="myPlanSection" aria-labelledby="myPlanTitle">
           <div class="plan-panel-heading"><div><p class="eyebrow">SUBSCRIPTION</p><h3 id="myPlanTitle">Gói dịch vụ</h3><p class="section-subtitle">Chọn Pro để follow tin tức và nhận thông báo mới qua Telegram.</p></div><span class="plan-badge free" id="userPlanBadge">FREE</span></div>
           <p id="userPlanSummary" class="plan-summary">Gói Free đang hoạt động.</p>
-          <div class="plan-comparison"><div><strong>Free</strong><span>Xem Radar, tìm kiếm và mở timeline công khai.</span></div><div class="pro-plan-card"><strong>Pro</strong><span>Follow topic/entity, tạo feed cá nhân và nhận bản tin mới qua Telegram.</span><small id="proPlanPriceLabel"></small><button class="auth-button plan-select-button" id="selectProPlanButton" type="button">Chọn gói Pro</button></div></div>
+          <p id="userPlanExpiry" class="plan-expiry" aria-live="polite">Gói Free không có thời hạn.</p>
+          <div class="plan-comparison"><div><strong>Free</strong><span>Xem Radar, tìm kiếm và mở timeline công khai.</span></div><div class="pro-plan-card"><strong>Pro</strong><span>Follow topic/entity, tạo feed cá nhân và nhận bản tin mới qua Telegram. Có hiệu lực 6 tháng kể từ ngày được kích hoạt.</span><small id="proPlanPriceLabel"></small><button class="auth-button plan-select-button" id="selectProPlanButton" type="button">Chọn gói Pro</button></div></div>
           <div id="paymentRequestStatus" class="payment-request-status" role="status" aria-live="polite"></div>
           <div id="paymentQrWrap" class="payment-qr-wrap" hidden><h4>Thanh toán nâng cấp Pro</h4><p id="paymentInstructions" class="section-subtitle"></p><img id="paymentQrImage" class="payment-qr-image" alt="Mã QR thanh toán gói Pro" loading="lazy"><p class="payment-secure-note">Gói Pro của bạn sẽ được kích hoạt trong vòng 1h sau khi hoàn tất thanh toán. Vui lòng dùng chức năng <strong>Thông báo admin</strong> nếu có yêu cầu gấp! Sau khi thanh toán, hãy đính kèm ảnh chụp giao dịch bên dưới để admin xác nhận.</p></div>
           <form id="paymentProofForm" class="payment-proof-form" hidden>
@@ -206,6 +207,6 @@
       <a href="/" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/news.js?v=0.7.36" defer></script>
+  <script src="/static/news.js?v=0.7.37" defer></script>
 </body>
 </html>

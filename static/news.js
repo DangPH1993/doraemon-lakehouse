@@ -489,6 +489,9 @@
     $('#userPlanSummary').textContent = isPro
       ? 'Gói Pro đang hoạt động. Bạn có thể follow topic/entity, sử dụng feed cá nhân và nhận thông báo tin mới qua Telegram khi đã kết nối bot.'
       : 'Gói Free đang hoạt động. Bạn có thể xem Radar công khai; quyền follow và thông báo tin mới qua Telegram dành cho gói Pro.';
+    $('#userPlanExpiry').textContent = isPro
+      ? `Ngày hết hạn gói Pro: ${data.plan_expires_at ? localDateText(data.plan_expires_at) : 'chưa được thiết lập'}.`
+      : 'Gói Free không có thời hạn. Nâng cấp Pro sẽ có hiệu lực 6 tháng kể từ ngày được kích hoạt.';
     $('#proPlanPriceLabel').textContent = data.pro_price_label || 'Xem hướng dẫn thanh toán để biết mức phí Pro.';
     const qrUrl = safeImageHref(data.qr_image_url);
     const request = data.payment_request;
