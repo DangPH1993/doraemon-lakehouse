@@ -1,8 +1,6 @@
 name: Pro Subscription Expiry
 
 on:
-  schedule:
-    - cron: "13 * * * *" # Hourly; GitHub Actions uses UTC
   workflow_dispatch:
 
 permissions:
