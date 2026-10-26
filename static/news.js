@@ -69,6 +69,7 @@
     const node = $(target);
     if (!node) return;
     node.textContent = message || '';
+    node.classList.remove('error');
     node.classList.toggle('success', Boolean(success));
   }
 
@@ -900,8 +901,10 @@
       const response = await fetch('/api/user/payment-requests', {method:'POST', body:formData, credentials:'same-origin', headers:{'Accept':'application/json'}});
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.detail || `Không gửi được yêu cầu (${response.status})`);
-      $('#paymentProofForm').reset(); await loadPlanInfo();
-      setFeedback('#paymentRequestStatus', result.message || 'Đã gửi bằng chứng thanh toán.', true);
+      $('#paymentProofForm').reset();
+      try { await loadPlanInfo(); }
+      catch (refreshError) { console.warn('Payment request was accepted, but plan status could not be refreshed:', refreshError.message); }
+      setFeedback('#paymentRequestStatus', 'Bạn đã gửi thông báo cho admin nâng cấp gói Pro thành công!', true);
     } catch (error) { setFeedback('#paymentRequestStatus', error.message); $('#paymentRequestStatus').classList.add('error'); }
     finally { state.paymentProofSubmitting = false; $('#submitPaymentProof').disabled = false; }
   });
