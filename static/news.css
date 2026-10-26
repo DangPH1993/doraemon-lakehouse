@@ -416,3 +416,11 @@ body{background:#fff;color:#202124;font-size:14px}
 
 /* v0.7.39: softer letter spacing for Vietnamese product brand. */
 .brand-copy strong,.footer-brand strong{letter-spacing:.35px;text-transform:none}
+
+
+/* v0.7.41: stronger product lockup and more editorial search label. */
+.search-eyebrow{font-family:Georgia,"Times New Roman",serif;font-size:18px;line-height:1.25;font-weight:700;letter-spacing:.15px;color:#102b3f;text-transform:none;margin-bottom:17px}
+.search-eyebrow .live-dot{flex:0 0 7px}
+.brand-mark{font-size:16px;letter-spacing:-.4px}
+.brand-mark.small{font-size:14px;letter-spacing:-.35px}
+@media(max-width:640px){.brand-mark{font-size:15px;letter-spacing:-.35px}.brand-mark.small{font-size:14px}.search-eyebrow{font-size:16px;margin-bottom:15px}}
