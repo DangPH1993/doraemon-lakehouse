@@ -116,6 +116,22 @@ def is_numeric_or_date_entity(name: str) -> bool:
 _NON_ENTITY_FOLDED = {_fold(x) for x in _NON_ENTITY_PHRASES}
 _REGION_FOLDED = {_fold(x) for x in _BROAD_REGIONS}
 
+# These words often become capitalized only because they occur at the start of a
+# Vietnamese headline or are fragments of a longer phrase. Alone, they do not identify
+# one specific person, organization, event, place or object (e.g. cloud bubbles "Chiến"
+# and "Chủ"). Keep the filter exact-token and conservative so full names such as
+# "Chiến Thắng", named organizations such as "Bộ Công an", and proper brands survive.
+_GENERIC_SINGLE_TOKEN_ENTITIES = {
+    'chiến', 'chủ', 'vụ', 'nhà', 'người', 'hàng', 'bộ', 'sở', 'ban', 'công',
+    'đội', 'đoàn', 'tuyến', 'giải', 'trận', 'phiên', 'cuộc', 'sự', 'việc', 'tin',
+    'sản', 'quan', 'xã', 'huyện', 'tỉnh', 'thành', 'phố', 'quốc', 'gia', 'ngành',
+    'địa', 'khu', 'vùng', 'lãnh', 'đạo', 'chính', 'phủ', 'thể', 'thao', 'kinh',
+    'tế', 'pháp', 'luật', 'văn', 'hóa', 'đấu', 'cầu', 'xe', 'tàu', 'máy', 'đường',
+    'cảng', 'sân', 'trường', 'làng', 'chợ', 'núi', 'sông', 'hồ', 'biển', 'nhân',
+    'dân', 'thắng', 'thua', 'mới', 'cũ', 'lớn', 'nhỏ', 'cao', 'thấp', 'đẹp', 'xấu',
+}
+_GENERIC_SINGLE_TOKEN_FOLDED = {_fold(x) for x in _GENERIC_SINGLE_TOKEN_ENTITIES}
+
 # Publisher/byline labels are not followable story entities. Keep this list deliberately
 # conservative and supplement it with common Vietnamese publisher prefixes.
 _MEDIA_SOURCE_NAMES = {
@@ -280,6 +296,11 @@ def should_track_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
     if is_numeric_or_date_entity(name):
         return False
     if folded in _GENERIC_FOLDED or folded in _NON_ENTITY_FOLDED or folded in _REGION_FOLDED:
+        return False
+    # Reject ambiguous standalone words regardless of the model-assigned type. Entity
+    # type labels are often noisy, so classifying the generic word as ORG/EVENT must not
+    # turn a fragment into a followable entity.
+    if len(folded.split()) == 1 and folded in _GENERIC_SINGLE_TOKEN_FOLDED:
         return False
     typ = str(entity_type or 'UNKNOWN').upper().strip()
     # A whole administrative country/place name must not become a PERSON merely because

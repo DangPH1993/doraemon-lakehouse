@@ -638,7 +638,8 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                             OR coalesce(ai_classification->>'field_category_rules_v075_enriched','false') <> 'true'
                                             OR coalesce(ai_classification->>'named_proper_nouns_v076_enriched','false') <> 'true'
                                             OR coalesce(ai_classification->>'named_proper_nouns_v0716_enriched','false') <> 'true'
-                                            OR coalesce(ai_classification->>'entity_grounding_guard_v0732_name_precision','false') <> 'true'))
+                                            OR coalesce(ai_classification->>'entity_grounding_guard_v0732_name_precision','false') <> 'true'
+                                            OR coalesce(ai_classification->>'entity_generic_single_word_guard_v0742','false') <> 'true'))
                                       OR field_category IS NULL)
                                ORDER BY coalesce(published_at,collected_at) DESC
                                LIMIT %s""", (limit,))
@@ -801,6 +802,7 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                         classification['entity_quality_rules_v075_enriched'] = True
                         classification['entity_quality_rules_v075_enriched_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
                         classification['entity_grounding_guard_v0732_name_precision'] = True
+                        classification['entity_generic_single_word_guard_v0742'] = True
                         cur.execute("""UPDATE news_articles SET ai_classification=%s::jsonb,field_category=%s,updated_at=now()
                                        WHERE article_id=%s""", (json.dumps(classification, ensure_ascii=False), existing_field, article_id))
                 if changed:
@@ -819,6 +821,7 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                                             'field_category_rules_v075_enriched',true,
                                                             'named_proper_nouns_v076_enriched',true,
                                                             'entity_grounding_guard_v0732_name_precision',true,
+                                                            'entity_generic_single_word_guard_v0742',true,
                                                             'entity_quality_rules_v075_error','row processing failed'),
                                        field_category=coalesce(field_category,%s),updated_at=now() WHERE article_id=%s""", (fallback_field, fallback_field, article_id))
                 except Exception:
