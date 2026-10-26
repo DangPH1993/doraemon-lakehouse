@@ -14,8 +14,8 @@ from email.message import EmailMessage
 from .config import settings
 from .db import get_conn, fetch_all, fetch_one
 from .security import (issue_token, require_admin, hash_password, verify_password, issue_user_token, require_user)
-from .processing import canonicalize_url, hash_text, norm_name, slugify
-from .entity_rules import should_track_entity, is_media_source_entity
+from .processing import canonicalize_url, hash_text, norm_name, slugify, normalize_space
+from .entity_rules import should_track_entity, is_media_source_entity, is_grounded_entity
 from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
@@ -27,7 +27,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.43',description='RSS ingestion rejects duplicate normalized headlines across all sources; public listing/search also deduplicates historical rows. Health endpoint accepts GET and HEAD for uptime monitors.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.44',description='Entity aliases are filtered by grounded identity; entity timelines reject weak one-token matches. RSS ingestion deduplicates headlines and health endpoint accepts GET and HEAD.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -1393,6 +1393,59 @@ def public_topic_timeline(
             'mode': 'topic_id', 'items': items, 'pagination': pagination}
 
 
+def _public_grounded_entity_timeline_items(entity: dict, page: int, page_size: int):
+    """Return only linked articles where the entity is grounded in title/summary.
+
+    This is a presentation-layer safety net while the ingestion quality pass repairs legacy
+    article_entities rows. It deliberately refuses weak one-word mentions for multi-word names.
+    """
+    entity_id = int(entity['entity_id'])
+    entity_name = str(entity.get('canonical_name') or '')
+    entity_type = str(entity.get('entity_type') or 'UNKNOWN')
+    rows = fetch_all(
+        """SELECT rel.mention_text AS _entity_mention,
+                  a.article_id, a.title, a.url, a.image_url, a.author, a.language,
+                  left(coalesce(nullif(a.summary,''),nullif(a.content_text,''),''),320) AS snippet,
+                  coalesce(a.summary,'') AS _grounding_summary,
+                  a.published_at, a.collected_at,
+                  coalesce(a.published_at,a.collected_at) AS timeline_at,
+                  a.field_category, s.name AS source_name,
+                  coalesce((SELECT string_agg(DISTINCT e.canonical_name, ', ' ORDER BY e.canonical_name)
+                            FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
+                            WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities,
+                  coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
+                            FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                            WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
+           FROM article_entities rel
+           JOIN news_articles a ON a.article_id=rel.article_id
+           JOIN data_sources s ON s.source_id=a.source_id
+           WHERE rel.entity_id=%s AND a.is_excluded=false
+           ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC""",
+        (entity_id,),
+    )
+    # article_entities can contain multiple mention rows for the same article/entity.
+    # Keep one grounded card per article, while allowing a later safe mention to validate
+    # the article even if an earlier weak alias did not.
+    grounded_by_article: dict[int, dict] = {}
+    for row in rows:
+        source_text = normalize_space(f"{row.get('title') or ''}. {row.get('_grounding_summary') or ''}")
+        mention = str(row.get('_entity_mention') or '')
+        if not is_grounded_entity(entity_name, [mention], source_text, entity_type):
+            continue
+        article_id = int(row['article_id'])
+        if article_id in grounded_by_article:
+            continue
+        row.pop('_entity_mention', None)
+        row.pop('_grounding_summary', None)
+        grounded_by_article[article_id] = row
+    grounded = list(grounded_by_article.values())
+    total = len(grounded)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    actual_page = min(page, total_pages)
+    start = (actual_page - 1) * page_size
+    return grounded[start:start + page_size], pagination_meta(actual_page, page_size, total), total
+
+
 @app.get('/api/public/news/entities/{entity_id}/timeline')
 def public_entity_timeline(
     entity_id: int,
@@ -1404,7 +1457,7 @@ def public_entity_timeline(
                           FROM entities WHERE entity_id=%s AND status='active'""", (entity_id,))
     if not entity:
         raise HTTPException(status_code=404, detail='Entity not found')
-    items, pagination, total = _public_direct_timeline_items('article_entities', 'entity_id', entity_id, page, page_size)
+    items, pagination, total = _public_grounded_entity_timeline_items(entity, page, page_size)
     return {'entity': entity, 'timeline_id': entity_id, 'timeline_name': entity['canonical_name'],
             'mode': 'entity_id', 'items': items, 'pagination': pagination}
 

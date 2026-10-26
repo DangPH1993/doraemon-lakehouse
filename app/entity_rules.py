@@ -122,7 +122,7 @@ _REGION_FOLDED = {_fold(x) for x in _BROAD_REGIONS}
 # and "Chủ"). Keep the filter exact-token and conservative so full names such as
 # "Chiến Thắng", named organizations such as "Bộ Công an", and proper brands survive.
 _GENERIC_SINGLE_TOKEN_ENTITIES = {
-    'chiến', 'chủ', 'vụ', 'nhà', 'người', 'hàng', 'bộ', 'sở', 'ban', 'công',
+    'chiến', 'chủ', 'vụ', 'nhà', 'người', 'hàng', 'bộ', 'sở', 'ban', 'công', 'diễn', 'viên', 'mùa', 'thu', 'tập',
     'đội', 'đoàn', 'tuyến', 'giải', 'trận', 'phiên', 'cuộc', 'sự', 'việc', 'tin',
     'sản', 'quan', 'xã', 'huyện', 'tỉnh', 'thành', 'phố', 'quốc', 'gia', 'ngành',
     'địa', 'khu', 'vùng', 'lãnh', 'đạo', 'chính', 'phủ', 'thể', 'thao', 'kinh',
@@ -257,6 +257,61 @@ def is_safe_person_alias(canonical_name: str, alias: str) -> bool:
     return alias_tokens[0] == canonical_tokens[-1]
 
 
+# A small set of culturally established one-token aliases for non-person entities.
+# Every other multi-token entity must not be resolved or grounded through an ordinary
+# one-word tail such as "Diễn" from "Cầu Diễn".
+_SAFE_SHORT_ENTITY_ALIASES = {
+    'sevilla fc': {'sevilla'},
+    'valencia cf': {'valencia'},
+}
+
+
+def is_safe_entity_alias(canonical_name: str, alias: str, entity_type: str = 'UNKNOWN') -> bool:
+    """Return whether an alias is distinctive enough to identify the canonical entity.
+
+    Exact canonical forms and multi-token variants with at least two shared identity tokens
+    are safe. A different one-token alias for a multi-token canonical name is rejected unless
+    it is a curated alias or a distinctive acronym/CamelCase token already inside the canonical
+    name. This prevents aliases like ``Diễn`` from attaching every article beginning with
+    ``Diễn viên`` or ``Diễn đàn`` to the location entity ``Cầu Diễn``.
+    """
+    typ = str(entity_type or 'UNKNOWN').upper().strip()
+    if typ == 'PERSON':
+        return is_safe_person_alias(canonical_name, alias)
+
+    canonical_raw = normalize_space(str(canonical_name or '')).strip(' ,.;:-')
+    alias_raw = normalize_space(str(alias or '')).strip(' ,.;:-')
+    canonical_key = _fold(canonical_raw)
+    alias_key = _fold(alias_raw)
+    if not canonical_key or not alias_key:
+        return False
+    if alias_key == canonical_key:
+        return True
+
+    canonical_tokens = canonical_key.split()
+    alias_tokens = alias_key.split()
+    if len(alias_tokens) == 1 and len(canonical_tokens) > 1:
+        if alias_key in _SAFE_SHORT_ENTITY_ALIASES.get(canonical_key, set()):
+            return True
+        # Allow acronyms or unmistakable brands only when that token is present in the
+        # canonical name itself (e.g. "Tập đoàn OpenAI" -> "OpenAI", not "Cầu Diễn" -> "Diễn").
+        token_is_acronym = alias_raw.isupper() and len(re.sub(r'[^A-Za-z0-9]', '', alias_raw)) >= 3
+        token_is_camel_brand = (any(c.isupper() for c in alias_raw[1:])
+                                and any(c.islower() for c in alias_raw)
+                                and any(c.islower() for c in alias_raw[1:]))
+        token_has_digit = any(c.isdigit() for c in alias_raw)
+        return (alias_key in canonical_tokens
+                and (token_is_acronym or token_is_camel_brand or token_has_digit))
+
+    if len(alias_tokens) >= 2:
+        # Require at least two identity-token overlaps. A single shared descriptor such as
+        # "Cầu" is not enough to claim that "Cầu Rồng" and "Cầu Diễn" are the same entity.
+        return len(set(alias_tokens) & set(canonical_tokens)) >= 2
+
+    # A distinct one-token alias cannot safely identify a one-token canonical either.
+    return False
+
+
 def _contains_folded_phrase(source_folded: str, phrase: str) -> bool:
     """Match a full token-bounded phrase after accent/punctuation normalization."""
     phrase_folded = _fold(phrase)
@@ -360,7 +415,7 @@ def is_grounded_entity(name: str, aliases, article_text: str, entity_type: str =
             candidate_alias = normalize_space(str(value or ''))[:180]
             if not candidate_alias:
                 continue
-            if typ == 'PERSON' and not is_safe_person_alias(name, candidate_alias):
+            if not is_safe_entity_alias(name, candidate_alias, typ):
                 continue
             candidates.append(candidate_alias)
 

@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 from .processing import normalize_space, norm_name
-from .entity_rules import is_administrative_location, should_track_entity
+from .entity_rules import is_administrative_location, should_track_entity, is_safe_entity_alias
 
 # Match longer heads before shorter overlapping heads. Canonical heads are stable display
 # forms, while the specific name comes from the actual article text.
@@ -246,7 +246,8 @@ def extract_named_infrastructure_entities(text: str) -> list[dict[str, Any]]:
         aliases = [name]
         # Directly stated headless name forms are useful aliases (e.g. "Big C"), while
         # the canonical key always retains the class head ("Siêu thị Big C").
-        if raw_tail and norm_name(raw_tail) != norm_name(name):
+        if (raw_tail and norm_name(raw_tail) != norm_name(name)
+                and is_safe_entity_alias(name, raw_tail, entity_type)):
             aliases.append(normalize_space(raw_tail))
         candidates.append({
             'name': name,

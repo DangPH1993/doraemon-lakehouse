@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from .processing import normalize_space, norm_name
 from .entity_names import entity_normalized_key
-from .entity_rules import is_administrative_location, is_safe_person_alias
+from .entity_rules import is_administrative_location, is_safe_person_alias, is_safe_entity_alias
 
 # Longest forms first. These are honorific/role prefixes, not identity-bearing words.
 _PERSON_TITLE_PREFIXES = sorted((
@@ -59,7 +59,15 @@ def entity_name_variants(name: str, entity_type: str = 'UNKNOWN', aliases: Itera
 
     def add(value: str) -> None:
         value = normalize_space(str(value or '')).strip(' ,.;:-')
-        if typ == 'PERSON' and len(norm_name(value).split()) == 1 and is_administrative_location(value):
+        if typ == 'PERSON':
+            if len(norm_name(value).split()) == 1 and is_administrative_location(value):
+                return
+            # Product rule: a bare PERSON mention "Trump" is promoted to the configured
+            # canonical form "Donald Trump" before the ordinary alias-safety gate.
+            is_trump_canonicalization = norm_name(primary) == 'trump' and norm_name(value) == 'donald trump'
+            if norm_name(value) != norm_name(primary) and not is_trump_canonicalization and not is_safe_person_alias(primary, value):
+                return
+        elif norm_name(value) != norm_name(primary) and not is_safe_entity_alias(primary, value, typ):
             return
         if value and norm_name(value) and all(norm_name(value) != norm_name(old) for old in candidates):
             candidates.append(value)
@@ -125,9 +133,9 @@ def build_entity_lookup(entities: Iterable[dict[str, Any]], aliases: Iterable[di
             continue
         entity = lookup['entities_by_id'][eid]
         alias_text = str(alias.get('alias') or alias.get('normalized_alias') or '')
-        if str(entity.get('entity_type') or 'UNKNOWN').upper().strip() == 'PERSON':
-            if not is_safe_person_alias(str(entity.get('canonical_name') or ''), alias_text):
-                continue  # Ignore unsafe legacy aliases already present in Neon.
+        if not is_safe_entity_alias(str(entity.get('canonical_name') or ''), alias_text,
+                                    str(entity.get('entity_type') or 'UNKNOWN')):
+            continue  # Ignore unsafe legacy aliases already present in Neon for every type.
         normalized = norm_name(str(alias.get('normalized_alias') or alias.get('alias') or ''))
         if normalized:
             lookup['alias_to_ids'][normalized].add(eid)
@@ -145,9 +153,9 @@ def add_entity_to_lookup(lookup: dict[str, Any], entity: dict[str, Any], alias_n
     if structured:
         lookup['canonical_to_ids'][structured].add(eid)
     for alias in alias_names:
-        if str(entity.get('entity_type') or 'UNKNOWN').upper().strip() == 'PERSON':
-            if not is_safe_person_alias(str(entity.get('canonical_name') or ''), str(alias or '')):
-                continue
+        if not is_safe_entity_alias(str(entity.get('canonical_name') or ''), str(alias or ''),
+                                    str(entity.get('entity_type') or 'UNKNOWN')):
+            continue
         normalized = norm_name(str(alias or ''))
         if normalized:
             lookup['alias_to_ids'][normalized].add(eid)
@@ -226,20 +234,18 @@ def resolve_entity_in_database(conn, name: str, entity_type: str, aliases: Itera
         rank = int(row['variant_rank'])
         raw_variant = variant_meta[rank - 1][1] if 0 < rank <= len(variant_meta) else ''
         row_type = str(row.get('entity_type') or 'UNKNOWN').upper().strip()
-        if row_type == 'PERSON':
-            canonical = str(row.get('canonical_name') or '')
-            normalized_name = str(row.get('normalized_name') or '')
-            variant_norm = norm_name(raw_variant)
-            # A normalized primary key match is authoritative. An alias match must pass
-            # the same identity guard as the in-memory resolver, even if a stale alias
-            # row still exists in the database.
-            canonical_match = (
-                variant_norm == norm_name(canonical)
-                or norm_name(raw_variant) == norm_name(normalized_name)
-                or norm_name(raw_variant) == norm_name(entity_normalized_key(canonical, row_type))
-            )
-            if not canonical_match and not is_safe_person_alias(canonical, raw_variant):
-                continue
+        canonical = str(row.get('canonical_name') or '')
+        normalized_name = str(row.get('normalized_name') or '')
+        variant_norm = norm_name(raw_variant)
+        # Canonical/full-name hits are authoritative. Any other alias hit must pass the
+        # shared alias-safety policy, including legacy aliases that remain stored in Neon.
+        canonical_match = (
+            variant_norm == norm_name(canonical)
+            or variant_norm == norm_name(normalized_name)
+            or variant_norm == norm_name(entity_normalized_key(canonical, row_type))
+        )
+        if not canonical_match and not is_safe_entity_alias(canonical, raw_variant, row_type):
+            continue
         by_rank.setdefault(rank, {})[int(row['entity_id'])] = row
     preferred_norm = norm_name(strip_person_title(name)) if typ == 'PERSON' else input_norm
     for rank in sorted(by_rank):
