@@ -413,3 +413,6 @@ body{background:#fff;color:#202124;font-size:14px}
 @media (max-width:1050px){
   .radar-main-column > .entity-cloud-section > .entity-cloud{margin-top:8px;}
 }
+
+/* v0.7.39: softer letter spacing for Vietnamese product brand. */
+.brand-copy strong,.footer-brand strong{letter-spacing:.35px;text-transform:none}
