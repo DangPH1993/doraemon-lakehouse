@@ -143,7 +143,8 @@ WITH matches AS (
     JOIN topics t ON t.topic_id=ust.topic_id AND t.status='active' AND t.topic_type='event'
     JOIN article_topics at ON at.topic_id=t.topic_id
     JOIN news_articles a ON a.article_id=at.article_id AND a.is_excluded=false
-    WHERE u.plan='Pro' AND u.telegram_enabled=true AND u.telegram_chat_id IS NOT NULL
+    WHERE u.plan='Pro' AND u.plan_expires_at > now()
+      AND u.telegram_enabled=true AND u.telegram_chat_id IS NOT NULL
       AND u.telegram_notifications_since IS NOT NULL
       AND a.collected_at >= u.telegram_notifications_since
       AND a.collected_at >= now() - interval '90 days'
@@ -159,7 +160,8 @@ WITH matches AS (
     JOIN entities e ON e.entity_id=ust.entity_id AND e.status='active'
     JOIN article_entities ae ON ae.entity_id=e.entity_id
     JOIN news_articles a ON a.article_id=ae.article_id AND a.is_excluded=false
-    WHERE u.plan='Pro' AND u.telegram_enabled=true AND u.telegram_chat_id IS NOT NULL
+    WHERE u.plan='Pro' AND u.plan_expires_at > now()
+      AND u.telegram_enabled=true AND u.telegram_chat_id IS NOT NULL
       AND u.telegram_notifications_since IS NOT NULL
       AND a.collected_at >= u.telegram_notifications_since
       AND a.collected_at >= now() - interval '90 days'

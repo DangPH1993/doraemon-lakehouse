@@ -1,4 +1,5 @@
 import base64, hashlib, hmac, json, secrets, time
+from datetime import datetime, timezone
 from fastapi import Cookie, Header, HTTPException
 from .config import settings
 
@@ -98,9 +99,17 @@ async def require_user(
         raise HTTPException(status_code=401, detail='Vui lòng đăng nhập để sử dụng chức năng này.')
     from .db import fetch_one
     user = fetch_one(
-        'SELECT user_id, username, email, plan FROM app_users WHERE user_id=%s AND is_active=true',
+        'SELECT user_id, username, email, plan, plan_expires_at FROM app_users WHERE user_id=%s AND is_active=true',
         (claims['sub'],),
     )
     if not user:
         raise HTTPException(status_code=401, detail='Tài khoản không tồn tại hoặc đã bị khóa.')
+    # Enforce expiry immediately for this account without writing on every request.
+    # The hourly GitHub Actions workflow handles accounts that are not active.
+    expires_at = user.get('plan_expires_at')
+    if user.get('plan') == 'Pro' and expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        from .subscriptions import expire_pro_plans
+        expire_pro_plans(user_id=claims['sub'])
+        user['plan'] = 'Free'
+        user['plan_expires_at'] = None
     return user

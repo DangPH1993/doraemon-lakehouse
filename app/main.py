@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 from typing import Literal
 import re
 from urllib.parse import urlparse
@@ -23,10 +23,11 @@ from .field_categories import FIELD_CATEGORIES, LEGACY_BROAD_TOPIC_LABELS, is_br
 from .r2_storage import (R2NotConfigured, delete_object as delete_r2_object, get_bytes as get_r2_bytes,
                          is_configured as r2_is_configured, make_object_key as make_r2_key,
                          put_bytes as put_r2_bytes)
+from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.36',description='RSS ingestion rejects duplicate normalized headlines across all sources; public listing/search also deduplicates historical rows.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.37',description='RSS ingestion rejects duplicate normalized headlines across all sources; public listing/search also deduplicates historical rows.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -182,7 +183,7 @@ def register_user(body: UserRegisterBody, request: Request, response: Response):
         user = fetch_one("""INSERT INTO app_users(username, username_normalized, email, email_normalized, password_hash, last_login_at)
                              VALUES (%s, %s, %s, %s, %s, now())
                              ON CONFLICT DO NOTHING
-                             RETURNING user_id, username, email, plan""",
+                             RETURNING user_id, username, email, plan, plan_expires_at""",
                          (username, username_normalized, email, email, hash_password(body.password)))
     except Exception as exc:
         log.exception('User registration failed')
@@ -199,7 +200,15 @@ def login_user(body: UserLoginBody, request: Request, response: Response):
         raise HTTPException(status_code=503, detail='Máy chủ chưa cấu hình SESSION_SECRET.')
     identifier = body.identifier.strip().lower()
     try:
-        user = fetch_one("""SELECT user_id, username, email, plan, password_hash
+        # Expire this account before returning its plan at login.
+        fetch_one("""UPDATE app_users
+                      SET plan='Free', plan_expires_at=NULL, plan_updated_at=now(),
+                          plan_updated_by='subscription-expiry', telegram_enabled=false,
+                          telegram_notifications_since=NULL
+                      WHERE (username_normalized=%s OR email_normalized=%s)
+                        AND plan='Pro' AND plan_expires_at IS NOT NULL AND plan_expires_at <= now()
+                      RETURNING user_id""", (identifier, identifier))
+        user = fetch_one("""SELECT user_id, username, email, plan, plan_expires_at, password_hash
                              FROM app_users
                              WHERE (username_normalized=%s OR email_normalized=%s) AND is_active=true""",
                          (identifier, identifier))
@@ -214,7 +223,7 @@ def login_user(body: UserLoginBody, request: Request, response: Response):
         log.exception('User login timestamp could not be updated')
         raise HTTPException(status_code=503, detail='Không thể cập nhật phiên đăng nhập lúc này.') from exc
     _set_user_cookie(response, request, issue_user_token(user['user_id'], user['username']))
-    return {'user': {'user_id': user['user_id'], 'username': user['username'], 'email': user['email'], 'plan': user.get('plan', 'Free')}, 'expires_in': 604800}
+    return {'user': {'user_id': user['user_id'], 'username': user['username'], 'email': user['email'], 'plan': user.get('plan', 'Free'), 'plan_expires_at': user.get('plan_expires_at')}, 'expires_in': 604800}
 
 
 @app.post('/api/user-auth/logout')
@@ -234,7 +243,8 @@ ALLOWED_PAYMENT_MIME = {'image/jpeg', 'image/png', 'image/webp'}
 
 
 def _ensure_pro_user(user: dict) -> None:
-    if str(user.get('plan') or 'Free') != 'Pro':
+    expires_at = user.get('plan_expires_at')
+    if str(user.get('plan') or 'Free') != 'Pro' or expires_at is None or expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=403, detail='Vui lòng nâng cấp lên gói Pro để follow tin tức và nhận thông báo tin mới qua telegram!')
 
 
@@ -316,6 +326,7 @@ def get_user_plan(request: Request, user: dict = Depends(require_user)):
     config = _effective_plan_config(request)
     return {
         'plan': user.get('plan') or 'Free',
+        'plan_expires_at': user.get('plan_expires_at'),
         'pro_price_label': config['pro_price_label'],
         'qr_image_url': config['qr_image_url'],
         'payment_instructions': config['payment_instructions'],
@@ -568,6 +579,7 @@ def admin_payment_proof(payment_request_id: int):
 
 @app.post('/api/admin/payment-requests/{payment_request_id}/review', dependencies=[Depends(require_admin)])
 def review_payment_request(payment_request_id: int, body: PaymentReviewBody):
+    plan_expires_at = None
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT payment_request_id,user_id,status FROM payment_requests WHERE payment_request_id=%s FOR UPDATE", (payment_request_id,))
@@ -578,17 +590,19 @@ def review_payment_request(payment_request_id: int, body: PaymentReviewBody):
             cur.execute("UPDATE payment_requests SET status=%s,reviewed_at=now(),reviewed_by=%s,admin_note=%s WHERE payment_request_id=%s",
                         (next_status, settings.admin_username, body.note.strip(), payment_request_id))
             if body.decision == 'approve':
-                cur.execute("UPDATE app_users SET plan='Pro',plan_updated_at=now(),plan_updated_by=%s WHERE user_id=%s", (settings.admin_username, row['user_id']))
+                cur.execute("UPDATE app_users SET plan='Pro',plan_expires_at=now()+interval '6 months',plan_updated_at=now(),plan_updated_by=%s WHERE user_id=%s RETURNING plan_expires_at", (settings.admin_username, row['user_id']))
+                plan_expires_at = cur.fetchone()['plan_expires_at']
     except HTTPException:
         raise
     except Exception as exc:
         log.exception('Payment request review failed')
         raise HTTPException(status_code=503, detail='Không thể duyệt thanh toán. Kiểm tra migration SQL 018.') from exc
-    return {'ok': True, 'status': next_status, 'plan': 'Pro' if body.decision == 'approve' else None}
+    return {'ok': True, 'status': next_status, 'plan': 'Pro' if body.decision == 'approve' else None, 'plan_expires_at': plan_expires_at}
 
 
 @app.get('/api/admin/users', dependencies=[Depends(require_admin)])
 def admin_list_users(q: str | None = None, limit: int = Query(default=200, ge=1, le=500)):
+    expire_pro_plans()
     search = (q or '').strip()
     where = 'WHERE (u.username ILIKE %s OR u.email ILIKE %s)' if search else ''
     params = (f'%{search}%', f'%{search}%') if search else ()
@@ -596,7 +610,7 @@ def admin_list_users(q: str | None = None, limit: int = Query(default=200, ge=1,
                            SELECT DISTINCT ON (user_id) payment_request_id,user_id,status,requested_plan,created_at
                            FROM payment_requests ORDER BY user_id,created_at DESC,payment_request_id DESC
                          )
-                         SELECT u.user_id,u.username,u.email,u.plan,u.is_active,u.created_at,u.last_login_at,
+                         SELECT u.user_id,u.username,u.email,u.plan,u.plan_expires_at,u.is_active,u.created_at,u.last_login_at,
                                 lp.payment_request_id,lp.status AS payment_status,lp.requested_plan,lp.created_at AS payment_created_at
                          FROM app_users u LEFT JOIN latest_payment lp ON lp.user_id=u.user_id
                          {where}
@@ -608,8 +622,15 @@ def admin_list_users(q: str | None = None, limit: int = Query(default=200, ge=1,
 def admin_set_user_plan(user_id: int, body: UserPlanBody):
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE app_users SET plan=%s,plan_updated_at=now(),plan_updated_by=%s,telegram_enabled=CASE WHEN %s='Free' THEN false ELSE telegram_enabled END WHERE user_id=%s RETURNING user_id,username,email,plan",
-                        (body.plan, settings.admin_username, body.plan, user_id))
+            cur.execute("""UPDATE app_users
+                           SET plan=%s,
+                               plan_expires_at=CASE WHEN %s='Pro' THEN now()+interval '6 months' ELSE NULL END,
+                               plan_updated_at=now(), plan_updated_by=%s,
+                               telegram_enabled=CASE WHEN %s='Free' THEN false ELSE telegram_enabled END,
+                               telegram_notifications_since=CASE WHEN %s='Free' THEN NULL ELSE telegram_notifications_since END
+                           WHERE user_id=%s
+                           RETURNING user_id,username,email,plan,plan_expires_at""",
+                        (body.plan, body.plan, settings.admin_username, body.plan, body.plan, user_id))
             row = cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail='Không tìm thấy tài khoản người dùng.')
