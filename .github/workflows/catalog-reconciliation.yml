@@ -1,8 +1,6 @@
 name: Mini Lakehouse Topic Entity Reconciliation + Entity Quality
 
 on:
-  schedule:
-    - cron: "47 */3 * * *" # Every three hours UTC
   workflow_dispatch:
 
 permissions:
