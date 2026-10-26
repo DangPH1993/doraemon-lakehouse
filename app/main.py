@@ -26,7 +26,7 @@ from .r2_storage import (R2NotConfigured, delete_object as delete_r2_object, get
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.31',description='News Radar with a circular 20-item 24-hour entity cloud and strict article-grounded entity links.')
+app=FastAPI(title='Doraemon Mini Lakehouse',version='0.7.32',description='News Radar with a circular 20-item 24-hour entity cloud and conservative full-name grounding for Vietnamese people.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()

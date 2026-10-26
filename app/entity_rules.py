@@ -154,6 +154,101 @@ def is_media_source_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
 
 
 
+# Person aliases need a stricter policy than generic entity aliases. In Vietnamese
+# news, given-name tokens such as Lan, Nga, Anh, Mỹ, Nam, Hùng, etc. routinely appear
+# inside unrelated people, organizations and place names. A single shared token is not
+# sufficient evidence that two mentions refer to the same person.
+_PERSON_ROLE_PREFIXES = tuple(sorted((
+    'former president of the united states', 'president of the united states',
+    'cựu tổng thống mỹ', 'tổng thống mỹ', 'cựu tổng thống', 'prime minister of',
+    'vice president', 'secretary of state', 'prime minister', 'thủ tướng',
+    'tổng thống', 'chủ tịch', 'bộ trưởng', 'phó tổng thống', 'former president',
+    'president', 'secretary', 'senator', 'governor', 'chancellor', 'chairman',
+    'chairwoman', 'king', 'queen', 'prince', 'princess', 'premier', 'minister',
+    'tiktoker', 'ông', 'bà', 'ngài', 'mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'sir',
+), key=len, reverse=True))
+_SAFE_SHORT_PERSON_ALIASES = {
+    # Explicit product rule already used by the Radar: bare Trump refers to Donald Trump.
+    'donald trump': {'trump'},
+}
+# Folded tokens frequently present in Vietnamese full names. This also catches unaccented
+# RSS text such as "Truong My Lan" and "Nguyen Thi Lan".
+_VIETNAMESE_NAME_TOKENS = set('''
+    nguyen tran le pham hoang huynh phan vu vo dang bui do ho ngo duong ly trinh dinh
+    truong truong thi van my lan nga anh nam hung hùng son linh thanh huong mai tung minh
+    phuc thao tuan khanh thuy trang van hai dung quang bao viet duc ngoc ha tam hieu yen
+    loan diep hien bich thao thien nga quynh kien khoa khue kieu oanh phuong thuan toan
+    nghi nhan nhat kha chau lam loc phuoc quy sang tuyen vy
+'''.split())
+
+
+def _strip_person_role_prefix(value: str) -> str:
+    folded = _fold(normalize_space(str(value or '')))
+    for _ in range(3):
+        changed = folded
+        for prefix in _PERSON_ROLE_PREFIXES:
+            prefix_folded = _fold(prefix)
+            if folded == prefix_folded or folded.startswith(prefix_folded + ' '):
+                changed = folded[len(prefix_folded):].strip()
+                break
+        if changed == folded:
+            break
+        folded = changed
+    return folded
+
+
+def _person_identity_key(value: str) -> str:
+    """Normalize a person surface, tolerating role prefixes and middle initials only."""
+    folded = _strip_person_role_prefix(value)
+    tokens = folded.split()
+    # Donald J. Trump and Donald Trump are the same full-name form. Do not collapse
+    # Vietnamese middle names (e.g. Trương Mỹ Lan), which are full name components.
+    if len(tokens) >= 3 and all(len(token) == 1 for token in tokens[1:-1]):
+        return f'{tokens[0]} {tokens[-1]}'
+    return folded
+
+
+def is_safe_person_alias(canonical_name: str, alias: str) -> bool:
+    """Whether an alias is strong enough to identify this exact person.
+
+    Role-prefixed and middle-initial variants of the full name are safe. Short final-name
+    aliases remain available for non-Vietnamese-style names (e.g. Ronaldo, Trump), but are
+    blocked for Vietnamese names, including unaccented forms, because given-name tokens
+    often occur in unrelated names/places. Multi-word aliases must match the full identity.
+    """
+    canonical_key = _person_identity_key(canonical_name)
+    alias_key = _person_identity_key(alias)
+    if not canonical_key or not alias_key:
+        return False
+    if alias_key == canonical_key:
+        return True
+    safe_short = _SAFE_SHORT_PERSON_ALIASES.get(canonical_key, set())
+    if alias_key in safe_short:
+        return True
+    alias_tokens = alias_key.split()
+    canonical_tokens = canonical_key.split()
+    if len(alias_tokens) != 1 or len(canonical_tokens) < 2:
+        return False
+    raw_canonical = str(canonical_name or '')
+    # Any diacritic is treated conservatively, and unaccented Vietnamese surnames/given
+    # names are caught by the token list above.
+    has_diacritics = unicodedata.normalize('NFKD', raw_canonical) != raw_canonical
+    vietnamese_style = has_diacritics or bool(set(canonical_tokens) & _VIETNAMESE_NAME_TOKENS)
+    if vietnamese_style:
+        return False
+    # Preserve traditional last-name aliases for non-Vietnamese names, but never let a
+    # first/middle token become the identity key by accident.
+    return alias_tokens[0] == canonical_tokens[-1]
+
+
+def _contains_folded_phrase(source_folded: str, phrase: str) -> bool:
+    """Match a full token-bounded phrase after accent/punctuation normalization."""
+    phrase_folded = _fold(phrase)
+    if not source_folded or not phrase_folded:
+        return False
+    return re.search(r'(?<![a-z0-9])' + re.escape(phrase_folded) + r'(?![a-z0-9])', source_folded) is not None
+
+
 def is_administrative_location(name: str) -> bool:
     """Return True for countries/provinces/cities, not specifically named landmarks."""
     normalized = norm_name(normalize_space(name))
@@ -187,6 +282,14 @@ def should_track_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
     if folded in _GENERIC_FOLDED or folded in _NON_ENTITY_FOLDED or folded in _REGION_FOLDED:
         return False
     typ = str(entity_type or 'UNKNOWN').upper().strip()
+    # A whole administrative country/place name must not become a PERSON merely because
+    # an English spaCy/GenAI classifier assigned the wrong type (e.g. 'Ba Lan').
+    if typ == 'PERSON' and is_administrative_location(name):
+        return False
+    if typ == 'PERSON' and len(folded.split()) == 1 and folded in _VIETNAMESE_NAME_TOKENS:
+        # A single common Vietnamese given/family-name token (e.g. Lan, Nam, Hùng) is
+        # too ambiguous to stand alone as a followable person entity.
+        return False
     if typ not in {'PERSON', 'PRODUCT'} and is_administrative_location(name):
         return False
     try:
@@ -209,12 +312,12 @@ def should_track_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
 
 
 def is_grounded_entity(name: str, aliases, article_text: str, entity_type: str = 'UNKNOWN') -> bool:
-    """Require evidence in this article and a proper-name-like surface form.
+    """Require exact, token-bounded source evidence; PERSON aliases are conservative.
 
-    Typed objects such as ``Đường Võ Nguyên Giáp`` are accepted when their full normalized
-    name appears in the text. Untyped model candidates must be source-grounded; multi-word
-    names need multiple capitalized tokens (or a strong acronym/number) to avoid promoting
-    fragments such as ``anh về`` or ``người Dao`` into entities.
+    For people, the canonical full name (or a vetted full-name variant) must occur in
+    this article's title/summary. A one-word alias is accepted only when explicitly
+    allowlisted (currently Donald Trump -> Trump). Other entity types retain the existing
+    proper-name checks after exact phrase matching.
     """
     name = normalize_space(str(name or ''))[:180]
     typ = str(entity_type or 'UNKNOWN').upper().strip()
@@ -223,33 +326,43 @@ def is_grounded_entity(name: str, aliases, article_text: str, entity_type: str =
     source = normalize_space(str(article_text or '')[:20000])
     if not source:
         return False
-    source_norm = norm_name(source)
+    source_folded = _fold(source)
     try:
         from .entity_names import named_head_and_tail
         structured = named_head_and_tail(name)
     except Exception:
         structured = None
+
     candidates = [name]
     if isinstance(aliases, (list, tuple, set)):
-        candidates.extend(str(x)[:180] for x in aliases if str(x).strip())
+        for value in aliases:
+            candidate_alias = normalize_space(str(value or ''))[:180]
+            if not candidate_alias:
+                continue
+            if typ == 'PERSON' and not is_safe_person_alias(name, candidate_alias):
+                continue
+            candidates.append(candidate_alias)
+
     seen = set()
     for candidate in candidates:
         candidate = normalize_space(candidate)
-        cn = norm_name(candidate)
-        if not cn or cn in seen or cn not in source_norm:
+        cn = _fold(candidate)
+        if not cn or cn in seen or not _contains_folded_phrase(source_folded, candidate):
             continue
-        # Critical precision guard: a one-word country/place name is not enough
-        # evidence for a multi-word person. For example, the alias "Nga" from
-        # "Quỳnh Nga" must not link Russia-related news to that person. The full
-        # name (or a non-colliding explicit alias) can still ground the person.
-        if typ == 'PERSON' and len(cn.split()) == 1 and is_administrative_location(candidate):
-            continue
+        if typ == 'PERSON':
+            # Defense in depth: even when callers pass stale aliases, their names must be
+            # identity-compatible with the canonical PERSON and appear as a full phrase.
+            if candidate != name and not is_safe_person_alias(name, candidate):
+                continue
+            return True
         seen.add(cn)
         if structured:
             return True
-        match = re.search(re.escape(candidate), source, flags=re.IGNORECASE | re.UNICODE)
+        match = re.search(r'(?<!\w)' + re.escape(candidate) + r'(?!\w)', source, flags=re.IGNORECASE | re.UNICODE)
         if not match:
-            continue
+            # The normalized phrase was present (e.g. accents differ); non-person type
+            # grounding can still rely on explicit phrase evidence without case heuristics.
+            return True if typ in {'ORG', 'LOCATION', 'PRODUCT', 'EVENT', 'GROUP'} else False
         if typ == 'PRODUCT' and is_administrative_location(candidate):
             local = source[max(0, match.start() - 100):min(len(source), match.end() + 100)].casefold()
             product_context = ('hyundai', 'toyota', 'ford', 'kia', 'mazda', 'vinfast', 'mẫu xe', 'hãng xe', 'xe mới', 'ô tô', 'xe điện', 'suv', 'sedan', 'dòng xe')
@@ -267,8 +380,9 @@ def is_grounded_entity(name: str, aliases, article_text: str, entity_type: str =
                 return True
             continue
         token = tokens[0]
-        if token[:1].isupper() and len(token) >= 3 and typ in {'PERSON', 'ORG', 'PRODUCT', 'EVENT', 'GROUP', 'UNKNOWN'}:
+        if token[:1].isupper() and len(token) >= 3 and typ in {'ORG', 'PRODUCT', 'EVENT', 'GROUP', 'UNKNOWN'}:
             return True
         if token[:1].isupper() and len(token) >= 3 and typ == 'LOCATION' and match.start() > 0:
             return True
     return False
+

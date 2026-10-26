@@ -878,13 +878,18 @@ def run_reconciliation() -> dict:
     ensure_schema()
     stats = {'status': 'running', 'window_hours': WINDOW_HOURS, 'topics_seen': 0, 'entities_seen': 0,
              'topic_pairs_checked': 0, 'entity_pairs_checked': 0, 'topic_merges': 0, 'entity_merges': 0,
-             'media_source_entities_removed': 0, 'llm_calls': 0, 'message': ''}
+             'media_source_entities_removed': 0, 'unsafe_person_aliases_removed': 0, 'llm_calls': 0, 'message': ''}
     if not settings.openai_api_key:
         raise RuntimeError('OPENAI_API_KEY is not configured for catalog reconciliation')
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO catalog_reconciliation_runs(status,window_hours) VALUES('running',%s) RETURNING run_id", (WINDOW_HOURS,))
         run_id = int(cur.fetchone()['run_id'])
     try:
+        # Remove stale short aliases before building entity-quality prompts so tokens such
+        # as 'Lan' cannot influence identity reconciliation for unrelated Vietnamese people.
+        from .genai_events import prune_unsafe_person_aliases
+        with get_conn() as conn:
+            stats['unsafe_person_aliases_removed'] = prune_unsafe_person_aliases(conn)
         stats['media_source_entities_removed'] = _remove_discovered_media_sources()
         stats['entity_merges'] += _merge_bigbang_case_duplicates()
         topics = load_recent_topics()
@@ -903,7 +908,7 @@ def run_reconciliation() -> dict:
         _process_kind('entity', entities, stats)
         stats['status'] = 'success'
         stats['message'] = ('Catalog reconciliation finished; discovered entity quality decisions are GenAI-validated and cached. '
-                            f"Removed {stats['media_source_entities_removed']} discovered publisher/source labels; "
+                            f"Removed {stats['media_source_entities_removed']} discovered publisher/source labels and {stats['unsafe_person_aliases_removed']} unsafe PERSON aliases; "
                             'case-only Bigbang/BIGBANG duplicates were merged deterministically.')
         return stats
     except Exception as exc:

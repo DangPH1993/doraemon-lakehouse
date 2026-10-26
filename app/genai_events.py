@@ -17,7 +17,7 @@ import requests
 from .config import settings
 from .db import get_conn
 from .processing import hash_text, norm_name, normalize_space, slugify
-from .entity_rules import should_track_entity, is_grounded_entity, is_numeric_or_date_entity
+from .entity_rules import should_track_entity, is_grounded_entity, is_numeric_or_date_entity, is_safe_person_alias
 from .named_infrastructure import (
     augment_entities_with_named_infrastructure, extract_named_infrastructure_entities,
 )
@@ -584,6 +584,35 @@ def _apply_classification(article: dict, result: dict, category_ids: set[int], e
     return True
 
 
+def prune_unsafe_person_aliases(conn, batch_size: int = 5000) -> int:
+    """Remove stale aliases that could attach a Vietnamese person to unrelated stories.
+
+    Alias rows are legacy data from older versions. Keyset batching ensures the whole
+    PERSON alias catalog is checked even if it eventually grows beyond 50,000 rows.
+    """
+    removed = 0
+    last_alias_id = 0
+    batch_size = max(100, min(int(batch_size or 5000), 10000))
+    while True:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT a.alias_id,a.alias,e.canonical_name
+                           FROM entity_aliases a JOIN entities e ON e.entity_id=a.entity_id
+                           WHERE upper(e.entity_type)='PERSON' AND a.alias_id>%s
+                           ORDER BY a.alias_id
+                           LIMIT %s""", (last_alias_id, batch_size))
+            rows = cur.fetchall()
+        if not rows:
+            break
+        last_alias_id = int(rows[-1]['alias_id'])
+        unsafe_ids = [int(row['alias_id']) for row in rows
+                      if not is_safe_person_alias(str(row.get('canonical_name') or ''), str(row.get('alias') or ''))]
+        if unsafe_ids:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM entity_aliases WHERE alias_id=ANY(%s::bigint[])", (unsafe_ids,))
+                removed += max(0, cur.rowcount)
+    return removed
+
+
 def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
     """Efficient one-time quality repair and named-object backfill for recent articles.
 
@@ -592,10 +621,12 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
     components are refreshed lazily when a user opens the timeline, not once per repaired row.
     """
     stats = {'scanned': 0, 'articles_changed': 0, 'entities_added': 0,
-             'invalid_entity_links_removed': 0, 'entities_archived': 0, 'failed': 0}
+             'invalid_entity_links_removed': 0, 'entities_archived': 0,
+             'unsafe_person_aliases_removed': 0, 'failed': 0}
     limit = max(1, min(int(limit or 100), 300))
     orphan_entity_ids: set[int] = set()
     with get_conn() as conn:
+        stats['unsafe_person_aliases_removed'] = prune_unsafe_person_aliases(conn)
         with conn.cursor() as cur:
             cur.execute("""SELECT article_id,title,coalesce(summary,'') AS summary,
                                       left(coalesce(content_text,''),4000) AS content_text,
@@ -607,7 +638,7 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                             OR coalesce(ai_classification->>'field_category_rules_v075_enriched','false') <> 'true'
                                             OR coalesce(ai_classification->>'named_proper_nouns_v076_enriched','false') <> 'true'
                                             OR coalesce(ai_classification->>'named_proper_nouns_v0716_enriched','false') <> 'true'
-                                            OR coalesce(ai_classification->>'entity_grounding_guard_v0731_enriched','false') <> 'true'))
+                                            OR coalesce(ai_classification->>'entity_grounding_guard_v0732_name_precision','false') <> 'true'))
                                       OR field_category IS NULL)
                                ORDER BY coalesce(published_at,collected_at) DESC
                                LIMIT %s""", (limit,))
@@ -769,7 +800,7 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                         classification['named_proper_nouns_v0716_enriched'] = True
                         classification['entity_quality_rules_v075_enriched'] = True
                         classification['entity_quality_rules_v075_enriched_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-                        classification['entity_grounding_guard_v0731_enriched'] = True
+                        classification['entity_grounding_guard_v0732_name_precision'] = True
                         cur.execute("""UPDATE news_articles SET ai_classification=%s::jsonb,field_category=%s,updated_at=now()
                                        WHERE article_id=%s""", (json.dumps(classification, ensure_ascii=False), existing_field, article_id))
                 if changed:
@@ -787,6 +818,7 @@ def enrich_named_infrastructure_entities(limit: int = 100) -> dict[str, int]:
                                                             'field_category',%s,
                                                             'field_category_rules_v075_enriched',true,
                                                             'named_proper_nouns_v076_enriched',true,
+                                                            'entity_grounding_guard_v0732_name_precision',true,
                                                             'entity_quality_rules_v075_error','row processing failed'),
                                        field_category=coalesce(field_category,%s),updated_at=now() WHERE article_id=%s""", (fallback_field, fallback_field, article_id))
                 except Exception:
