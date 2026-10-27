@@ -7,7 +7,7 @@
   const listPageSize = 25;
   let paymentProofBlobUrl = null;
   let paymentBadgeTimer = null;
-  const pageNames = {overview:'Tổng quan',sources:'Nguồn dữ liệu',articles:'Bài báo & làm sạch',topics:'Quản lý Topic',timeline:'Topic Timeline',entities:'Quản lý Entity',facts:'Bảng FACT',pipeline:'Pipeline & chất lượng',users:'Người dùng & gói'};
+  const pageNames = {overview:'Tổng quan',sources:'Nguồn dữ liệu',articles:'Bài báo & làm sạch',topics:'Quản lý Topic',timeline:'Topic Timeline',entities:'Quản lý Entity',facts:'Bảng FACT',pipeline:'Pipeline & chất lượng',users:'Người dùng & gói',analytics:'Google Analytics'};
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const fmtDate = (v) => { if (!v) return '—'; try { return new Date(v).toLocaleString('vi-VN',{dateStyle:'short',timeStyle:'short'}); } catch { return esc(v); } };
   const fmtNumber = (v) => Number(v || 0).toLocaleString('vi-VN');
@@ -33,7 +33,7 @@
   async function login(username,password){ const r=await api('/api/auth/login',{method:'POST',body:JSON.stringify({username,password}),headers:{}});token=r.token;sessionStorage.setItem('dlh_token',token);showApp();await boot(); }
   async function checkReady(){try{await fetch('/api/health/ready').then(r=>{if(!r.ok) throw new Error();return r.json()});$('#dbStatus').textContent='Database kết nối được';$('#heroSystemState').textContent='Database sẵn sàng';$('.status-dot').style.background='#20a878';}catch{$('#dbStatus').textContent='Chưa kết nối DB';$('#heroSystemState').textContent='Cần kiểm tra cấu hình';$('.status-dot').style.background='#d14343';}}
   async function boot(){await checkReady();try{await api('/api/auth/me');await Promise.all([loadPage(currentPage),loadPaymentSummary()]);$('#lastRefreshed').textContent='Vừa cập nhật';if(paymentBadgeTimer)clearInterval(paymentBadgeTimer);paymentBadgeTimer=setInterval(()=>loadPaymentSummary(),60000);}catch(e){notice(`Chưa tải được dữ liệu: ${e.message}. Hãy kiểm tra DATABASE_URL và đã khởi tạo schema trong Neon chưa.`,'error');}}
-  async function loadPage(name){clearNotice();if(name==='overview')return loadDashboard();if(name==='sources')return Promise.all([loadSources(),populateSourceFilter()]);if(name==='articles')return Promise.all([loadArticles(),loadRules(),loadRawItems(),populateSourceFilter()]);if(name==='topics')return loadTopics();if(name==='timeline')return loadTopicTimelineOptions();if(name==='entities')return loadEntities();if(name==='facts')return Promise.all([loadFacts(),loadModels()]);if(name==='pipeline')return Promise.all([loadRuns(),loadIssues()]);if(name==='users')return loadUsersPage();}
+  async function loadPage(name){clearNotice();if(name==='overview')return loadDashboard();if(name==='sources')return Promise.all([loadSources(),populateSourceFilter()]);if(name==='articles')return Promise.all([loadArticles(),loadRules(),loadRawItems(),populateSourceFilter()]);if(name==='topics')return loadTopics();if(name==='timeline')return loadTopicTimelineOptions();if(name==='entities')return loadEntities();if(name==='facts')return Promise.all([loadFacts(),loadModels()]);if(name==='pipeline')return Promise.all([loadRuns(),loadIssues()]);if(name==='users')return loadUsersPage();if(name==='analytics')return loadGoogleAnalyticsConfig();}
   function renderEmpty(message='Chưa có dữ liệu.'){return `<div class="empty">${esc(message)}</div>`;}
   function renderPagination(kind, meta={}){
     const p=Number(meta.page||1), totalPages=Number(meta.total_pages||1), total=Number(meta.total||0);
@@ -106,6 +106,31 @@
     $('#usersTable').innerHTML='<div class="loading-card">Đang tải danh sách tài khoản…</div>';
     await Promise.all([loadPendingPayments(),loadUsers(),loadPaymentSummary(),loadPlanConfig()]);
   }
+  async function loadGoogleAnalyticsConfig(){
+    const status=$('#googleAnalyticsConfigStatus');
+    try{
+      const data=await api('/api/admin/analytics-config');
+      $('#googleAnalyticsMeasurementId').value=data.measurement_id||'';
+      status.textContent=data.enabled?'Đang bật theo dõi GA4.':'Chưa bật Google Analytics.';
+      status.classList.toggle('success',Boolean(data.enabled));
+    }catch(err){status.textContent=err.message||'Không tải được cấu hình Google Analytics.';status.classList.remove('success');}
+  }
+  $('#googleAnalyticsConfigForm').addEventListener('submit',async e=>{
+    e.preventDefault();
+    const input=$('#googleAnalyticsMeasurementId');
+    const measurementId=input.value.trim().toUpperCase();
+    if(measurementId&&!/^G-[A-Z0-9]{4,20}$/.test(measurementId)){input.setCustomValidity('Nhập Measurement ID đúng định dạng G-XXXXXXXXXX, hoặc để trống để tắt.');input.reportValidity();return;}
+    input.setCustomValidity('');
+    const button=$('#saveGoogleAnalyticsBtn'),status=$('#googleAnalyticsConfigStatus');
+    button.disabled=true;status.textContent='Đang lưu cấu hình…';status.classList.remove('success');
+    try{
+      const data=await api('/api/admin/analytics-config',{method:'PUT',body:JSON.stringify({measurement_id:measurementId})});
+      status.textContent=data.message||'Đã lưu cấu hình Google Analytics.';status.classList.toggle('success',true);toast(status.textContent,'success');
+    }catch(err){status.textContent=err.message||'Không lưu được cấu hình.';toast(status.textContent,'error');}
+    finally{button.disabled=false;}
+  });
+  $('#googleAnalyticsMeasurementId').addEventListener('input',e=>e.target.setCustomValidity(''));
+
   async function loadPlanConfig(){
     try {
       const data=await api('/api/admin/plan-config');

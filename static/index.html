@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Doraemon Mini Lakehouse · Admin</title>
-  <link rel="stylesheet" href="/static/style.css?v=0.7.26">
+  <link rel="stylesheet" href="/static/style.css?v=0.7.45">
 </head>
 <body>
 <div id="loginView" class="login-shell hidden">
@@ -32,6 +32,7 @@
       <button class="nav-item" data-page="facts"><span>▦</span>Bảng FACT</button>
       <button class="nav-item" data-page="pipeline"><span>⟳</span>Pipeline & chất lượng</button>
       <button class="nav-item" data-page="users"><span>♙</span>Người dùng & gói <span id="pendingPaymentBadge" class="nav-count-badge" hidden>0</span></button>
+      <button class="nav-item" data-page="analytics"><span>◉</span>Google Analytics</button>
     </nav>
     <div class="sidebar-bottom"><div class="status-dot"></div><div><strong>Data workspace</strong><span id="dbStatus">Chưa kiểm tra kết nối</span></div><button id="logoutBtn" class="icon-btn" title="Đăng xuất">↪</button></div>
   </aside>
@@ -65,7 +66,20 @@
       <div class="panel"><div class="panel-head"><div><h3>🔔 Thanh toán đang chờ duyệt <span id="pendingPaymentCount" class="status warning">0</span></h3><p class="muted">Xem ảnh bằng chứng trước khi xác nhận thanh toán. Duyệt sẽ kích hoạt gói Pro.</p></div></div><div id="pendingPaymentsTable" class="table-wrap"></div></div>
       <div class="panel"><div class="panel-head"><div><h3>Danh sách tài khoản</h3><p class="muted">User có yêu cầu thanh toán chờ duyệt được sắp xếp lên đầu.</p></div></div><form id="userSearchForm" class="filter-row"><input id="userSearch" placeholder="Tìm username hoặc email..."><button class="btn secondary" type="submit">Tìm</button></form><div id="usersTable" class="table-wrap"></div></div>
     </section>
-    <footer class="footer">Doraemon Mini Lakehouse <span>·</span> News Radar 0.7.26 <span>·</span> Data stays in your configured PostgreSQL</footer>
+    <section id="page-analytics" class="page">
+      <div class="section-intro"><div><h2>Google Analytics</h2><p class="muted">Cấu hình Google Analytics 4 để theo dõi lượt truy cập trang tin tức công khai.</p></div></div>
+      <div class="panel form-panel">
+        <h3>Cấu hình Google Analytics 4 (GA4)</h3>
+        <p class="muted">Nhập Measurement ID của luồng dữ liệu web trong Google Analytics. Sau khi lưu, trang Tìm Tin Tức sẽ tự tải mã đo lường và ghi nhận lượt truy cập. Để tắt theo dõi, xóa Measurement ID rồi lưu.</p>
+        <form id="googleAnalyticsConfigForm" class="form-grid">
+          <label class="span-2">Measurement ID<input id="googleAnalyticsMeasurementId" name="measurement_id" maxlength="32" placeholder="G-XXXXXXXXXX" autocomplete="off" spellcheck="false" inputmode="text" pattern="G-[A-Za-z0-9]{4,20}"></label>
+          <p class="muted small-text span-2">Tìm tại Google Analytics → Quản trị (Admin) → Luồng dữ liệu (Data streams) → chọn luồng Web → Measurement ID. Đây là ID công khai bắt đầu bằng <code>G-</code>; không nhập mật khẩu hay API secret.</p>
+          <div class="form-actions"><button class="btn primary" id="saveGoogleAnalyticsBtn" type="submit">Lưu cấu hình Google Analytics</button><span id="googleAnalyticsConfigStatus" class="muted small-text" role="status" aria-live="polite"></span></div>
+        </form>
+      </div>
+      <div class="panel"><div class="panel-head"><div><h3>Phạm vi theo dõi</h3><p class="muted">Đo lường lượt xem trên trang tin tức công khai và trang danh sách theo dõi. Khu vực quản trị không được gắn mã theo dõi này. Dữ liệu sẽ xuất hiện trong báo cáo GA4 sau khi Google nhận sự kiện; có thể mất một khoảng thời gian để hiển thị trong báo cáo chuẩn.</p></div></div></div>
+    </section>
+    <footer class="footer">Doraemon Mini Lakehouse <span>·</span> News Radar 0.7.45 <span>·</span> Data stays in your configured PostgreSQL</footer>
   </main>
 </div>
 <div id="busyOverlay" class="busy-overlay hidden"><div class="spinner"></div><span id="busyText">Đang xử lý...</span></div>
@@ -84,6 +98,6 @@
 <dialog id="paymentProofDialog" class="payment-proof-dialog">
   <div class="proof-dialog-inner"><div class="dialog-header"><div><p class="eyebrow">PAYMENT REVIEW</p><h2 id="paymentProofTitle">Bằng chứng thanh toán</h2><p class="muted small-text">Ảnh bằng chứng được lưu trong Cloudflare R2 riêng tư và chỉ Admin đã đăng nhập mới có quyền xem.</p></div><button type="button" id="closePaymentProofDialog" class="icon-btn" aria-label="Đóng">×</button></div><div id="paymentProofError" class="error-text"></div><img id="paymentProofImage" alt="Bằng chứng thanh toán" /></div>
 </dialog>
-<script src="/static/app.js?v=0.7.37"></script>
+<script src="/static/app.js?v=0.7.45"></script>
 </body>
 </html>
