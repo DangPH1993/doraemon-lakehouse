@@ -27,7 +27,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.44',description='Entity aliases are filtered by grounded identity; entity timelines reject weak one-token matches. RSS ingestion deduplicates headlines and health endpoint accepts GET and HEAD.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.45',description='Configurable Google Analytics 4 tracking for public News Radar pages; grounded entity resolution, RSS deduplication and health endpoint supports GET and HEAD.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -88,6 +88,18 @@ class SaveTimelinesBody(BaseModel):
 
 class TelegramSettingsBody(BaseModel):
     enabled: bool
+
+class GoogleAnalyticsConfigBody(BaseModel):
+    measurement_id: str = Field(default='', max_length=32)
+    @field_validator('measurement_id')
+    @classmethod
+    def valid_measurement_id(cls, value):
+        value = value.strip().upper()
+        if not value:
+            return ''
+        if not re.fullmatch(r'G-[A-Z0-9]{4,20}', value):
+            raise ValueError('Measurement ID phải có dạng G-XXXXXXXXXX. Để tắt theo dõi, hãy để trống.')
+        return value
 class SourceBody(BaseModel):
     name: str = Field(min_length=2,max_length=180)
     feed_url: str = Field(min_length=8,max_length=2000)
@@ -161,6 +173,52 @@ def login(body: LoginBody):
     return {'token':issue_token(body.username),'username':body.username,'expires_in':28800}
 @app.get('/api/auth/me',dependencies=[Depends(require_admin)])
 def me(): return {'username':settings.admin_username,'role':'admin'}
+
+
+@app.get('/api/admin/analytics-config', dependencies=[Depends(require_admin)])
+def get_admin_analytics_config():
+    try:
+        row = fetch_one("SELECT setting_value, updated_at FROM app_site_settings WHERE setting_key='google_analytics_measurement_id'")
+    except Exception as exc:
+        log.exception('Could not read Google Analytics configuration')
+        raise HTTPException(status_code=503, detail='Chưa có bảng cấu hình Google Analytics. Hãy chạy migration 022 trong Neon SQL Editor.') from exc
+    return {
+        'measurement_id': (row or {}).get('setting_value') or '',
+        'enabled': bool((row or {}).get('setting_value')),
+        'updated_at': (row or {}).get('updated_at'),
+    }
+
+
+@app.put('/api/admin/analytics-config', dependencies=[Depends(require_admin)])
+def update_admin_analytics_config(body: GoogleAnalyticsConfigBody):
+    try:
+        row = fetch_one("INSERT INTO app_site_settings (setting_key, setting_value) VALUES ('google_analytics_measurement_id', %s) ON CONFLICT (setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value, updated_at=now() RETURNING setting_value, updated_at", (body.measurement_id,))
+    except Exception as exc:
+        log.exception('Could not save Google Analytics configuration')
+        raise HTTPException(status_code=503, detail='Không lưu được cấu hình Google Analytics. Hãy chạy migration 022 trong Neon SQL Editor.') from exc
+    return {
+        'ok': True,
+        'measurement_id': (row or {}).get('setting_value') or '',
+        'enabled': bool((row or {}).get('setting_value')),
+        'updated_at': (row or {}).get('updated_at'),
+        'message': 'Đã lưu cấu hình Google Analytics.' if body.measurement_id else 'Đã tắt Google Analytics.',
+    }
+
+
+@app.get('/api/public/analytics-config')
+def get_public_analytics_config(response: Response):
+    # Measurement ID is public by design. No Google API secret is stored or exposed here.
+    response.headers['Cache-Control'] = 'public, max-age=60'
+    try:
+        row = fetch_one("SELECT setting_value FROM app_site_settings WHERE setting_key='google_analytics_measurement_id'")
+    except Exception:
+        # Keep the public news page available if the optional analytics migration has not run.
+        log.warning('Google Analytics config unavailable; tracking remains disabled until migration 022 is applied.')
+        return {'measurement_id': ''}
+    measurement_id = (row or {}).get('setting_value') or ''
+    if not re.fullmatch(r'G-[A-Z0-9]{4,20}', measurement_id):
+        measurement_id = ''
+    return {'measurement_id': measurement_id}
 
 
 # End-user auth is separate from the existing administrator login.
