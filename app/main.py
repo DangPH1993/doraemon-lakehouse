@@ -27,7 +27,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.46',description='Configurable Google Analytics 4 tracking; article entity labels are grounded in each article title/summary; RSS deduplication and GET/HEAD health endpoint.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.47',description='Public root redirects to /news; admin UI is served at /admin. Configurable GA4 tracking and grounded article entity labels.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -144,8 +144,16 @@ def pagination_meta(page: int, page_size: int, total: int) -> dict:
             'total_pages': total_pages, 'start': start, 'end': end}
 
 
-@app.get('/')
-def index(): return FileResponse('static/index.html')
+@app.get('/', include_in_schema=False)
+def index():
+    # The domain root is the public news portal, not the admin console.
+    return RedirectResponse(url='/news', status_code=302, headers={'Cache-Control': 'no-store'})
+
+@app.get('/admin', include_in_schema=False)
+def admin_page():
+    # Keep the admin console available at a dedicated path.
+    return FileResponse('static/index.html', headers={'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'})
+
 @app.get('/news')
 def public_news_page():
     # Always deliver the newest HTML so outdated filter markup is not retained by browsers/CDNs.
