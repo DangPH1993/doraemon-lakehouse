@@ -42,6 +42,8 @@ class Settings:
     payment_instructions: str = os.getenv('PAYMENT_INSTRUCTIONS', 'Quét mã QR, hoàn tất thanh toán và tải ảnh chụp giao dịch để admin xác nhận.').strip()
     pro_plan_price_label: str = os.getenv('PRO_PLAN_PRICE_LABEL', '').strip()
     public_app_url: str = os.getenv('PUBLIC_APP_URL', '').strip().rstrip('/')
+    # Brevo transactional email API uses HTTPS (port 443), suitable for Render Free.
+    brevo_api_key: str = os.getenv('BREVO_API_KEY', '').strip()
     smtp_host: str = os.getenv('SMTP_HOST', '').strip()
     smtp_port: int = int(os.getenv('SMTP_PORT', '587'))
     smtp_username: str = os.getenv('SMTP_USERNAME', '').strip()

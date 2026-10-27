@@ -27,7 +27,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.47',description='Public root redirects to /news; admin UI is served at /admin. Configurable GA4 tracking and grounded article entity labels.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.48',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -548,8 +548,10 @@ async def submit_payment_request(
 
 @app.post('/api/user-auth/forgot-password')
 def forgot_password(body: ForgotPasswordBody, request: Request):
-    if not (settings.smtp_host and settings.smtp_from_email):
-        raise HTTPException(status_code=503, detail='Chức năng quên mật khẩu chưa được cấu hình SMTP. Quản trị viên cần cấu hình SMTP_HOST và SMTP_FROM_EMAIL.')
+    # Prefer the Brevo HTTPS API. Render Free blocks outbound SMTP ports 25/465/587,
+    # so SMTP fallback is only useful on hosts/instances that permit outbound SMTP.
+    if not (settings.smtp_from_email and (settings.brevo_api_key or settings.smtp_host)):
+        raise HTTPException(status_code=503, detail='Chức năng gửi email chưa được cấu hình. Hãy cấu hình BREVO_API_KEY và SMTP_FROM_EMAIL trên Render.')
     email = body.email.strip().lower()
     user = fetch_one("SELECT user_id, username, email FROM app_users WHERE email_normalized=%s AND is_active=true", (email,))
     # Return the same result whether an account exists or not, avoiding account enumeration.
@@ -565,22 +567,50 @@ def forgot_password(body: ForgotPasswordBody, request: Request):
                          VALUES (%s,%s,now()+interval '30 minutes') RETURNING token_hash""", (token_hash, user['user_id']))
             base = settings.public_app_url or str(request.base_url).rstrip('/')
             reset_url = f"{base}/news#reset_token={raw_token}"
-            message = EmailMessage()
-            message['Subject'] = 'Đặt lại mật khẩu News Radar'
-            message['From'] = settings.smtp_from_email
-            message['To'] = user['email']
-            message.set_content(f"Xin chào {user['username']},\n\nBạn đã yêu cầu đặt lại mật khẩu News Radar. Mở liên kết sau trong vòng 30 phút:\n{reset_url}\n\nNếu bạn không yêu cầu, hãy bỏ qua email này.")
-            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
-                if settings.smtp_starttls:
-                    smtp.starttls(context=ssl.create_default_context())
-                if settings.smtp_username:
-                    smtp.login(settings.smtp_username, settings.smtp_password)
-                smtp.send_message(message)
+            text_body = f"Xin chào {user['username']},\n\nBạn đã yêu cầu đặt lại mật khẩu News Radar. Mở liên kết sau trong vòng 30 phút:\n{reset_url}\n\nNếu bạn không yêu cầu, hãy bỏ qua email này."
+            if settings.brevo_api_key:
+                # HTTPS API avoids Render Free's outbound SMTP port restrictions.
+                response = requests.post(
+                    'https://api.brevo.com/v3/smtp/email',
+                    headers={
+                        'accept': 'application/json',
+                        'api-key': settings.brevo_api_key,
+                        'content-type': 'application/json',
+                    },
+                    json={
+                        'sender': {'name': 'News Radar', 'email': settings.smtp_from_email},
+                        'to': [{'email': user['email'], 'name': user['username']}],
+                        'subject': 'Đặt lại mật khẩu News Radar',
+                        'textContent': text_body,
+                    },
+                    timeout=20,
+                )
+                if not response.ok:
+                    # Include Brevo's safe response detail in server logs, never expose secrets to the user.
+                    raise RuntimeError(f'Brevo API returned HTTP {response.status_code}: {response.text[:500]}')
+                try:
+                    brevo_result = response.json()
+                except ValueError:
+                    brevo_result = {}
+                log.info('Password reset email accepted by Brevo API; message_id=%s', brevo_result.get('messageId', 'n/a'))
+            else:
+                # SMTP fallback for paid hosts where outbound SMTP is available.
+                message = EmailMessage()
+                message['Subject'] = 'Đặt lại mật khẩu News Radar'
+                message['From'] = settings.smtp_from_email
+                message['To'] = user['email']
+                message.set_content(text_body)
+                with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
+                    if settings.smtp_starttls:
+                        smtp.starttls(context=ssl.create_default_context())
+                    if settings.smtp_username:
+                        smtp.login(settings.smtp_username, settings.smtp_password)
+                    smtp.send_message(message)
         except Exception as exc:
             log.exception('Password reset email could not be sent')
             try: fetch_one("DELETE FROM user_password_reset_tokens WHERE token_hash=%s RETURNING token_hash", (token_hash,))
             except Exception: log.exception('Could not remove unused password reset token')
-            raise HTTPException(status_code=503, detail='Không gửi được email đặt lại mật khẩu. Kiểm tra cấu hình SMTP.') from exc
+            raise HTTPException(status_code=503, detail='Không gửi được email đặt lại mật khẩu. Kiểm tra BREVO_API_KEY, email Sender và cấu hình gửi email.') from exc
     return {'ok': True, 'message': 'Nếu email đã đăng ký trong hệ thống, hướng dẫn đặt lại mật khẩu sẽ được gửi đến hộp thư.'}
 
 
