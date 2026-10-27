@@ -834,10 +834,35 @@
       else if (pager.dataset.pager === 'timeline' && state.selectedTimeline) await loadTimeline(state.selectedTimeline.type, state.selectedTimeline.id, Math.max(1, state.timelinePage + dir));
     }
   });
-  $('#fieldCategoryFilter').addEventListener('change', async event => {
-    state.fieldCategory = String(event.target.value || '');
+  async function selectFieldCategory(category) {
+    state.fieldCategory = String(category || '');
+    $('#fieldCategoryFilter').querySelectorAll('[data-field-category]').forEach(tab => {
+      const active = tab.dataset.fieldCategory === state.fieldCategory;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+      if (active) $('#dailyArticles').setAttribute('aria-labelledby', tab.id);
+    });
     await loadArticles(1);
     if (state.searchQuery) await loadSearchResults(1);
+  }
+  $('#fieldCategoryFilter').addEventListener('click', async event => {
+    const tab = event.target.closest('[data-field-category]');
+    if (!tab) return;
+    await selectFieldCategory(tab.dataset.fieldCategory || '');
+  });
+  $('#fieldCategoryFilter').addEventListener('keydown', event => {
+    const tabs = Array.from($('#fieldCategoryFilter').querySelectorAll('[data-field-category]'));
+    const current = tabs.indexOf(event.target.closest('[data-field-category]'));
+    if (current < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    let next = current;
+    if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
+    else if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = tabs.length - 1;
+    tabs[next].focus();
+    tabs[next].click();
   });
   $('#articleDateFilterForm').addEventListener('submit', async event => {
     event.preventDefault();
