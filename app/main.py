@@ -15,7 +15,7 @@ from .config import settings
 from .db import get_conn, fetch_all, fetch_one
 from .security import (issue_token, require_admin, hash_password, verify_password, issue_user_token, require_user)
 from .processing import canonicalize_url, hash_text, norm_name, slugify, normalize_space
-from .entity_rules import should_track_entity, is_media_source_entity, is_grounded_entity
+from .entity_rules import should_track_entity, is_media_source_entity, is_grounded_entity, filter_grounded_entity_references
 from .entity_names import entity_normalized_key
 from .entity_resolution import (build_entity_lookup, entity_name_variants,
                                 resolve_entity_in_database, resolve_entity_in_lookup, strip_person_title)
@@ -27,7 +27,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.45',description='Configurable Google Analytics 4 tracking for public News Radar pages; grounded entity resolution, RSS deduplication and health endpoint supports GET and HEAD.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.46',description='Configurable Google Analytics 4 tracking; article entity labels are grounded in each article title/summary; RSS deduplication and GET/HEAD health endpoint.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -1135,23 +1135,9 @@ def public_daily_articles(
                       OR array_to_string(search_t.keywords, ' ') ILIKE %s
                   )
             )
-            OR EXISTS (
-                SELECT 1 FROM article_entities search_ae
-                JOIN entities search_e ON search_e.entity_id=search_ae.entity_id
-                WHERE search_ae.article_id=a.article_id
-                  AND search_e.status='active'
-                  AND (
-                      search_e.canonical_name ILIKE %s
-                      OR search_ae.mention_text ILIKE %s
-                      OR EXISTS (
-                          SELECT 1 FROM entity_aliases search_alias
-                          WHERE search_alias.entity_id=search_e.entity_id
-                            AND search_alias.alias ILIKE %s
-                      )
-                  )
-            )
+
         )""")
-        vals.extend([term] * 11)
+        vals.extend([term] * 8)
     if effective_date_from is not None and effective_date_to is not None:
         where.append("(coalesce(a.published_at,a.collected_at) at time zone %s)::date BETWEEN %s AND %s")
         vals.extend([settings.timezone, effective_date_from, effective_date_to])
@@ -1218,43 +1204,28 @@ def public_daily_articles(
                               coalesce((SELECT json_agg(json_build_object('id', t.topic_id, 'name', t.name) ORDER BY t.name)
                                         FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
                                         WHERE at.article_id=a.article_id AND t.status='active' AND t.topic_type='event'), '[]'::json) AS topic_refs,
-                              coalesce((SELECT json_agg(json_build_object('id', resolved.entity_id, 'name', resolved.canonical_name,
-                                                                      'type', resolved.entity_type) ORDER BY resolved.canonical_name)
-                                        FROM (
-                                          SELECT DISTINCT canonical.entity_id, canonical.canonical_name, canonical.entity_type
-                                          FROM article_entities ae
-                                          JOIN entities source_entity ON source_entity.entity_id=ae.entity_id AND source_entity.status='active'
-                                          LEFT JOIN LATERAL (
-                                            SELECT min(target.entity_id) AS target_id,
-                                                   min(target.canonical_name) AS target_name,
-                                                   count(DISTINCT target.entity_id)::int AS target_count
-                                            FROM entity_aliases alias_row
-                                            JOIN entities target ON target.entity_id=alias_row.entity_id
-                                            WHERE alias_row.normalized_alias=source_entity.normalized_name
-                                              AND target.status='active'
-                                              AND target.entity_type=source_entity.entity_type
-                                              AND target.entity_id<>source_entity.entity_id
-                                              AND target.normalized_name LIKE '%% %%'
-                                          ) alias_match ON true
-                                          JOIN entities canonical ON canonical.entity_id = CASE
-                                            WHEN source_entity.entity_type='PERSON'
-                                             AND source_entity.normalized_name='trump'
-                                             AND EXISTS (SELECT 1 FROM entities donald
-                                                          WHERE donald.status='active' AND donald.entity_type='PERSON'
-                                                            AND donald.normalized_name='donald trump')
-                                              THEN (SELECT donald.entity_id FROM entities donald
-                                                    WHERE donald.status='active' AND donald.entity_type='PERSON'
-                                                      AND donald.normalized_name='donald trump' LIMIT 1)
-                                            WHEN alias_match.target_count=1 THEN alias_match.target_id
-                                            ELSE source_entity.entity_id END
-                                          WHERE ae.article_id=a.article_id
-                                        ) resolved), '[]'::json) AS entity_refs
+                              coalesce((SELECT json_agg(json_build_object(
+                                                'id', e.entity_id, 'name', e.canonical_name, 'type', e.entity_type,
+                                                '_mention_text', ae.mention_text,
+                                                '_aliases', coalesce((SELECT json_agg(ea.alias ORDER BY ea.alias)
+                                                                     FROM entity_aliases ea WHERE ea.entity_id=e.entity_id), '[]'::json)
+                                              ) ORDER BY e.canonical_name)
+                                        FROM article_entities ae
+                                        JOIN entities e ON e.entity_id=ae.entity_id AND e.status='active'
+                                        WHERE ae.article_id=a.article_id), '[]'::json) AS entity_refs,
+                              coalesce(a.summary,'') AS _entity_grounding_summary
                        FROM news_articles a
                        JOIN data_sources s ON s.source_id=a.source_id
                        JOIN deduped_candidates dc ON dc.article_id=a.article_id
                        ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC
                        LIMIT %s OFFSET %s""",
                        vals + [page_size, (page - 1) * page_size])
+    # Stored article_entities rows can be stale after earlier reconciliation runs. Never
+    # expose an entity action/tag unless the entity is grounded in this article's title/summary.
+    for item in items:
+        item['entity_refs'] = filter_grounded_entity_references(
+            item.get('title') or '', item.pop('_entity_grounding_summary', ''), item.get('entity_refs') or []
+        )
     return {'date': today,
             'date_from': effective_date_from.isoformat() if effective_date_from else None,
             'date_to': effective_date_to.isoformat() if effective_date_to else None,
@@ -1396,9 +1367,15 @@ def _public_direct_timeline_items(relation_table: str, relation_key: str, record
                    coalesce(a.published_at,a.collected_at) AS timeline_at,
                    a.field_category,
                    s.name AS source_name,
-                   coalesce((SELECT string_agg(DISTINCT e.canonical_name, ', ' ORDER BY e.canonical_name)
+                   coalesce((SELECT json_agg(json_build_object(
+                                      'id', e.entity_id, 'name', e.canonical_name, 'type', e.entity_type,
+                                      '_mention_text', ae.mention_text,
+                                      '_aliases', coalesce((SELECT json_agg(ea.alias ORDER BY ea.alias)
+                                                           FROM entity_aliases ea WHERE ea.entity_id=e.entity_id), '[]'::json)
+                                    ) ORDER BY e.canonical_name)
                              FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
-                             WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities,
+                             WHERE ae.article_id=a.article_id AND e.status='active'), '[]'::json) AS _entity_refs_raw,
+                   coalesce(a.summary,'') AS _entity_grounding_summary,
                    coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
                              FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
                              WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
@@ -1410,6 +1387,11 @@ def _public_direct_timeline_items(relation_table: str, relation_key: str, record
             LIMIT %s OFFSET %s""",
         (record_id, page_size, (actual_page - 1) * page_size),
     )
+    for item in items:
+        refs = filter_grounded_entity_references(
+            item.get('title') or '', item.pop('_entity_grounding_summary', ''), item.pop('_entity_refs_raw', []) or []
+        )
+        item['entities'] = ', '.join(ref.get('name') or '' for ref in refs if ref.get('name'))
     return items, pagination_meta(actual_page, page_size, total), total
 
 
@@ -1468,9 +1450,14 @@ def _public_grounded_entity_timeline_items(entity: dict, page: int, page_size: i
                   a.published_at, a.collected_at,
                   coalesce(a.published_at,a.collected_at) AS timeline_at,
                   a.field_category, s.name AS source_name,
-                  coalesce((SELECT string_agg(DISTINCT e.canonical_name, ', ' ORDER BY e.canonical_name)
+                  coalesce((SELECT json_agg(json_build_object(
+                                     'id', e.entity_id, 'name', e.canonical_name, 'type', e.entity_type,
+                                     '_mention_text', ae.mention_text,
+                                     '_aliases', coalesce((SELECT json_agg(ea.alias ORDER BY ea.alias)
+                                                          FROM entity_aliases ea WHERE ea.entity_id=e.entity_id), '[]'::json)
+                                   ) ORDER BY e.canonical_name)
                             FROM article_entities ae JOIN entities e ON e.entity_id=ae.entity_id
-                            WHERE ae.article_id=a.article_id AND e.status='active'), '') AS entities,
+                            WHERE ae.article_id=a.article_id AND e.status='active'), '[]'::json) AS _entity_refs_raw,
                   coalesce((SELECT string_agg(DISTINCT t.name, ', ' ORDER BY t.name)
                             FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
                             WHERE at.article_id=a.article_id AND t.status='active'), '') AS topics
@@ -1494,6 +1481,11 @@ def _public_grounded_entity_timeline_items(entity: dict, page: int, page_size: i
         if article_id in grounded_by_article:
             continue
         row.pop('_entity_mention', None)
+        row['entities'] = ', '.join(
+            ref.get('name') or '' for ref in filter_grounded_entity_references(
+                row.get('title') or '', row.get('_grounding_summary') or '', row.pop('_entity_refs_raw', []) or []
+            ) if ref.get('name')
+        )
         row.pop('_grounding_summary', None)
         grounded_by_article[article_id] = row
     grounded = list(grounded_by_article.values())

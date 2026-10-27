@@ -264,6 +264,15 @@ _SAFE_SHORT_ENTITY_ALIASES = {
     'sevilla fc': {'sevilla'},
     'valencia cf': {'valencia'},
 }
+# Descriptive prefixes may be omitted when the remaining full brand/name is distinctive
+# (e.g. "Siêu thị Big C" -> "Big C"). They must not be confused with competition qualifiers
+# such as FIFA/U15/2026 in "FIFA U15 World Cup 2026".
+_GENERIC_ENTITY_HEADS = {
+    'cong ty', 'cong ty co phan', 'cong ty tnhh', 'tap doan', 'sieu thi', 'ngan hang',
+    'cau lac bo', 'clb', 'doi tuyen', 'doi bong', 'truong dai hoc', 'dai hoc',
+    'benh vien', 'san van dong', 'lien doan', 'hiep hoi', 'bao', 'kenh', 'to chuc',
+    'bo', 'so', 'uy ban', 'vien', 'hoc vien', 'nha xuat ban', 'hang xe',
+}
 
 
 def is_safe_entity_alias(canonical_name: str, alias: str, entity_type: str = 'UNKNOWN') -> bool:
@@ -306,7 +315,18 @@ def is_safe_entity_alias(canonical_name: str, alias: str, entity_type: str = 'UN
     if len(alias_tokens) >= 2:
         # Require at least two identity-token overlaps. A single shared descriptor such as
         # "Cầu" is not enough to claim that "Cầu Rồng" and "Cầu Diễn" are the same entity.
-        return len(set(alias_tokens) & set(canonical_tokens)) >= 2
+        if len(set(alias_tokens) & set(canonical_tokens)) < 2:
+            return False
+        # Do not let a shorter phrase that is wholly contained in a more specific named
+        # entity erase its qualifiers. For example, "World Cup" is not a safe alias for
+        # "FIFA U15 World Cup 2026"; otherwise unrelated stories can inherit the specific
+        # tournament merely because a broad competition phrase appears somewhere.
+        if len(alias_tokens) < len(canonical_tokens) and set(alias_tokens).issubset(set(canonical_tokens)):
+            is_full_suffix = canonical_tokens[-len(alias_tokens):] == alias_tokens
+            omitted_prefix = ' '.join(canonical_tokens[:-len(alias_tokens)])
+            if not (is_full_suffix and omitted_prefix in _GENERIC_ENTITY_HEADS):
+                return False
+        return True
 
     # A distinct one-token alias cannot safely identify a one-token canonical either.
     return False
@@ -462,3 +482,54 @@ def is_grounded_entity(name: str, aliases, article_text: str, entity_type: str =
             return True
     return False
 
+
+
+def filter_grounded_entity_references(title: str, summary: str, references) -> list[dict]:
+    """Return only entity refs that can be grounded in this article's own title/summary.
+
+    Public cards previously trusted every stored ``article_entities`` row. That meant an
+    old or wrongly reconciled relation could keep showing a tag even when the article did
+    not mention that entity. Filter at presentation time as a safety net, while the
+    versioned quality pass repairs the stored rows. Internal fields are never returned.
+    """
+    if isinstance(references, str):
+        try:
+            references = json.loads(references)
+        except (TypeError, ValueError):
+            references = []
+    if not isinstance(references, (list, tuple)):
+        return []
+    source_text = normalize_space(f"{title or ''}. {summary or ''}")[:20000]
+    grounded: list[dict] = []
+    seen: set[int | tuple[str, str]] = set()
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        name = normalize_space(str(reference.get('name') or reference.get('canonical_name') or ''))
+        entity_type = str(reference.get('type') or reference.get('entity_type') or 'UNKNOWN').upper().strip()
+        if not name or not should_track_entity(name, entity_type):
+            continue
+        aliases = reference.get('_aliases') or reference.get('aliases') or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        elif not isinstance(aliases, (list, tuple, set)):
+            aliases = []
+        mention_text = normalize_space(str(reference.get('_mention_text') or reference.get('mention_text') or ''))
+        if mention_text:
+            aliases = [*aliases, mention_text]
+        if not is_grounded_entity(name, aliases, source_text, entity_type):
+            continue
+        raw_id = reference.get('id', reference.get('entity_id'))
+        try:
+            identity = int(raw_id) if raw_id is not None else (norm_name(name), entity_type)
+        except (TypeError, ValueError):
+            identity = (norm_name(name), entity_type)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        item = {'name': name, 'type': entity_type}
+        if raw_id is not None:
+            item['id'] = raw_id
+        grounded.append(item)
+    grounded.sort(key=lambda item: norm_name(item.get('name') or ''))
+    return grounded
