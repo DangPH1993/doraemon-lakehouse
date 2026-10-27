@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="app-version" content="0.7.49">
+  <meta name="app-version" content="0.7.50">
   <meta name="description" content="Tìm Tin Tức by DoraemonSoft — tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>Tìm Tin Tức — DoraemonSoft</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.49">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.50">
 </head>
 <body>
   <header class="site-header">
@@ -134,25 +134,28 @@
       <div class="section-heading articles-heading">
         <div><p class="eyebrow">LATEST HEADLINES</p><h2>Tin tức trong ngày</h2><p class="section-subtitle" id="articleDateLabel">Các bài mới được xuất bản hôm nay, theo giờ Việt Nam.</p></div>
       </div>
-      <div id="fieldCategoryFilter" class="field-filter-tabs" role="tablist" aria-label="Lọc tin theo lĩnh vực">
-        <button type="button" class="field-filter-tab active" id="fieldTabAll" role="tab" aria-selected="true" tabindex="0" aria-controls="dailyArticles" data-field-category="">Tất cả</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabThoiSu" aria-controls="dailyArticles" data-field-category="Thời sự">Thời sự</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabTheGioi" aria-controls="dailyArticles" data-field-category="Thế giới">Thế giới</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabKinhDoanh" aria-controls="dailyArticles" data-field-category="Kinh doanh">Kinh doanh</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabBatDongSan" aria-controls="dailyArticles" data-field-category="Bất động sản">Bất động sản</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabPhapLuat" aria-controls="dailyArticles" data-field-category="Pháp luật">Pháp luật</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabGiaoDuc" aria-controls="dailyArticles" data-field-category="Giáo dục">Giáo dục</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabSucKhoe" aria-controls="dailyArticles" data-field-category="Sức khỏe">Sức khỏe</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabDoiSong" aria-controls="dailyArticles" data-field-category="Đời sống">Đời sống</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabDuLich" aria-controls="dailyArticles" data-field-category="Du lịch">Du lịch</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabKhoaHoc" aria-controls="dailyArticles" data-field-category="Khoa học">Khoa học</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabSoHoa" aria-controls="dailyArticles" data-field-category="Số hóa">Số hóa</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabXe" aria-controls="dailyArticles" data-field-category="Xe">Xe</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabTheThao" aria-controls="dailyArticles" data-field-category="Thể thao">Thể thao</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabVanHoaGiaiTri" aria-controls="dailyArticles" data-field-category="Văn hóa - Giải trí">Văn hóa - Giải trí</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabMoiTruong" aria-controls="dailyArticles" data-field-category="Môi trường">Môi trường</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabYKienGocNhin" aria-controls="dailyArticles" data-field-category="Ý kiến - Góc nhìn">Ý kiến - Góc nhìn</button>
-        <button type="button" class="field-filter-tab" role="tab" aria-selected="false" tabindex="-1" id="fieldTabUnclassified" aria-controls="dailyArticles" data-field-category="Chưa phân loại">Chưa phân loại</button>
+      <div class="field-filter-shell" aria-label="Điều hướng lĩnh vực tin tức">
+        <div id="fieldCategoryFilter" class="field-filter-tabs" role="tablist" aria-label="Lọc tin theo lĩnh vực">
+          <button type="button" class="field-filter-tab active" id="fieldTabAll" role="tab" aria-selected="true" tabindex="0" aria-controls="dailyArticles" data-field-category="">Tất cả</button>
+          <button type="button" class="field-filter-tab" id="fieldTabThoiSu" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Thời sự">Thời sự</button>
+          <button type="button" class="field-filter-tab" id="fieldTabTheGioi" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Thế giới">Thế giới</button>
+          <button type="button" class="field-filter-tab" id="fieldTabTheThao" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Thể thao">Thể thao</button>
+          <button type="button" class="field-filter-tab" id="fieldTabKinhDoanh" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Kinh doanh">Kinh doanh</button>
+          <button type="button" class="field-filter-tab" id="fieldTabKhoaHoc" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Khoa học">Khoa học</button>
+          <button type="button" class="field-filter-tab" id="fieldTabDoiSong" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Đời sống">Đời sống</button>
+          <button type="button" class="field-filter-tab" id="fieldTabBatDongSan" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Bất động sản">Bất động sản</button>
+          <button type="button" class="field-filter-tab" id="fieldTabPhapLuat" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Pháp luật">Pháp luật</button>
+          <button type="button" class="field-filter-tab" id="fieldTabGiaoDuc" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Giáo dục">Giáo dục</button>
+          <button type="button" class="field-filter-tab" id="fieldTabSucKhoe" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Sức khỏe">Sức khỏe</button>
+          <button type="button" class="field-filter-tab" id="fieldTabDuLich" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Du lịch">Du lịch</button>
+          <button type="button" class="field-filter-tab" id="fieldTabSoHoa" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Số hóa">Số hóa</button>
+          <button type="button" class="field-filter-tab" id="fieldTabXe" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Xe">Xe</button>
+          <button type="button" class="field-filter-tab" id="fieldTabVanHoaGiaiTri" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Văn hóa - Giải trí">Văn hóa - Giải trí</button>
+          <button type="button" class="field-filter-tab" id="fieldTabMoiTruong" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Môi trường">Môi trường</button>
+          <button type="button" class="field-filter-tab" id="fieldTabYKienGocNhin" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Ý kiến - Góc nhìn">Ý kiến - Góc nhìn</button>
+          <button type="button" class="field-filter-tab" id="fieldTabUnclassified" role="tab" aria-selected="false" tabindex="-1" aria-controls="dailyArticles" data-field-category="Chưa phân loại">Chưa phân loại</button>
+        </div>
+        <button type="button" id="fieldCategoryScrollButton" class="field-filter-scroll-btn" aria-controls="fieldCategoryFilter" aria-label="Xem các lĩnh vực tiếp theo" title="Xem các lĩnh vực tiếp theo" hidden><span aria-hidden="true">›</span></button>
       </div>
       <div class="article-filter-tools">
         <form id="articleDateFilterForm" class="date-range-filter" aria-label="Lọc theo ngày xuất bản">
@@ -218,7 +221,7 @@
       <a href="/admin" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/analytics.js?v=0.7.49" defer></script>
-  <script src="/static/news.js?v=0.7.49" defer></script>
+  <script src="/static/analytics.js?v=0.7.50" defer></script>
+  <script src="/static/news.js?v=0.7.50" defer></script>
 </body>
 </html>

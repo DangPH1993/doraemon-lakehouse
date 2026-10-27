@@ -864,6 +864,51 @@
     tabs[next].focus();
     tabs[next].click();
   });
+  // Keep the arrow at the right edge of the tab bar so every field can be reached
+  // without relying on a horizontal scrollbar. The arrow changes direction at either end.
+  const fieldCategoryStrip = $('#fieldCategoryFilter');
+  const fieldCategoryScrollButton = $('#fieldCategoryScrollButton');
+  let fieldCategoryScrollDirection = 'next';
+  function updateFieldCategoryScrollButton() {
+    if (!fieldCategoryStrip || !fieldCategoryScrollButton) return;
+    const maxScroll = Math.max(0, fieldCategoryStrip.scrollWidth - fieldCategoryStrip.clientWidth);
+    const overflows = maxScroll > 2;
+    fieldCategoryScrollButton.hidden = !overflows;
+    if (!overflows) {
+      fieldCategoryScrollDirection = 'next';
+      fieldCategoryScrollButton.querySelector('span').textContent = '›';
+      fieldCategoryScrollButton.setAttribute('aria-label', 'Xem các lĩnh vực tiếp theo');
+      fieldCategoryScrollButton.title = 'Xem các lĩnh vực tiếp theo';
+      return;
+    }
+    if (fieldCategoryStrip.scrollLeft <= 2) fieldCategoryScrollDirection = 'next';
+    else if (fieldCategoryStrip.scrollLeft >= maxScroll - 2) fieldCategoryScrollDirection = 'previous';
+    const goingBack = fieldCategoryScrollDirection === 'previous';
+    fieldCategoryScrollButton.querySelector('span').textContent = goingBack ? '‹' : '›';
+    const label = goingBack ? 'Xem các lĩnh vực trước đó' : 'Xem các lĩnh vực tiếp theo';
+    fieldCategoryScrollButton.setAttribute('aria-label', label);
+    fieldCategoryScrollButton.title = label;
+  }
+  fieldCategoryScrollButton.addEventListener('click', () => {
+    const maxScroll = Math.max(0, fieldCategoryStrip.scrollWidth - fieldCategoryStrip.clientWidth);
+    if (maxScroll <= 2) return;
+    const delta = Math.max(150, fieldCategoryStrip.clientWidth * 0.72);
+    const current = fieldCategoryStrip.scrollLeft;
+    const target = fieldCategoryScrollDirection === 'previous'
+      ? Math.max(0, current - delta)
+      : Math.min(maxScroll, current + delta);
+    fieldCategoryScrollStripTo(target);
+  });
+  function fieldCategoryScrollStripTo(left) {
+    fieldCategoryStrip.scrollTo({left, behavior: 'smooth'});
+    // Keep direction while moving through the middle, and switch only at an edge.
+    if (left <= 2) fieldCategoryScrollDirection = 'next';
+    else if (left >= fieldCategoryStrip.scrollWidth - fieldCategoryStrip.clientWidth - 2) fieldCategoryScrollDirection = 'previous';
+    updateFieldCategoryScrollButton();
+  }
+  fieldCategoryStrip.addEventListener('scroll', updateFieldCategoryScrollButton, {passive: true});
+  window.addEventListener('resize', updateFieldCategoryScrollButton);
+  updateFieldCategoryScrollButton();
   $('#articleDateFilterForm').addEventListener('submit', async event => {
     event.preventDefault();
     const from = String($('#articleDateFrom').value || '').trim();

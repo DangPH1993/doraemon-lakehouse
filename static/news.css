@@ -426,24 +426,58 @@ body{background:#fff;color:#202124;font-size:14px}
 @media(max-width:640px){.brand-mark{font-size:15px;letter-spacing:-.35px}.brand-mark.small{font-size:14px}.search-eyebrow{font-size:16px;margin-bottom:15px}}
 
 
-/* v0.7.49: editorial field filters are navigation-style tabs, matching the site reference. */
+/* v0.7.50: priority editorial tabs with a trailing arrow to navigate remaining fields. */
+.field-filter-shell{
+  display:flex;
+  align-items:stretch;
+  width:100%;
+  min-width:0;
+  gap:0;
+  margin:2px 0 13px;
+  border-bottom:1px solid #dfe3e8;
+  background:transparent;
+}
 .field-filter-tabs{
   display:flex;
   align-items:stretch;
   gap:25px;
-  width:100%;
+  flex:1 1 auto;
+  width:0;
   min-width:0;
   overflow-x:auto;
   overflow-y:hidden;
   white-space:nowrap;
   overscroll-behavior-x:contain;
   scrollbar-width:none;
-  border-bottom:1px solid #dfe3e8;
-  margin:2px 0 13px;
+  border:0;
+  margin:0;
   padding:0 0 0 1px;
   background:transparent;
+  scroll-behavior:smooth;
 }
 .field-filter-tabs::-webkit-scrollbar{display:none}
+.field-filter-scroll-btn{
+  flex:0 0 34px;
+  align-self:stretch;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  margin:0 0 -1px;
+  padding:0;
+  border:0;
+  border-bottom:3px solid transparent;
+  border-radius:0;
+  background:linear-gradient(90deg,rgba(255,255,255,0),#fff 38%);
+  color:#31506b;
+  cursor:pointer;
+  font:inherit;
+  font-size:27px;
+  line-height:1;
+  transition:color .15s ease,background .15s ease;
+}
+.field-filter-scroll-btn:hover{color:#1a73e8;background:#f7faff}
+.field-filter-scroll-btn:focus-visible{outline:2px solid #91b7f7;outline-offset:-3px}
+.field-filter-scroll-btn[hidden]{display:none!important}
 .field-filter-tab{
   position:relative;
   flex:0 0 auto;
@@ -480,12 +514,14 @@ body{background:#fff;color:#202124;font-size:14px}
 .article-filter-tools .date-filter-feedback{flex:1 1 100%;width:100%;font-size:10px;line-height:1.45;color:#b45309;margin:0}
 .article-filter-tools .date-filter-feedback:empty{display:none}
 @media(max-width:760px){
-  .field-filter-tabs{gap:21px;margin-bottom:12px}
+  .field-filter-tabs{gap:21px}
+  .field-filter-scroll-btn{flex-basis:30px;font-size:25px}
   .field-filter-tab{padding:13px 0 11px;font-size:12px}
   .article-filter-tools .date-range-filter{flex:1 1 100%;gap:8px}
 }
 @media(max-width:520px){
-  .field-filter-tabs{gap:19px;margin-right:-2px;padding-right:2px}
+  .field-filter-tabs{gap:19px;padding-right:2px}
+  .field-filter-scroll-btn{flex-basis:28px}
   .article-filter-tools .date-range-filter{display:grid !important;grid-template-columns:max-content minmax(0,1fr);width:100%;gap:8px}
   .article-filter-tools .date-range-filter input[type="date"]{width:100%;min-width:0;max-width:none}
   .article-filter-tools .date-range-filter .date-filter-apply{grid-column:1/-1;justify-self:start;min-width:104px}
