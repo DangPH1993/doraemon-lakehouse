@@ -12,6 +12,18 @@
     try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) && url.hostname && !url.username && !url.password ? esc(url.href) : ''; }
     catch { return ''; }
   }
+  // Hide unavailable publisher thumbnails and restore the full-width text layout.
+  // Image error events do not bubble, so use capture mode on document.
+  document.addEventListener('error', event => {
+    const image = event.target;
+    if (!image || !image.matches || !image.matches('img.article-thumbnail-img')) return;
+    const link = image.closest('.article-image-link');
+    if (!link) return;
+    link.classList.add('image-failed');
+    link.style.display = 'none';
+    const layout = link.closest('.article-media-layout, .timeline-card');
+    if (layout) layout.classList.remove('has-image');
+  }, true);
   function localDateText(value) {
     if (!value) return 'Chưa rõ thời gian';
     const date = new Date(value);
