@@ -27,7 +27,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.52',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.53',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -158,6 +158,11 @@ def admin_page():
 def public_news_page():
     # Always deliver the newest HTML so outdated filter markup is not retained by browsers/CDNs.
     return FileResponse('static/news.html', headers={'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'})
+
+@app.get('/timeline')
+def public_standalone_timeline_page():
+    # Dedicated share destination: fetches only the requested timeline, not the home news feed.
+    return FileResponse('static/timeline.html', headers={'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'})
 
 @app.get('/news/following')
 def public_following_page(): return FileResponse('static/following.html')
