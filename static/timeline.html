@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="app-version" content="0.7.53">
+  <meta name="description" content="Xem timeline tin tức được chia sẻ trên Tìm Tin Tức.">
+  <title>Timeline — Tìm Tin Tức</title>
+  <link rel="stylesheet" href="/static/news.css?v=0.7.53">
+  <style>
+    .standalone-timeline-page{max-width:1040px;margin:34px auto 0;padding:0 clamp(14px,4vw,34px)}
+    .standalone-timeline-intro{display:flex;align-items:flex-start;justify-content:space-between;gap:22px;flex-wrap:wrap}
+    .standalone-timeline-intro h1{font-size:clamp(25px,4vw,36px);line-height:1.2;letter-spacing:-.7px;margin:0;color:#202124;overflow-wrap:anywhere}
+    .standalone-timeline-description{max-width:680px;color:#70757a;font-size:13px;line-height:1.7;margin:9px 0 0}
+    .standalone-timeline-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .standalone-share-link{display:flex;gap:8px;align-items:center;margin-top:20px;padding:12px;background:#fff;border:1px solid #e8eaed;border-radius:12px}
+    .standalone-share-link input{min-width:0;flex:1;width:100%;border:1px solid #dadce0;border-radius:8px;padding:10px 12px;color:#344054;font:inherit;font-size:12px;background:#fafafa}
+    .standalone-share-feedback{min-height:18px;font-size:12px;color:#1967d2;margin:7px 2px 0;overflow-wrap:anywhere}
+    .standalone-timeline-section{margin-top:22px;padding:clamp(15px,3vw,28px);background:#f8f9fa;border:1px solid #e8eaed;border-radius:16px}
+    .standalone-timeline-section .section-heading{display:block;margin-bottom:18px}
+    .standalone-timeline-section .section-heading h2{margin:0}
+    .standalone-timeline-section .timeline-selected{display:inline-flex;padding:8px 12px;margin-top:12px;max-width:100%;overflow-wrap:anywhere}
+    .standalone-status{padding:18px 16px;border:1px solid #e8eaed;border-radius:12px;background:white;color:#5f6368;line-height:1.7}
+    .standalone-status strong{display:block;color:#202124;margin-bottom:5px}
+    .standalone-status a{color:#1967d2;font-weight:700}
+    @media(max-width:620px){.standalone-timeline-page{margin-top:18px}.standalone-timeline-actions{width:100%}.standalone-timeline-actions>a,.standalone-timeline-actions>button{flex:1}.standalone-share-link{align-items:stretch;flex-direction:column}.standalone-share-link button{width:100%}.standalone-timeline-section{margin-top:14px}}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/news" aria-label="Tìm Tin Tức - trang chủ">
+      <span class="brand-mark">3T</span>
+      <span class="brand-copy"><strong>Tìm Tin Tức</strong><small>By DoraemonSoft</small></span>
+    </a>
+    <nav class="header-nav" aria-label="Điều hướng chính"><a href="/news">Trang tin</a></nav>
+    <div class="header-actions"><a class="auth-button auth-button-secondary" href="/news">← Về Tìm Tin Tức</a></div>
+  </header>
+
+  <main class="standalone-timeline-page">
+    <section class="standalone-timeline-intro" aria-labelledby="standaloneTimelineTitle">
+      <div>
+        <p class="eyebrow">TIMELINE ĐƯỢC CHIA SẺ</p>
+        <h1 id="standaloneTimelineTitle">Đang tải timeline…</h1>
+        <p id="standaloneTimelineDescription" class="standalone-timeline-description">Tập hợp các bài báo theo trình tự thời gian từ nhiều nguồn.</p>
+      </div>
+      <div class="standalone-timeline-actions">
+        <button id="standaloneCopyLinkButton" class="auth-button" type="button" disabled>⧉ Copy link</button>
+        <a class="auth-button auth-button-secondary" href="/news">Khám phá tin khác ↗</a>
+      </div>
+    </section>
+    <div class="standalone-share-link" aria-label="Liên kết chia sẻ timeline">
+      <label for="standaloneShareURL" class="sr-only">Liên kết timeline</label>
+      <input id="standaloneShareURL" type="text" readonly spellcheck="false" autocapitalize="off" aria-label="Liên kết timeline hiện tại">
+      <button id="standaloneCopyLinkButton2" class="auth-button auth-button-secondary" type="button" disabled>Sao chép đường dẫn</button>
+    </div>
+    <p id="standaloneShareFeedback" class="standalone-share-feedback" role="status" aria-live="polite"></p>
+
+    <section class="standalone-timeline-section" aria-labelledby="standaloneTimelineSectionTitle">
+      <div class="section-heading">
+        <p class="eyebrow">DIỄN BIẾN THEO THỜI GIAN</p>
+        <h2 id="standaloneTimelineSectionTitle">Timeline chi tiết</h2>
+        <p id="standaloneTimelineMeta" class="section-subtitle">Các bài báo được sắp xếp theo thời gian mới nhất trước.</p>
+        <div id="standaloneTimelineLabel" class="timeline-selected" hidden></div>
+      </div>
+      <div id="standaloneTimelineContainer" class="timeline-container" aria-live="polite"><div class="loading-card">Đang tải timeline…</div></div>
+      <div id="standaloneTimelinePagination" class="pagination-row"></div>
+    </section>
+
+    <footer class="site-footer">
+      <div class="footer-brand"><span class="brand-mark small">3T</span><div><strong>Tìm Tin Tức</strong><small>By DoraemonSoft</small></div></div>
+      <p>Tìm Tin Tức hiển thị tiêu đề, đoạn trích ngắn, nguồn và liên kết đến bài gốc. Nội dung thuộc quyền của nhà xuất bản tương ứng.</p>
+      <a href="/news" class="footer-admin">Về trang tin ↗</a>
+    </footer>
+  </main>
+  <script src="/static/analytics.js?v=0.7.53" defer></script>
+  <script src="/static/timeline.js?v=0.7.53" defer></script>
+</body>
+</html>

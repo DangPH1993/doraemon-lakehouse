@@ -307,11 +307,11 @@
   }
   function buildTimelineShareURL() {
     if (!state.selectedTimeline || !['topic', 'entity', 'article'].includes(state.selectedTimeline.type) || !Number.isSafeInteger(Number(state.selectedTimeline.id)) || Number(state.selectedTimeline.id) < 1) return null;
-    const url = new URL('/news', window.location.origin);
-    url.searchParams.set('timeline_type', state.selectedTimeline.type);
-    url.searchParams.set('timeline_id', String(state.selectedTimeline.id));
-    url.searchParams.set('timeline_page', String(Math.max(1, Number(state.timelinePage) || 1)));
-    url.hash = 'timeline';
+    // Share a dedicated view so the homepage's article feed cannot push the timeline away.
+    const url = new URL('/timeline', window.location.origin);
+    url.searchParams.set('type', state.selectedTimeline.type);
+    url.searchParams.set('id', String(state.selectedTimeline.id));
+    url.searchParams.set('page', String(Math.max(1, Number(state.timelinePage) || 1)));
     return url.href;
   }
   function openTimelineShareDialog() {
@@ -1051,12 +1051,21 @@
   document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#authModal').hidden) closeAuthModal(); if (event.key === 'Escape' && !$('#accountModal').hidden) closeAccountModal(); if (event.key === 'Escape' && !$('#proUpgradeModal').hidden) closeProUpgradePopup(); if (event.key === 'Escape' && !$('#timelineShareModal').hidden) closeTimelineShareDialog(); });
 
   async function initialize() {
+    // Older shared links point at /news?timeline_type=...; forward them before
+    // loading the homepage feed so article loading cannot push the timeline away.
+    const sharedTimeline = sharedTimelineFromURL();
+    if (sharedTimeline) {
+      const shareURL = new URL('/timeline', window.location.origin);
+      shareURL.searchParams.set('type', sharedTimeline.type);
+      shareURL.searchParams.set('id', String(sharedTimeline.id));
+      shareURL.searchParams.set('page', String(sharedTimeline.page));
+      window.location.replace(shareURL.href);
+      return;
+    }
     await restoreUser();
     const jobs = [loadHotTopics(), loadEntityCloud(), loadArticles(1)];
     if (state.user) jobs.push(loadUserRadar());
     await Promise.all(jobs);
-    const sharedTimeline = sharedTimelineFromURL();
-    if (sharedTimeline) await loadTimeline(sharedTimeline.type, sharedTimeline.id, sharedTimeline.page, true);
     const resetToken = readPasswordResetToken();
     if (resetToken) {
       state.passwordResetToken = resetToken;
