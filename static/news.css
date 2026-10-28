@@ -547,7 +547,7 @@ body{background:#fff;color:#202124;font-size:14px}
 
 #timeline{scroll-margin-top:82px}
 
-/* v0.7.56 — editorial typography inspired by Vietnamese digital newspapers. */
+/* v0.7.57 — editorial typography inspired by Vietnamese digital newspapers. */
 :root{font-family:Arial,Helvetica,sans-serif}
 body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 .site-header{gap:24px}
@@ -581,8 +581,43 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 @media(max-width:640px){.search-home h1{font-size:30px;letter-spacing:-.35px}.search-intro{font-size:14px}.section-heading h2{font-size:23px}.radar-row h3,.article-row .radar-row h3,.article-row h3{font-size:16px;line-height:1.45}.radar-row-snippet,.article-snippet,.article-row .article-snippet{font-size:13px;line-height:1.6}.timeline-card h3{font-size:16px}.timeline-card p{font-size:13px}.timeline-time{font-size:11px}.timeline-meta{font-size:11px}.brand-copy strong,.footer-brand strong{font-size:13px}.brand-copy small,.footer-brand small{font-size:10px}.site-brand-image.wordmark{width:clamp(115px,36vw,150px);height:36px}}
 
 
-/* v0.7.56: constrain site logo on public pages; image dimensions must never control header layout. */
+/* v0.7.57: constrain site logo on public pages; image dimensions must never control header layout. */
 .site-brand-image{display:block;width:42px;height:42px;max-width:42px;max-height:42px;min-width:0;min-height:0;object-fit:contain;object-position:center;flex:0 0 42px;background:transparent;border:0;border-radius:0}
 .site-brand-image.small{width:34px;height:34px;max-width:34px;max-height:34px;flex-basis:34px}
 .site-brand-image.wordmark{width:clamp(120px,15vw,180px);height:44px;max-width:min(180px,40vw);max-height:44px;flex:0 1 auto;object-fit:contain}
 @media(max-width:640px){.site-brand-image{width:36px;height:36px;max-width:36px;max-height:36px;flex-basis:36px}.site-brand-image.small{width:30px;height:30px;max-width:30px;max-height:30px;flex-basis:30px}.site-brand-image.wordmark{width:clamp(110px,34vw,150px);height:38px;max-width:44vw;max-height:38px}}
+
+/* v0.7.57: make Entity Cloud labels legible and stable for Vietnamese diacritics. */
+.entity-bubble,
+.entity-bubble-name,
+.entity-bubble-count{
+  font-family:"Segoe UI", Tahoma, Arial, Helvetica, sans-serif;
+  font-kerning:normal;
+  font-variant-ligatures:none;
+  letter-spacing:normal;
+  word-spacing:normal;
+}
+.entity-bubble-name{
+  font-size:clamp(10px, 1.1vw, 12px);
+  font-weight:700;
+  line-height:1.2;
+  max-height:3.6em;
+  overflow-wrap:break-word;
+  word-break:normal;
+  hyphens:none;
+  -webkit-line-clamp:3;
+}
+.entity-bubble.is-long .entity-bubble-name{
+  font-size:10px;
+  font-weight:700;
+  line-height:1.15;
+  max-height:3.45em;
+  -webkit-line-clamp:3;
+}
+.entity-bubble-count{font-size:9px;line-height:1.1;font-weight:650}
+@media(max-width:640px){
+  .entity-bubble-name{font-size:9px;line-height:1.15;max-height:2.3em;-webkit-line-clamp:2}
+  .entity-bubble.is-long .entity-bubble-name{font-size:8px;line-height:1.1;max-height:2.2em;-webkit-line-clamp:2}
+  .entity-bubble-count{font-size:8px}
+}
+
