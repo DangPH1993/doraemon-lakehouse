@@ -530,3 +530,19 @@ body{background:#fff;color:#202124;font-size:14px}
 
 /* v0.7.51: shareable public timeline links. */
 .timeline-heading-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;max-width:54%}.timeline-share-button{flex-shrink:0}.timeline-share-button:disabled{opacity:.45;cursor:not-allowed;transform:none}.timeline-share-feedback{min-height:0;margin:8px 0 0;color:#1967d2;font-size:11px;line-height:1.5;overflow-wrap:anywhere}.timeline-share-feedback:empty{display:none}.timeline-section .section-heading{align-items:center}@media(max-width:640px){.timeline-heading-actions{max-width:100%;width:100%;justify-content:flex-start}.timeline-share-button{white-space:nowrap}.timeline-share-feedback{font-size:10px}}
+
+
+/* v0.7.52: explicit share dialog with visible URL and copy action. */
+.timeline-share-modal{z-index:120}
+.timeline-share-dialog{width:min(100%,520px)}
+.timeline-share-dialog .auth-description{margin:8px 0 18px;color:#667085;font-size:12px;line-height:1.7}
+.timeline-share-dialog .auth-field{margin-bottom:12px}
+.timeline-share-dialog .auth-field input{font-size:12px;font-weight:550;user-select:all}
+.timeline-share-modal-actions{display:flex;align-items:center;gap:10px;margin-top:8px}
+.timeline-share-modal-actions .auth-submit{width:auto;flex:1}
+.timeline-share-modal-actions .auth-button{padding:12px 18px}
+.timeline-share-modal-feedback{min-height:18px;margin:10px 0 0;color:#1967d2;font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+.timeline-share-modal-feedback:empty{display:none}
+@media(max-width:520px){.timeline-share-dialog{padding:26px 18px}.timeline-share-modal-actions{align-items:stretch;flex-direction:column}.timeline-share-modal-actions .auth-button,.timeline-share-modal-actions .auth-submit{width:100%}}
+
+#timeline{scroll-margin-top:82px}

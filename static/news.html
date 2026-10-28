@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="app-version" content="0.7.51">
+  <meta name="app-version" content="0.7.52">
   <meta name="description" content="Tìm Tin Tức by DoraemonSoft — tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>Tìm Tin Tức — DoraemonSoft</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.51">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.52">
 </head>
 <body>
   <header class="site-header">
@@ -225,7 +225,24 @@
       <a href="/admin" class="footer-admin">Trang quản trị ↗</a>
     </footer>
   </main>
-  <script src="/static/analytics.js?v=0.7.51" defer></script>
-  <script src="/static/news.js?v=0.7.51" defer></script>
+
+  <div class="auth-modal timeline-share-modal" id="timelineShareModal" hidden>
+    <div class="auth-backdrop" data-timeline-share-close="true"></div>
+    <section class="auth-dialog timeline-share-dialog" role="dialog" aria-modal="true" aria-labelledby="timelineShareTitle" aria-describedby="timelineShareDescription">
+      <button class="auth-close" type="button" data-timeline-share-close="true" aria-label="Đóng hộp thoại chia sẻ">×</button>
+      <p class="eyebrow">CHIA SẺ TIN TỨC</p>
+      <h2 id="timelineShareTitle">Chia sẻ timeline</h2>
+      <p class="auth-description" id="timelineShareDescription">Sao chép đường dẫn bên dưới để người khác mở trực tiếp timeline này trên Tìm Tin Tức.</p>
+      <label class="auth-field" for="timelineShareURL"><span>Liên kết timeline</span><input id="timelineShareURL" name="timelineShareURL" type="text" readonly spellcheck="false" autocapitalize="off" aria-label="Liên kết chia sẻ timeline"></label>
+      <div class="timeline-share-modal-actions">
+        <button class="auth-submit" id="copyTimelineShareButton" type="button">⧉ Copy link</button>
+        <button class="auth-button auth-button-secondary" type="button" data-timeline-share-close="true">Đóng</button>
+      </div>
+      <p id="timelineShareModalFeedback" class="timeline-share-modal-feedback" role="status" aria-live="polite"></p>
+    </section>
+  </div>
+
+  <script src="/static/analytics.js?v=0.7.52" defer></script>
+  <script src="/static/news.js?v=0.7.52" defer></script>
 </body>
 </html>

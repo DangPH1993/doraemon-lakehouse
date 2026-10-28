@@ -311,27 +311,46 @@
     url.searchParams.set('timeline_type', state.selectedTimeline.type);
     url.searchParams.set('timeline_id', String(state.selectedTimeline.id));
     url.searchParams.set('timeline_page', String(Math.max(1, Number(state.timelinePage) || 1)));
+    url.hash = 'timeline';
     return url.href;
   }
-  async function copyTimelineShareURL() {
+  function openTimelineShareDialog() {
     const shareURL = buildTimelineShareURL();
-    if (!shareURL) { setFeedback('#timelineShareFeedback', 'Hãy mở một timeline trước khi chia sẻ.'); return; }
+    if (!shareURL) {
+      setFeedback('#timelineShareFeedback', 'Hãy mở một timeline trước khi chia sẻ.');
+      return;
+    }
+    $('#timelineShareURL').value = shareURL;
+    $('#timelineShareModalFeedback').textContent = '';
+    $('#timelineShareModal').hidden = false;
+    $('#timelineShareURL').focus();
+    $('#timelineShareURL').select();
+  }
+  function closeTimelineShareDialog() {
+    $('#timelineShareModal').hidden = true;
+    const trigger = $('#shareTimelineButton');
+    if (trigger && !trigger.disabled) trigger.focus();
+  }
+  async function copyTimelineShareURL() {
+    const field = $('#timelineShareURL');
+    const shareURL = field?.value || buildTimelineShareURL();
+    if (!shareURL) {
+      setFeedback('#timelineShareModalFeedback', 'Hãy mở một timeline trước khi chia sẻ.');
+      return;
+    }
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(shareURL);
       } else {
-        const field = document.createElement('textarea');
-        field.value = shareURL; field.setAttribute('readonly', '');
-        field.style.position = 'fixed'; field.style.opacity = '0'; field.style.pointerEvents = 'none';
-        document.body.appendChild(field); field.select();
-        const copied = document.execCommand('copy'); field.remove();
+        field.value = shareURL; field.focus(); field.select();
+        const copied = document.execCommand('copy');
         if (!copied) throw new Error('Trình duyệt không cho phép sao chép tự động.');
       }
-      setFeedback('#timelineShareFeedback', 'Đã sao chép link timeline. Gửi link này để người khác mở đúng timeline.', true);
+      setFeedback('#timelineShareModalFeedback', 'Đã copy link thành công. Bạn có thể gửi link này cho người khác.', true);
     } catch (error) {
-      // Prompt is a manual-copy fallback when clipboard permissions are denied.
-      window.prompt('Sao chép liên kết timeline này:', shareURL);
-      setFeedback('#timelineShareFeedback', 'Nếu liên kết chưa được sao chép, hãy sao chép từ hộp thoại vừa mở.');
+      // Leave the URL selected so users can copy it manually with Ctrl+C / Cmd+C.
+      field.value = shareURL; field.focus(); field.select();
+      setFeedback('#timelineShareModalFeedback', 'Chưa thể tự động copy. Link đã được chọn — hãy nhấn Ctrl+C (hoặc Cmd+C trên Mac).');
     }
   }
 
@@ -863,7 +882,9 @@
       document.querySelectorAll('.period-btn').forEach(btn => { const active = btn.dataset.period === state.period; btn.classList.toggle('active', active); btn.setAttribute('aria-selected', String(active)); });
       await loadHotTopics(); return;
     }
-    if (event.target.closest('#shareTimelineButton')) { await copyTimelineShareURL(); return; }
+    if (event.target.closest('[data-timeline-share-close]')) { closeTimelineShareDialog(); return; }
+    if (event.target.closest('#shareTimelineButton')) { openTimelineShareDialog(); return; }
+    if (event.target.closest('#copyTimelineShareButton')) { await copyTimelineShareURL(); return; }
     const articleTimelineAction = event.target.closest('[data-open-article-timeline]');
     if (articleTimelineAction) {
       const articleId = Number(articleTimelineAction.dataset.openArticleTimeline);
@@ -1027,7 +1048,7 @@
     finally { state.paymentProofSubmitting = false; $('#submitPaymentProof').disabled = false; }
   });
   $('#authModal').addEventListener('click', event => { if (event.target.id === 'authModal') closeAuthModal(); });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#authModal').hidden) closeAuthModal(); if (event.key === 'Escape' && !$('#accountModal').hidden) closeAccountModal(); if (event.key === 'Escape' && !$('#proUpgradeModal').hidden) closeProUpgradePopup(); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#authModal').hidden) closeAuthModal(); if (event.key === 'Escape' && !$('#accountModal').hidden) closeAccountModal(); if (event.key === 'Escape' && !$('#proUpgradeModal').hidden) closeProUpgradePopup(); if (event.key === 'Escape' && !$('#timelineShareModal').hidden) closeTimelineShareDialog(); });
 
   async function initialize() {
     await restoreUser();
