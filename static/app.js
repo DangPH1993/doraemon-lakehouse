@@ -7,7 +7,7 @@
   const listPageSize = 25;
   let paymentProofBlobUrl = null;
   let paymentBadgeTimer = null;
-  const pageNames = {overview:'Tổng quan',sources:'Nguồn dữ liệu',articles:'Bài báo & làm sạch',topics:'Quản lý Topic',timeline:'Topic Timeline',entities:'Quản lý Entity',facts:'Bảng FACT',pipeline:'Pipeline & chất lượng',users:'Người dùng & gói',analytics:'Google Analytics'};
+  const pageNames = {overview:'Tổng quan',sources:'Nguồn dữ liệu',articles:'Bài báo & làm sạch',topics:'Quản lý Topic',timeline:'Topic Timeline',entities:'Quản lý Entity',facts:'Bảng FACT',pipeline:'Pipeline & chất lượng',users:'Người dùng & gói',analytics:'Google Analytics',branding:'Logo & giao diện'};
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const fmtDate = (v) => { if (!v) return '—'; try { return new Date(v).toLocaleString('vi-VN',{dateStyle:'short',timeStyle:'short'}); } catch { return esc(v); } };
   const fmtNumber = (v) => Number(v || 0).toLocaleString('vi-VN');
@@ -33,7 +33,7 @@
   async function login(username,password){ const r=await api('/api/auth/login',{method:'POST',body:JSON.stringify({username,password}),headers:{}});token=r.token;sessionStorage.setItem('dlh_token',token);showApp();await boot(); }
   async function checkReady(){try{await fetch('/api/health/ready').then(r=>{if(!r.ok) throw new Error();return r.json()});$('#dbStatus').textContent='Database kết nối được';$('#heroSystemState').textContent='Database sẵn sàng';$('.status-dot').style.background='#20a878';}catch{$('#dbStatus').textContent='Chưa kết nối DB';$('#heroSystemState').textContent='Cần kiểm tra cấu hình';$('.status-dot').style.background='#d14343';}}
   async function boot(){await checkReady();try{await api('/api/auth/me');await Promise.all([loadPage(currentPage),loadPaymentSummary()]);$('#lastRefreshed').textContent='Vừa cập nhật';if(paymentBadgeTimer)clearInterval(paymentBadgeTimer);paymentBadgeTimer=setInterval(()=>loadPaymentSummary(),60000);}catch(e){notice(`Chưa tải được dữ liệu: ${e.message}. Hãy kiểm tra DATABASE_URL và đã khởi tạo schema trong Neon chưa.`,'error');}}
-  async function loadPage(name){clearNotice();if(name==='overview')return loadDashboard();if(name==='sources')return Promise.all([loadSources(),populateSourceFilter()]);if(name==='articles')return Promise.all([loadArticles(),loadRules(),loadRawItems(),populateSourceFilter()]);if(name==='topics')return loadTopics();if(name==='timeline')return loadTopicTimelineOptions();if(name==='entities')return loadEntities();if(name==='facts')return Promise.all([loadFacts(),loadModels()]);if(name==='pipeline')return Promise.all([loadRuns(),loadIssues()]);if(name==='users')return loadUsersPage();if(name==='analytics')return loadGoogleAnalyticsConfig();}
+  async function loadPage(name){clearNotice();if(name==='overview')return loadDashboard();if(name==='sources')return Promise.all([loadSources(),populateSourceFilter()]);if(name==='articles')return Promise.all([loadArticles(),loadRules(),loadRawItems(),populateSourceFilter()]);if(name==='topics')return loadTopics();if(name==='timeline')return loadTopicTimelineOptions();if(name==='entities')return loadEntities();if(name==='facts')return Promise.all([loadFacts(),loadModels()]);if(name==='pipeline')return Promise.all([loadRuns(),loadIssues()]);if(name==='users')return loadUsersPage();if(name==='analytics')return loadGoogleAnalyticsConfig();if(name==='branding')return loadSiteBrandingConfig();}
   function renderEmpty(message='Chưa có dữ liệu.'){return `<div class="empty">${esc(message)}</div>`;}
   function renderPagination(kind, meta={}){
     const p=Number(meta.page||1), totalPages=Number(meta.total_pages||1), total=Number(meta.total||0);
@@ -130,6 +130,41 @@
     finally{button.disabled=false;}
   });
   $('#googleAnalyticsMeasurementId').addEventListener('input',e=>e.target.setCustomValidity(''));
+
+  async function loadSiteBrandingConfig(){
+    const status=$('#siteBrandingStatus');
+    try{
+      const data=await api('/api/admin/site-branding');
+      $('#siteLogoPreview').src=data.logo_url||'/static/site-logo.png?v=0.7.55';
+      $('#siteFaviconPreview').src=data.favicon_url||'/static/favicon.png?v=0.7.55';
+      $('#siteBrandingStatus').textContent=data.is_custom?'Đang dùng logo tùy chỉnh.':'Đang dùng logo 3T mặc định.';
+      $('#clearSiteLogo').checked=false;
+      $('#siteLogoFile').value='';
+    }catch(err){status.textContent=err.message||'Không tải được cấu hình logo.';status.classList.remove('success');}
+  }
+  $('#siteLogoFile').addEventListener('change',()=>{const file=$('#siteLogoFile').files[0];if(!file)return;$('#clearSiteLogo').checked=false;const url=URL.createObjectURL(file);$('#siteLogoPreview').src=url;$('#siteLogoPreview').onload=()=>URL.revokeObjectURL(url);});
+  $('#clearSiteLogo').addEventListener('change',()=>{if($('#clearSiteLogo').checked)$('#siteLogoFile').value='';});
+  $('#siteBrandingForm').addEventListener('submit',async e=>{
+    e.preventDefault();
+    const file=$('#siteLogoFile').files[0];
+    if(file&&file.size>3*1024*1024){toast('Logo vượt quá 3 MB','error');return;}
+    if(!file&&!$('#clearSiteLogo').checked){toast('Hãy chọn logo mới hoặc đánh dấu bỏ logo tùy chỉnh.','error');return;}
+    const form=new FormData();
+    form.append('clear_logo',$('#clearSiteLogo').checked?'true':'false');
+    if(file)form.append('logo',file);
+    const button=$('#saveSiteBrandingBtn'),status=$('#siteBrandingStatus');
+    button.disabled=true;status.textContent='Đang tải logo và tạo favicon…';status.classList.remove('success');
+    try{
+      const response=await fetch('/api/admin/site-branding',{method:'PUT',headers:{Authorization:`Bearer ${token}`,Accept:'application/json'},body:form});
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(data.detail||`HTTP ${response.status}`);
+      status.textContent=data.message||'Đã cập nhật logo và favicon.';status.classList.add('success');
+      toast(status.textContent,'success');
+      await loadSiteBrandingConfig();
+      if(window.applySiteBranding)window.applySiteBranding(data);
+    }catch(err){status.textContent=err.message||'Không lưu được logo.';status.classList.remove('success');toast(status.textContent,'error');}
+    finally{button.disabled=false;}
+  });
 
   async function loadPlanConfig(){
     try {

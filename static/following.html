@@ -4,17 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="description" content="Danh sách bài báo theo một topic hoặc entity trên News Radar.">
-  <title>Bài viết theo dõi — News Radar</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.54">
+  <link id="siteFavicon" rel="icon" type="image/x-icon" href="/favicon.ico?v=0.7.55">
+  <link id="siteAppleTouchIcon" rel="apple-touch-icon" href="/static/favicon.png?v=0.7.55">
+  <meta name="description" content="Danh sách bài báo theo một chủ đề hoặc thực thể trên Tìm Tin Tức.">
+  <title>Bài viết theo dõi | Tìm Tin Tức</title>
+  <link rel="stylesheet" href="/static/news.css?v=0.7.55">
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="/news" aria-label="News Radar trang chủ">
-      <span class="brand-mark">N<span>.</span></span>
-      <span class="brand-copy"><strong>NEWS RADAR</strong><small>by Doraemon</small></span>
+    <a class="brand" href="/news" aria-label="Tìm Tin Tức trang chủ">
+      <img class="site-brand-image" data-site-logo src="/static/site-logo.png" alt="Logo Tìm Tin Tức">
+      <span class="brand-copy" data-brand-copy><strong>Tìm Tin Tức</strong><small>timtintuc.com</small></span>
     </a>
-    <nav class="header-nav" aria-label="Điều hướng chính"><a href="/news">Radar chính</a></nav>
+    <nav class="header-nav" aria-label="Điều hướng chính"><a href="/news">Trang tin</a></nav>
     <div class="header-actions"><a class="auth-button auth-button-secondary" href="/news">← Quay lại Radar</a><a class="admin-link" href="/admin">Quản trị ↗</a></div>
   </header>
   <main class="page-shell following-page">
@@ -29,12 +31,13 @@
       <div id="followingPagination" class="pagination-row"></div>
     </section>
     <footer class="site-footer">
-      <div class="footer-brand"><span class="brand-mark small">N<span>.</span></span><div><strong>NEWS RADAR</strong><small>by Doraemon</small></div></div>
-      <p>News Radar hiển thị tiêu đề, đoạn trích ngắn, nguồn và liên kết đến bài gốc. Nội dung thuộc quyền của nhà xuất bản tương ứng.</p>
-      <a href="/news" class="footer-admin">Về Radar ↗</a>
+      <div class="footer-brand"><img class="site-brand-image small" data-site-logo src="/static/site-logo.png" alt="Logo Tìm Tin Tức"><div data-brand-copy><strong>Tìm Tin Tức</strong><small>timtintuc.com</small></div></div>
+      <p>Tìm Tin Tức hiển thị tiêu đề, đoạn trích ngắn, nguồn và liên kết đến bài gốc. Nội dung thuộc quyền của nhà xuất bản tương ứng.</p>
+      <a href="/news" class="footer-admin">Về Tìm Tin Tức ↗</a>
     </footer>
   </main>
-  <script src="/static/analytics.js?v=0.7.54" defer></script>
-  <script src="/static/following.js?v=0.7.54" defer></script>
+  <script src="/static/analytics.js?v=0.7.55" defer></script>
+  <script src="/static/branding.js?v=0.7.55" defer></script>
+  <script src="/static/following.js?v=0.7.55" defer></script>
 </body>
 </html>

@@ -3,13 +3,14 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Doraemon Mini Lakehouse · Admin</title>
-  <link rel="stylesheet" href="/static/style.css?v=0.7.45">
+  <link id="siteFavicon" rel="icon" type="image/x-icon" href="/favicon.ico?v=0.7.55">
+  <title>Tìm Tin Tức · Quản trị</title>
+  <link rel="stylesheet" href="/static/style.css?v=0.7.55">
 </head>
 <body>
 <div id="loginView" class="login-shell hidden">
   <div class="login-card">
-    <div class="brand-mark">D</div><p class="eyebrow">DORAEMON DATA PLATFORM</p>
+    <img class="site-brand-image login-brand-image" data-site-logo src="/static/site-logo.png" alt="Logo Tìm Tin Tức"><p class="eyebrow">TÌM TIN TỨC</p>
     <h1>Mini Lakehouse</h1><p class="muted">Đăng nhập khu vực quản trị dữ liệu</p>
     <form id="loginForm" class="stack">
       <label>Username<input id="loginUsername" autocomplete="username" value="admin" required></label>
@@ -20,7 +21,7 @@
 </div>
 <div id="appView" class="app-shell hidden">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-mark small">D</div><div><strong>Doraemon</strong><span>Mini Lakehouse</span></div></div>
+    <div class="brand"><img class="site-brand-image small" data-site-logo src="/static/site-logo.png" alt="Logo Tìm Tin Tức"><div data-brand-copy><strong>Tìm Tin Tức</strong><span>Quản trị hệ thống</span></div></div>
     <div class="nav-label">WORKSPACE</div>
     <nav id="mainNav">
       <button class="nav-item active" data-page="overview"><span>◫</span>Tổng quan</button>
@@ -32,6 +33,7 @@
       <button class="nav-item" data-page="facts"><span>▦</span>Bảng FACT</button>
       <button class="nav-item" data-page="pipeline"><span>⟳</span>Pipeline & chất lượng</button>
       <button class="nav-item" data-page="users"><span>♙</span>Người dùng & gói <span id="pendingPaymentBadge" class="nav-count-badge" hidden>0</span></button>
+      <button class="nav-item" data-page="branding"><span>▣</span>Logo & giao diện</button>
       <button class="nav-item" data-page="analytics"><span>◉</span>Google Analytics</button>
     </nav>
     <div class="sidebar-bottom"><div class="status-dot"></div><div><strong>Data workspace</strong><span id="dbStatus">Chưa kiểm tra kết nối</span></div><button id="logoutBtn" class="icon-btn" title="Đăng xuất">↪</button></div>
@@ -66,6 +68,22 @@
       <div class="panel"><div class="panel-head"><div><h3>🔔 Thanh toán đang chờ duyệt <span id="pendingPaymentCount" class="status warning">0</span></h3><p class="muted">Xem ảnh bằng chứng trước khi xác nhận thanh toán. Duyệt sẽ kích hoạt gói Pro.</p></div></div><div id="pendingPaymentsTable" class="table-wrap"></div></div>
       <div class="panel"><div class="panel-head"><div><h3>Danh sách tài khoản</h3><p class="muted">User có yêu cầu thanh toán chờ duyệt được sắp xếp lên đầu.</p></div></div><form id="userSearchForm" class="filter-row"><input id="userSearch" placeholder="Tìm username hoặc email..."><button class="btn secondary" type="submit">Tìm</button></form><div id="usersTable" class="table-wrap"></div></div>
     </section>
+    <section id="page-branding" class="page">
+      <div class="section-intro"><div><h2>Logo & giao diện</h2><p class="muted">Tải logo thương hiệu dùng trên các trang công khai; favicon được tạo tự động từ logo để dùng ở tab trình duyệt và kết quả tìm kiếm.</p></div></div>
+      <div class="panel form-panel">
+        <h3>Logo website và favicon</h3>
+        <p class="muted">Ưu tiên logo biểu tượng vuông, nền trong suốt (PNG, JPG hoặc WebP; tối đa 3 MB). Logo sẽ xuất hiện cạnh tên Tìm Tin Tức, favicon vuông 192 × 192 px được tự tạo khi lưu. Ảnh được lưu bền vững trong Cloudflare R2.</p>
+        <form id="siteBrandingForm" class="form-grid" enctype="multipart/form-data">
+          <label class="span-2">Chọn logo<input id="siteLogoFile" name="logo" type="file" accept="image/png,image/jpeg,image/webp"></label>
+          <div class="site-branding-preview-grid span-2">
+            <div class="site-branding-preview-card"><span class="muted small-text">Logo trên website</span><div class="site-branding-logo-preview-wrap"><img id="siteLogoPreview" src="/static/site-logo.png" alt="Xem trước logo website"></div></div>
+            <div class="site-branding-preview-card"><span class="muted small-text">Favicon trên tab / tìm kiếm</span><div class="site-branding-favicon-preview-wrap"><img id="siteFaviconPreview" src="/static/favicon.png" alt="Xem trước favicon"></div></div>
+          </div>
+          <label class="check-label span-2"><input id="clearSiteLogo" name="clear_logo" type="checkbox"> Bỏ logo tùy chỉnh, quay về logo 3T mặc định</label>
+          <div class="form-actions"><button class="btn primary" id="saveSiteBrandingBtn" type="submit">Lưu logo & cập nhật favicon</button><span id="siteBrandingStatus" class="muted small-text" role="status" aria-live="polite"></span></div>
+        </form>
+      </div>
+    </section>
     <section id="page-analytics" class="page">
       <div class="section-intro"><div><h2>Google Analytics</h2><p class="muted">Cấu hình Google Analytics 4 để theo dõi lượt truy cập trang tin tức công khai.</p></div></div>
       <div class="panel form-panel">
@@ -79,7 +97,7 @@
       </div>
       <div class="panel"><div class="panel-head"><div><h3>Phạm vi theo dõi</h3><p class="muted">Đo lường lượt xem trên trang tin tức công khai và trang danh sách theo dõi. Khu vực quản trị không được gắn mã theo dõi này. Dữ liệu sẽ xuất hiện trong báo cáo GA4 sau khi Google nhận sự kiện; có thể mất một khoảng thời gian để hiển thị trong báo cáo chuẩn.</p></div></div></div>
     </section>
-    <footer class="footer">Doraemon Mini Lakehouse <span>·</span> News Radar 0.7.45 <span>·</span> Data stays in your configured PostgreSQL</footer>
+    <footer class="footer">Tìm Tin Tức <span>·</span> Quản trị Lakehouse 0.7.55 <span>·</span> Dữ liệu lưu trong PostgreSQL đã cấu hình</footer>
   </main>
 </div>
 <div id="busyOverlay" class="busy-overlay hidden"><div class="spinner"></div><span id="busyText">Đang xử lý...</span></div>
@@ -98,6 +116,7 @@
 <dialog id="paymentProofDialog" class="payment-proof-dialog">
   <div class="proof-dialog-inner"><div class="dialog-header"><div><p class="eyebrow">PAYMENT REVIEW</p><h2 id="paymentProofTitle">Bằng chứng thanh toán</h2><p class="muted small-text">Ảnh bằng chứng được lưu trong Cloudflare R2 riêng tư và chỉ Admin đã đăng nhập mới có quyền xem.</p></div><button type="button" id="closePaymentProofDialog" class="icon-btn" aria-label="Đóng">×</button></div><div id="paymentProofError" class="error-text"></div><img id="paymentProofImage" alt="Bằng chứng thanh toán" /></div>
 </dialog>
-<script src="/static/app.js?v=0.7.45"></script>
+<script src="/static/app.js?v=0.7.55"></script>
+<script src="/static/branding.js?v=0.7.55"></script>
 </body>
 </html>

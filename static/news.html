@@ -4,20 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
-  <meta name="app-version" content="0.7.54">
-  <meta name="description" content="Tìm Tin Tức by DoraemonSoft — tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
-  <link rel="icon"
-      type="image/png"
-      sizes="48x48"
-      href="/static/favicon.png">
-  <title>Tìm Tin Tức</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.54">
+  <link id="siteFavicon" rel="icon" type="image/x-icon" href="/favicon.ico?v=0.7.55">
+  <link id="siteAppleTouchIcon" rel="apple-touch-icon" href="/static/favicon.png?v=0.7.55">
+  <meta name="app-version" content="0.7.55">
+  <meta name="description" content="Tìm Tin Tức — tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
+  <title>Tìm Tin Tức | timtintuc.com</title>
+  <link rel="stylesheet" href="/static/news.css?v=0.7.55">
 </head>
 <body>
   <header class="site-header">
     <a class="brand" href="/news" aria-label="Tìm Tin Tức - trang chủ">
-      <span class="brand-mark">3T</span>
-      <span class="brand-copy"><strong>Tìm Tin Tức</strong><small>By DoraemonSoft</small></span>
+      <img class="site-brand-image" data-site-logo src="/static/site-logo.png" alt="Logo Tìm Tin Tức">
+      <span class="brand-copy" data-brand-copy><strong>Tìm Tin Tức</strong><small>timtintuc.com</small></span>
     </a>
     <nav class="header-nav" aria-label="Điều hướng chính">
       <a href="#trending">Tin nổi bật</a>
@@ -36,7 +34,7 @@
     <div class="auth-backdrop" data-auth-close="true"></div>
     <section class="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="authTitle">
       <button class="auth-close" type="button" data-auth-close="true" aria-label="Đóng">×</button>
-      <p class="eyebrow">NEWS RADAR ACCOUNT</p>
+      <p class="eyebrow">TÀI KHOẢN TÌM TIN TỨC</p>
       <h2 id="authTitle">Đăng nhập</h2>
       <p class="auth-description" id="authDescription">Đăng nhập để lưu các topic và entity bạn muốn theo dõi.</p>
       <form id="authForm">
@@ -56,7 +54,7 @@
     <div class="auth-backdrop" data-pro-close="true"></div>
     <section class="auth-dialog pro-upgrade-dialog" role="dialog" aria-modal="true" aria-labelledby="proUpgradeTitle">
       <button class="auth-close" type="button" data-pro-close="true" aria-label="Đóng">×</button>
-      <p class="eyebrow">NEWS RADAR PRO</p>
+      <p class="eyebrow">TÌM TIN TỨC PRO</p>
       <h2 id="proUpgradeTitle">Nâng cấp gói Pro để theo dõi tin tức</h2>
       <p class="auth-description">Vui lòng nâng cấp lên gói Pro để theo dõi tin tức và nhận thông báo tin mới qua Telegram!</p>
       <button class="auth-submit" id="proUpgradeOpenPlan" type="button">Xem thông tin gói Pro</button>
@@ -224,7 +222,7 @@
     </div>
 
     <footer class="site-footer">
-      <div class="footer-brand"><span class="brand-mark small">3T</span><div><strong>Tìm Tin Tức</strong><small>By DoraemonSoft</small></div></div>
+      <div class="footer-brand"><img class="site-brand-image small" data-site-logo src="/static/site-logo.png" alt="Logo Tìm Tin Tức"><div data-brand-copy><strong>Tìm Tin Tức</strong><small>timtintuc.com</small></div></div>
       <p>Tìm Tin Tức hiển thị tiêu đề, đoạn trích ngắn, nguồn và liên kết đến bài gốc. Nội dung thuộc quyền của nhà xuất bản tương ứng. Vui lòng đọc bài đầy đủ tại website nguồn.</p>
       <a href="/admin" class="footer-admin">Trang quản trị ↗</a>
     </footer>
@@ -246,7 +244,8 @@
     </section>
   </div>
 
-  <script src="/static/analytics.js?v=0.7.54" defer></script>
-  <script src="/static/news.js?v=0.7.54" defer></script>
+  <script src="/static/analytics.js?v=0.7.55" defer></script>
+  <script src="/static/branding.js?v=0.7.55" defer></script>
+  <script src="/static/news.js?v=0.7.55" defer></script>
 </body>
 </html>

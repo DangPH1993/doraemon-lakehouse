@@ -546,3 +546,36 @@ body{background:#fff;color:#202124;font-size:14px}
 @media(max-width:520px){.timeline-share-dialog{padding:26px 18px}.timeline-share-modal-actions{align-items:stretch;flex-direction:column}.timeline-share-modal-actions .auth-button,.timeline-share-modal-actions .auth-submit{width:100%}}
 
 #timeline{scroll-margin-top:82px}
+
+/* v0.7.55 — editorial typography inspired by Vietnamese digital newspapers. */
+:root{font-family:Arial,Helvetica,sans-serif}
+body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
+.site-header{gap:24px}
+.brand-copy strong,.footer-brand strong{font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:700;letter-spacing:.15px;text-transform:none;color:#202124}
+.brand-copy small,.footer-brand small{font-family:Arial,Helvetica,sans-serif;font-size:12px;letter-spacing:0;color:#70757a}
+.header-nav a,.admin-link{font-size:13px}
+.search-eyebrow{font-family:Arial,Helvetica,sans-serif;font-size:17px;font-weight:700;letter-spacing:0;color:#202124}
+.search-home h1{font-family:Arial,Helvetica,sans-serif;font-size:clamp(30px,3.8vw,42px);font-weight:700;line-height:1.2;letter-spacing:-.6px;color:#202124}
+.search-intro{font-size:16px;line-height:1.65;max-width:660px;color:#5f6368}
+.section-heading h2{font-family:Arial,Helvetica,sans-serif;font-size:27px;line-height:1.28;font-weight:700;letter-spacing:-.25px;color:#202124}
+.section-subtitle{font-size:14px;line-height:1.65;color:#5f6368}
+.eyebrow{font-family:Arial,Helvetica,sans-serif;font-size:11px;letter-spacing:1.1px;font-weight:700}
+.topic-card h3{font-family:Arial,Helvetica,sans-serif;font-size:17px;line-height:1.45;font-weight:700;letter-spacing:0;color:#202124}
+.topic-category{font-size:11px;letter-spacing:.35px;text-transform:none}
+.topic-metric,.topic-open{font-size:12px}
+.radar-row h3,.article-row .radar-row h3,.article-row h3{font-family:Arial,Helvetica,sans-serif;font-size:18px;line-height:1.45;font-weight:700;letter-spacing:0;color:#202124;margin-top:2px}
+.radar-row-meta,.article-row .radar-row-meta,.article-meta{font-size:12px;line-height:1.55;gap:8px;color:#70757a}
+.radar-row-snippet,.article-snippet,.article-row .article-snippet{font-size:14px;line-height:1.65;color:#454545;max-width:800px}
+.source-chip{font-size:12px;font-weight:700}
+.article-title{font-family:Arial,Helvetica,sans-serif;font-size:18px;line-height:1.45;font-weight:700;letter-spacing:0;color:#202124}
+.article-tag{font-size:11px}
+.timeline-time{font-size:12px;line-height:1.6;color:#5f6368}
+.timeline-card h3{font-family:Arial,Helvetica,sans-serif;font-size:17px;line-height:1.45;font-weight:700;letter-spacing:0;color:#202124}
+.timeline-meta{font-size:12px;line-height:1.5;color:#70757a}
+.timeline-card p{font-size:14px;line-height:1.65;color:#454545}
+.timeline-card .entity-list{font-size:12px;color:#5f6368;line-height:1.55}
+.timeline-selected{font-size:12px;line-height:1.5}
+.pagination-row,.pagination-row .pagination-summary{font-size:12px}
+.timeline-section{background:#fbf8ef;border-color:#eee8d9}
+.timeline-card{background:#fff;border-color:#e7e7e7;border-radius:4px}
+@media(max-width:640px){.search-home h1{font-size:30px;letter-spacing:-.35px}.search-intro{font-size:14px}.section-heading h2{font-size:23px}.radar-row h3,.article-row .radar-row h3,.article-row h3{font-size:16px;line-height:1.45}.radar-row-snippet,.article-snippet,.article-row .article-snippet{font-size:13px;line-height:1.6}.timeline-card h3{font-size:16px}.timeline-card p{font-size:13px}.timeline-time{font-size:11px}.timeline-meta{font-size:11px}.brand-copy strong,.footer-brand strong{font-size:13px}.brand-copy small,.footer-brand small{font-size:10px}.site-brand-image.wordmark{width:clamp(115px,36vw,150px);height:36px}}
