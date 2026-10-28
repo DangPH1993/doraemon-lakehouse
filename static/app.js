@@ -135,8 +135,8 @@
     const status=$('#siteBrandingStatus');
     try{
       const data=await api('/api/admin/site-branding');
-      $('#siteLogoPreview').src=data.logo_url||'/static/site-logo.png?v=0.7.57';
-      $('#siteFaviconPreview').src=data.favicon_url||'/static/favicon.png?v=0.7.57';
+      $('#siteLogoPreview').src=data.logo_url||'/static/site-logo.png?v=0.7.59';
+      $('#siteFaviconPreview').src=data.favicon_url||'/static/favicon.png?v=0.7.59';
       $('#siteBrandingStatus').textContent=data.is_custom?'Đang dùng logo tùy chỉnh.':'Đang dùng logo 3T mặc định.';
       $('#clearSiteLogo').checked=false;
       $('#siteLogoFile').value='';

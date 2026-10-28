@@ -14,7 +14,8 @@
   const initialToday = todayInVietnam();
   const state = {
     period: 'day', selectedTimeline: null, timelinePage: 1, articlePage: 1, searchPage: 1,
-    articlePageSize: 20, searchPageSize: 20, timelinePageSize: 20, searchQuery: '', fieldCategory: '',
+    articlePageSize: 20, articleBatchSize: 8, articleBatchIndex: 0, articleHasNextPage: null, searchPageSize: 20, timelinePageSize: 20, searchQuery: '', fieldCategory: '',
+    articleHasMore: false, articleLoading: false, articleVisibleCount: 0, articleRequestSeq: 0, articleLoadError: '',
     dateFrom: initialToday, dateTo: initialToday,
     user: null, savedTimelines: [], picked: new Set(), followMeta: new Map(),
     pendingFollow: null, followSaving: false, authMode: 'login', telegram: null, planInfo: null, openPlanAfterAuth: false, passwordResetToken: null, paymentProofSubmitting: false, proPurchaseSelected: false
@@ -401,16 +402,92 @@
     if (!items.length) { setMessage(target, emptyTitle, emptyDescription); return; }
     $(target).innerHTML = items.map(item => articleRowHTML(item, feedMode)).join('');
   }
-  async function loadArticles(page = 1) {
-    state.articlePage = page;
-    $('#dailyArticles').innerHTML = '<div class="loading-card">Đang tải bài báo…</div>';
-    $('#articlePagination').innerHTML = '';
-    const params = new URLSearchParams({page:String(page), page_size:String(state.articlePageSize)});
+  function articleSkeletonHTML(count = 5) {
+    return Array.from({length: count}, () => `<article class="article-skeleton" aria-hidden="true"><span class="article-skeleton-meta"></span><span class="article-skeleton-title"></span><span class="article-skeleton-title short"></span><span class="article-skeleton-summary"></span></article>`).join('');
+  }
+  let articleLoadObserver = null;
+  function observeArticleLoadSentinel() {
+    const sentinel = $('#articleLoadSentinel');
+    if (articleLoadObserver) articleLoadObserver.disconnect();
+    if (!sentinel || !state.articleHasMore || !('IntersectionObserver' in window)) return;
+    if (!articleLoadObserver) {
+      articleLoadObserver = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) loadArticles(state.articlePage, true, state.articleBatchIndex + 1);
+      }, {rootMargin: '420px 0px'});
+    }
+    articleLoadObserver.observe(sentinel);
+  }
+  function updateArticleLoadMoreUI() {
+    const container = $('#articlePagination');
+    if (!container) return;
+    const page = Math.max(1, Number(state.articlePage || 1));
+    const pageSize = state.articlePageSize;
+    const start = state.articleVisibleCount ? (page - 1) * pageSize + 1 : 0;
+    const end = state.articleVisibleCount ? (page - 1) * pageSize + state.articleVisibleCount : 0;
+    const hasNextPage = state.articleHasNextPage === true;
+    const canMoveNext = !state.articleLoading && !state.articleHasMore && hasNextPage;
+    let progressiveControls = '';
+    if (state.articleHasMore) {
+      const buttonLabel = state.articleLoading ? 'Đang tải thêm…' : (state.articleLoadError ? 'Thử tải lại ↻' : `Tải tiếp ${Math.min(state.articleBatchSize, pageSize - state.articleVisibleCount)} tin ↓`);
+      const status = state.articleLoading
+        ? `Đang tải trang ${page}…`
+        : (state.articleLoadError ? `Chưa tải được phần tiếp theo: ${esc(state.articleLoadError)}` : `Trang ${page}: đã hiển thị ${num(state.articleVisibleCount)}/${num(pageSize)} bài`);
+      progressiveControls = `<div class="article-load-more-controls"><span class="${state.articleLoadError ? 'article-load-error' : ''}" role="status">${status}</span><button type="button" id="loadMoreArticlesButton" class="article-load-more-button" ${state.articleLoading ? 'disabled' : ''}>${buttonLabel}</button></div><div id="articleLoadSentinel" aria-hidden="true"></div>`;
+      if (state.articleLoading || state.articleLoadError) { if (articleLoadObserver) articleLoadObserver.disconnect(); }
+    } else {
+      if (articleLoadObserver) articleLoadObserver.disconnect();
+      if (state.articleVisibleCount) {
+        progressiveControls = `<div class="article-load-more-controls article-load-complete"><span role="status">Trang ${page}: đã tải ${num(state.articleVisibleCount)} bài.</span></div>`;
+      }
+    }
+    const firstPageButton = Math.max(1, page - 2);
+    const pageNumbers = [];
+    for (let n = firstPageButton; n < page; n++) pageNumbers.push(n);
+    pageNumbers.push(page);
+    if (canMoveNext) pageNumbers.push(page + 1);
+    const numberButtons = pageNumbers.map(n => n === page
+      ? `<button type="button" class="article-page-number active" aria-current="page" disabled>${n}</button>`
+      : `<button type="button" class="article-page-number" data-pager="articles" data-page="${n}" aria-label="Đến trang ${n}">${n}</button>`).join('');
+    const rangeLabel = state.articleVisibleCount
+      ? `Hiển thị ${num(start)}–${num(end)} · Trang ${num(page)}`
+      : `Trang ${num(page)}`;
+    const nextLabel = state.articleLoading ? 'Đang tải…' : 'Trang sau →';
+    const pagination = `<div class="article-page-navigation"><span class="article-page-summary">${rangeLabel}${state.articleHasMore ? ` · đang tải dần trong ${num(pageSize)} bài/trang` : ''}</span><div class="pagination-actions"><button type="button" data-pager="articles" data-dir="prev" ${page <= 1 || state.articleLoading ? 'disabled' : ''}>← Trang trước</button><div class="article-page-numbers" aria-label="Chọn trang">${numberButtons}</div><button type="button" data-pager="articles" data-dir="next" ${canMoveNext ? '' : 'disabled'}>${nextLabel}</button></div></div>`;
+    container.innerHTML = `<div class="article-pagination-stack">${progressiveControls}${pagination}</div>`;
+    if (state.articleHasMore && !state.articleLoading && !state.articleLoadError) observeArticleLoadSentinel();
+    else if (articleLoadObserver) articleLoadObserver.disconnect();
+  }
+  async function loadArticles(page = 1, append = false, requestedBatch = null) {
+    if (append && (state.articleLoading || !state.articleHasMore)) return;
+    const requestId = ++state.articleRequestSeq;
+    const targetPage = Math.max(1, Number(page) || 1);
+    const batchIndex = append ? Math.max(0, Number(requestedBatch ?? (state.articleBatchIndex + 1)) || 0) : 0;
+    state.articleLoading = true;
+    state.articleLoadError = '';
+    if (!append) {
+      state.articlePage = targetPage;
+      state.articleBatchIndex = 0;
+      state.articleHasMore = false;
+      state.articleHasNextPage = null;
+      state.articleVisibleCount = 0;
+      if (articleLoadObserver) articleLoadObserver.disconnect();
+      $('#dailyArticles').setAttribute('aria-busy', 'true');
+      $('#dailyArticles').innerHTML = articleSkeletonHTML(5);
+      $('#articlePagination').innerHTML = '';
+    } else {
+      const button = $('#loadMoreArticlesButton');
+      if (button) { button.disabled = true; button.textContent = 'Đang tải thêm…'; }
+    }
+    const params = new URLSearchParams({
+      page:String(targetPage), page_size:String(state.articlePageSize),
+      batch:String(batchIndex), batch_size:String(state.articleBatchSize), progressive:'true'
+    });
     if (state.fieldCategory) params.set('field_category', state.fieldCategory);
     if (state.dateFrom) params.set('date_from', state.dateFrom);
     if (state.dateTo) params.set('date_to', state.dateTo);
     try {
       const data = await getJSON(`/api/public/news/articles?${params.toString()}`);
+      if (requestId !== state.articleRequestSeq) return;
       state.dateFrom = data.date_from || state.dateFrom;
       state.dateTo = data.date_to || state.dateTo;
       $('#articleDateFrom').value = state.dateFrom;
@@ -418,13 +495,40 @@
       const fromLabel = formatDateInput(state.dateFrom);
       const toLabel = formatDateInput(state.dateTo);
       const rangeDescription = fromLabel === toLabel ? fromLabel : `${fromLabel} đến ${toLabel}`;
-      renderArticleList('#dailyArticles', data.items || [], false, 'Chưa có bài báo trong khoảng ngày đã chọn', `Không có bài nào từ ${fromLabel} đến ${toLabel}, theo giờ Việt Nam.`);
-      renderPagination('#articlePagination', data.pagination, 'articles');
-      $('#articleDateLabel').textContent = `${num(data.pagination.total)} bài từ ${rangeDescription}, theo giờ Việt Nam.`;
+      const items = data.items || [];
+      state.articlePage = Number(data.pagination?.page || targetPage);
+      state.articleBatchIndex = batchIndex;
+      state.articleHasMore = Boolean(data.has_more) && items.length > 0;
+      if (data.has_next_page !== null && data.has_next_page !== undefined) {
+        state.articleHasNextPage = Boolean(data.has_next_page);
+      } else if (!state.articleHasMore) {
+        state.articleHasNextPage = false;
+      }
+      state.articleVisibleCount += items.length;
+      if (append) {
+        if (items.length) $('#dailyArticles').insertAdjacentHTML('beforeend', items.map(item => articleRowHTML(item, false)).join(''));
+        else if (!state.articleVisibleCount) renderArticleList('#dailyArticles', items, false, 'Chưa có bài báo trong khoảng ngày đã chọn', `Không có bài nào từ ${fromLabel} đến ${toLabel}, theo giờ Việt Nam.`);
+      } else {
+        renderArticleList('#dailyArticles', items, false, 'Chưa có bài báo trong khoảng ngày đã chọn', `Không có bài nào từ ${fromLabel} đến ${toLabel}, theo giờ Việt Nam.`);
+      }
+      $('#dailyArticles').setAttribute('aria-busy', 'false');
+      $('#articleDateLabel').textContent = `Trang ${num(state.articlePage)} · ${num(state.articleVisibleCount)} bài đã tải từ ${rangeDescription}${state.articleHasMore ? ' · Cuộn xuống để tải phần còn lại của trang' : ' · Đã hoàn tất trang này'}, theo giờ Việt Nam.`;
       setFeedback('#articleDateFilterFeedback', '');
       syncFollowButtons();
     } catch (error) {
-      setMessage('#dailyArticles', 'Không tải được bài báo', error.message, true);
+      if (requestId !== state.articleRequestSeq) return;
+      if (append && state.articleVisibleCount) {
+        state.articleLoadError = error.message;
+        state.articleHasMore = true;
+      } else {
+        setMessage('#dailyArticles', 'Không tải được bài báo', error.message, true);
+      }
+    } finally {
+      if (requestId === state.articleRequestSeq) {
+        state.articleLoading = false;
+        $('#dailyArticles').setAttribute('aria-busy', 'false');
+        updateArticleLoadMoreUI();
+      }
     }
   }
   async function loadSearchResults(page = 1) {
@@ -882,6 +986,7 @@
       document.querySelectorAll('.period-btn').forEach(btn => { const active = btn.dataset.period === state.period; btn.classList.toggle('active', active); btn.setAttribute('aria-selected', String(active)); });
       await loadHotTopics(); return;
     }
+    if (event.target.closest('#loadMoreArticlesButton')) { await loadArticles(state.articlePage, true, state.articleBatchIndex + 1); return; }
     if (event.target.closest('[data-timeline-share-close]')) { closeTimelineShareDialog(); return; }
     if (event.target.closest('#shareTimelineButton')) { openTimelineShareDialog(); return; }
     if (event.target.closest('#copyTimelineShareButton')) { await copyTimelineShareURL(); return; }
@@ -898,7 +1003,7 @@
     const pager = event.target.closest('[data-pager]');
     if (pager && !pager.disabled) {
       const dir = pager.dataset.dir === 'next' ? 1 : -1;
-      if (pager.dataset.pager === 'articles') await loadArticles(Math.max(1, state.articlePage + dir));
+      if (pager.dataset.pager === 'articles') await loadArticles(Number(pager.dataset.page) || Math.max(1, state.articlePage + dir));
       else if (pager.dataset.pager === 'search') await loadSearchResults(Math.max(1, state.searchPage + dir));
       else if (pager.dataset.pager === 'timeline' && state.selectedTimeline) await loadTimeline(state.selectedTimeline.type, state.selectedTimeline.id, Math.max(1, state.timelinePage + dir));
     }

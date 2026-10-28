@@ -1,7 +1,7 @@
-/* v0.7.57: apply the admin-managed site logo and favicon across public and admin pages. */
+/* v0.7.59: apply the admin-managed site logo and favicon across public and admin pages. */
 (() => {
-  const FALLBACK_LOGO = '/static/site-logo.png?v=0.7.57';
-  const FALLBACK_FAVICON = '/static/favicon.png?v=0.7.57';
+  const FALLBACK_LOGO = '/static/site-logo.png?v=0.7.59';
+  const FALLBACK_FAVICON = '/static/favicon.png?v=0.7.59';
   function apply(cfg) {
     if (!cfg) return;
     const logoUrl = cfg.logo_url || FALLBACK_LOGO;
