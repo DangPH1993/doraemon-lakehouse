@@ -28,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.55',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.56',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -253,9 +253,9 @@ def _get_site_branding_state() -> dict:
     favicon_key = (values.get('site_favicon_r2_key') or {}).get('setting_value') or ''
     favicon_ico_key = (values.get('site_favicon_ico_r2_key') or {}).get('setting_value') or ''
     mode = (values.get('site_logo_mode') or {}).get('setting_value') or 'icon'
-    version = (values.get('site_branding_version') or {}).get('setting_value') or 'default-0.7.55'
-    logo_url = f'/api/public/site-logo?v={version}' if logo_key else '/static/site-logo.png?v=0.7.55'
-    favicon_url = f'/api/public/site-favicon?v={version}' if favicon_key else '/static/favicon.png?v=0.7.55'
+    version = (values.get('site_branding_version') or {}).get('setting_value') or 'default-0.7.56'
+    logo_url = f'/api/public/site-logo?v={version}' if logo_key else '/static/site-logo.png?v=0.7.56'
+    favicon_url = f'/api/public/site-favicon?v={version}' if favicon_key else '/static/favicon.png?v=0.7.56'
     return {
         'logo_url': logo_url,
         'favicon_url': favicon_url,
@@ -440,8 +440,8 @@ def get_public_site_branding(response: Response):
     except Exception:
         log.warning('Public site branding settings unavailable; using bundled fallback.', exc_info=True)
         state = {
-            'logo_url': '/static/site-logo.png?v=0.7.55',
-            'favicon_url': '/static/favicon.png?v=0.7.55',
+            'logo_url': '/static/site-logo.png?v=0.7.56',
+            'favicon_url': '/static/favicon.png?v=0.7.56',
             'logo_mode': 'icon', 'is_custom': False, 'updated_at': None,
         }
     return _public_site_branding_payload(state)
