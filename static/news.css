@@ -547,7 +547,7 @@ body{background:#fff;color:#202124;font-size:14px}
 
 #timeline{scroll-margin-top:82px}
 
-/* v0.7.59 — editorial typography inspired by Vietnamese digital newspapers. */
+/* v0.7.58 — editorial typography inspired by Vietnamese digital newspapers. */
 :root{font-family:Arial,Helvetica,sans-serif}
 body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 .site-header{gap:24px}
@@ -581,13 +581,13 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 @media(max-width:640px){.search-home h1{font-size:30px;letter-spacing:-.35px}.search-intro{font-size:14px}.section-heading h2{font-size:23px}.radar-row h3,.article-row .radar-row h3,.article-row h3{font-size:16px;line-height:1.45}.radar-row-snippet,.article-snippet,.article-row .article-snippet{font-size:13px;line-height:1.6}.timeline-card h3{font-size:16px}.timeline-card p{font-size:13px}.timeline-time{font-size:11px}.timeline-meta{font-size:11px}.brand-copy strong,.footer-brand strong{font-size:13px}.brand-copy small,.footer-brand small{font-size:10px}.site-brand-image.wordmark{width:clamp(115px,36vw,150px);height:36px}}
 
 
-/* v0.7.59: constrain site logo on public pages; image dimensions must never control header layout. */
+/* v0.7.58: constrain site logo on public pages; image dimensions must never control header layout. */
 .site-brand-image{display:block;width:42px;height:42px;max-width:42px;max-height:42px;min-width:0;min-height:0;object-fit:contain;object-position:center;flex:0 0 42px;background:transparent;border:0;border-radius:0}
 .site-brand-image.small{width:34px;height:34px;max-width:34px;max-height:34px;flex-basis:34px}
 .site-brand-image.wordmark{width:clamp(120px,15vw,180px);height:44px;max-width:min(180px,40vw);max-height:44px;flex:0 1 auto;object-fit:contain}
 @media(max-width:640px){.site-brand-image{width:36px;height:36px;max-width:36px;max-height:36px;flex-basis:36px}.site-brand-image.small{width:30px;height:30px;max-width:30px;max-height:30px;flex-basis:30px}.site-brand-image.wordmark{width:clamp(110px,34vw,150px);height:38px;max-width:44vw;max-height:38px}}
 
-/* v0.7.59: make Entity Cloud labels legible and stable for Vietnamese diacritics. */
+/* v0.7.58: make Entity Cloud labels legible and stable for Vietnamese diacritics. */
 .entity-bubble,
 .entity-bubble-name,
 .entity-bubble-count{
@@ -623,7 +623,7 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 
 
 
-/* v0.7.59 progressive article loading: show placeholders immediately and append small batches on scroll. */
+/* v0.7.58 progressive article loading: show placeholders immediately and append small batches on scroll. */
 .article-skeleton{display:flex;flex-direction:column;gap:10px;padding:18px 0;border-bottom:1px solid #eceff1;animation:article-skeleton-pulse 1.35s ease-in-out infinite}
 .article-skeleton-meta,.article-skeleton-title,.article-skeleton-summary{display:block;border-radius:5px;background:linear-gradient(90deg,#f1f3f4 25%,#e8eaed 38%,#f1f3f4 63%);background-size:400% 100%;animation:article-skeleton-shimmer 1.4s ease infinite}
 .article-skeleton-meta{width:150px;height:10px}.article-skeleton-title{width:min(76%,680px);height:18px}.article-skeleton-title.short{width:min(52%,460px)}.article-skeleton-summary{width:min(92%,800px);height:12px;margin-top:2px}
@@ -633,17 +633,3 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 #articleLoadSentinel{width:100%;height:1px;pointer-events:none}
 @keyframes article-skeleton-shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
 @media(prefers-reduced-motion:reduce){.article-skeleton-meta,.article-skeleton-title,.article-skeleton-summary{animation:none}}
-
-
-/* v0.7.59: combine progressive batches with conventional page navigation. */
-.article-pagination-stack{display:flex;flex-direction:column;gap:4px;width:100%;min-width:0}
-.article-page-navigation{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 0 3px;color:#70757a;font-size:12px}
-.article-page-summary{color:#70757a;font-size:12px;line-height:1.5}
-.article-page-navigation .pagination-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.article-page-numbers{display:flex;align-items:center;gap:4px}
-.article-page-navigation .pagination-actions>button,.article-page-number{min-width:34px;min-height:32px;padding:7px 11px;border:1px solid #dadce0;border-radius:18px;background:#fff;color:#3c4043;font-size:11px;font-weight:650;cursor:pointer}
-.article-page-number{min-width:32px;padding:6px 9px}
-.article-page-navigation .pagination-actions>button:not(:disabled):hover,.article-page-number:not(:disabled):hover{background:#f8faff;border-color:#aecbfa;color:#174ea6}
-.article-page-navigation .pagination-actions>button:disabled,.article-page-number:disabled{opacity:.5;cursor:not-allowed}
-.article-page-number.active{background:#1a73e8;border-color:#1a73e8;color:#fff;opacity:1;cursor:default}
-@media(max-width:640px){.article-page-navigation{align-items:flex-start;flex-direction:column;gap:8px}.article-page-navigation .pagination-actions{width:100%;justify-content:space-between}.article-page-navigation .pagination-actions>button{padding:7px 9px}}

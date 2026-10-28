@@ -59,7 +59,7 @@
 /* v0.7.25+: admin form for Pro plan QR configuration */
 .plan-config-panel{margin-bottom:16px}.plan-config-panel .form-grid{align-items:start}.plan-config-panel .form-grid>label{display:flex;flex-direction:column;gap:7px;font-size:11px;font-weight:750;color:#515c71}.plan-config-panel input[type=file]{font:inherit;font-size:11px;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff}.plan-config-panel textarea{font:inherit;font-size:12px;line-height:1.55}.plan-config-preview-wrap .inline-check{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--muted)}.plan-config-preview-wrap .small-text{margin:0}.plan-config-panel .form-actions{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 
-/* v0.7.59 site branding upload previews */
+/* v0.7.58 site branding upload previews */
 .site-branding-preview-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(125px,1fr);gap:12px}
 .site-branding-preview-card{display:flex;flex-direction:column;gap:9px;padding:14px;border:1px solid var(--line);border-radius:10px;background:#fbfcff;min-width:0}
 .site-branding-logo-preview-wrap{min-height:86px;display:flex;align-items:center;justify-content:flex-start;padding:10px;background:#fff;border:1px dashed #d8deea;border-radius:8px}
