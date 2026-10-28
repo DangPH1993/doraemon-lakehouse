@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl
+from io import BytesIO
 from datetime import date, timedelta, datetime, timezone
 from typing import Literal
 import re
@@ -27,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.54',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.55',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -232,6 +233,234 @@ def get_public_analytics_config(response: Response):
     if not re.fullmatch(r'G-[A-Z0-9]{4,20}', measurement_id):
         measurement_id = ''
     return {'measurement_id': measurement_id}
+
+
+# Site branding is persisted as private R2 objects, while only public image endpoints are exposed.
+_SITE_BRANDING_SETTING_KEYS = (
+    'site_logo_r2_key', 'site_favicon_r2_key', 'site_favicon_ico_r2_key', 'site_logo_mode', 'site_branding_version',
+)
+_SITE_LOGO_MAX_BYTES = 3 * 1024 * 1024
+_SITE_LOGO_TYPES = {'PNG', 'JPEG', 'WEBP'}
+
+
+def _get_site_branding_state() -> dict:
+    rows = fetch_all(
+        "SELECT setting_key, setting_value, updated_at FROM app_site_settings WHERE setting_key = ANY(%s)",
+        (list(_SITE_BRANDING_SETTING_KEYS),),
+    )
+    values = {row['setting_key']: row for row in rows}
+    logo_key = (values.get('site_logo_r2_key') or {}).get('setting_value') or ''
+    favicon_key = (values.get('site_favicon_r2_key') or {}).get('setting_value') or ''
+    favicon_ico_key = (values.get('site_favicon_ico_r2_key') or {}).get('setting_value') or ''
+    mode = (values.get('site_logo_mode') or {}).get('setting_value') or 'icon'
+    version = (values.get('site_branding_version') or {}).get('setting_value') or 'default-0.7.55'
+    logo_url = f'/api/public/site-logo?v={version}' if logo_key else '/static/site-logo.png?v=0.7.55'
+    favicon_url = f'/api/public/site-favicon?v={version}' if favicon_key else '/static/favicon.png?v=0.7.55'
+    return {
+        'logo_url': logo_url,
+        'favicon_url': favicon_url,
+        'logo_mode': mode if mode in {'icon', 'wordmark'} else 'icon',
+        'is_custom': bool(logo_key and favicon_key),
+        'updated_at': (values.get('site_branding_version') or {}).get('updated_at'),
+        '_logo_key': logo_key,
+        '_favicon_key': favicon_key,
+        '_favicon_ico_key': favicon_ico_key,
+    }
+
+
+def _public_site_branding_payload(state: dict) -> dict:
+    return {key: state[key] for key in ('logo_url', 'favicon_url', 'logo_mode', 'is_custom', 'updated_at')}
+
+
+def _prepare_site_logo(raw: bytes) -> tuple[bytes, bytes, bytes, str]:
+    """Validate a logo and return normalized PNG logo, square PNG favicon, and display mode."""
+    from PIL import Image
+    try:
+        with Image.open(BytesIO(raw)) as probe:
+            image_format = (probe.format or '').upper()
+            width, height = probe.size
+            if image_format not in _SITE_LOGO_TYPES:
+                raise ValueError('Chỉ chấp nhận ảnh PNG, JPG hoặc WebP.')
+            if width < 32 or height < 32:
+                raise ValueError('Ảnh logo tối thiểu phải có kích thước 32 × 32 px.')
+            if width > 6000 or height > 6000 or width * height > 20_000_000:
+                raise ValueError('Kích thước ảnh quá lớn; hãy dùng ảnh tối đa 6000 × 6000 px.')
+            probe.verify()
+        with Image.open(BytesIO(raw)) as source:
+            image = source.convert('RGBA')
+            image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+            logo_buffer = BytesIO()
+            image.save(logo_buffer, format='PNG', optimize=True)
+            # Keep the entire uploaded mark visible in the favicon; square padding
+            # avoids cropping the middle of wide wordmark logos.
+            favicon_art = image.copy()
+            favicon_art.thumbnail((160, 160), Image.Resampling.LANCZOS)
+            favicon = Image.new('RGBA', (192, 192), (255, 255, 255, 0))
+            favicon.alpha_composite(favicon_art, ((192 - favicon_art.width) // 2, (192 - favicon_art.height) // 2))
+            favicon_buffer = BytesIO()
+            favicon.save(favicon_buffer, format='PNG', optimize=True)
+            favicon_ico_buffer = BytesIO()
+            favicon.save(favicon_ico_buffer, format='ICO', sizes=[(16, 16), (32, 32), (48, 48)])
+        mode = 'wordmark' if width >= height * 1.65 else 'icon'
+        return logo_buffer.getvalue(), favicon_buffer.getvalue(), favicon_ico_buffer.getvalue(), mode
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError('Không đọc được ảnh logo; hãy chọn lại ảnh PNG, JPG hoặc WebP hợp lệ.') from exc
+
+
+def _save_site_branding_settings(logo_key: str, favicon_key: str, favicon_ico_key: str, mode: str, version: str) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        values = {
+            'site_logo_r2_key': logo_key,
+            'site_favicon_r2_key': favicon_key,
+            'site_favicon_ico_r2_key': favicon_ico_key,
+            'site_logo_mode': mode,
+            'site_branding_version': version,
+        }
+        for key, value in values.items():
+            cur.execute(
+                "INSERT INTO app_site_settings (setting_key, setting_value) VALUES (%s, %s) "
+                "ON CONFLICT (setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value, updated_at=now()",
+                (key, value),
+            )
+
+
+def _serve_site_branding_image(kind: str):
+    try:
+        state = _get_site_branding_state()
+    except Exception:
+        # Keep public pages available while optional settings storage is unavailable.
+        log.warning('Site branding settings unavailable; using bundled fallback %s.', kind, exc_info=True)
+        path = 'static/site-logo.png' if kind == 'logo' else ('static/favicon.png' if kind == 'favicon' else 'static/favicon.ico')
+        media_type = 'image/png' if kind in {'logo', 'favicon'} else 'image/x-icon'
+        return FileResponse(path, media_type=media_type, headers={'Cache-Control': 'public, max-age=3600'})
+    key = state['_logo_key'] if kind == 'logo' else (state['_favicon_key'] if kind == 'favicon' else state['_favicon_ico_key'])
+    fallback_path = 'static/site-logo.png' if kind == 'logo' else ('static/favicon.png' if kind == 'favicon' else 'static/favicon.ico')
+    media_type = 'image/png' if kind in {'logo', 'favicon'} else 'image/x-icon'
+    if not key:
+        return FileResponse(fallback_path, media_type=media_type, headers={'Cache-Control': 'public, max-age=86400'})
+    try:
+        content = get_r2_bytes(key, max_bytes=8 * 1024 * 1024)
+        return Response(content=content, media_type=media_type, headers={
+            # Keep the canonical root favicon refreshable after a logo change;
+            # versioned API image URLs can safely use immutable caching.
+            'Cache-Control': 'public, max-age=3600' if kind == 'ico' else 'public, max-age=31536000, immutable',
+            'X-Content-Type-Options': 'nosniff',
+        })
+    except Exception as exc:
+        log.exception('Unable to read custom site %s from R2', kind)
+        raise HTTPException(status_code=503, detail='Không tải được logo đã lưu; hãy kiểm tra cấu hình Cloudflare R2.') from exc
+
+
+@app.get('/api/admin/site-branding', dependencies=[Depends(require_admin)])
+def get_admin_site_branding():
+    try:
+        state = _get_site_branding_state()
+    except Exception as exc:
+        log.exception('Could not read site branding settings')
+        raise HTTPException(status_code=503, detail='Không đọc được cấu hình logo. Hãy kiểm tra migration 022 và bảng app_site_settings trong Neon.') from exc
+    return _public_site_branding_payload(state)
+
+
+@app.put('/api/admin/site-branding', dependencies=[Depends(require_admin)])
+async def update_admin_site_branding(
+    logo: UploadFile | None = File(default=None),
+    clear_logo: bool = Form(default=False),
+):
+    try:
+        current = _get_site_branding_state()
+    except Exception as exc:
+        log.exception('Could not load current site branding before update')
+        raise HTTPException(status_code=503, detail='Không đọc được cấu hình logo. Hãy kiểm tra bảng app_site_settings trong Neon.') from exc
+
+    if not clear_logo and logo is None:
+        return {**_public_site_branding_payload(current), 'message': 'Chưa có thay đổi logo.'}
+
+    if clear_logo:
+        version = secrets.token_hex(8)
+        try:
+            _save_site_branding_settings('', '', '', 'icon', version)
+        except Exception as exc:
+            log.exception('Unable to reset site branding settings')
+            raise HTTPException(status_code=503, detail='Không lưu được cấu hình logo mới.') from exc
+        for old_key in (current['_logo_key'], current['_favicon_key'], current['_favicon_ico_key']):
+            if old_key:
+                delete_r2_object(old_key)
+        state = _get_site_branding_state()
+        return {**_public_site_branding_payload(state), 'message': 'Đã chuyển về logo 3T mặc định và cập nhật favicon.'}
+
+    if logo is None:
+        raise HTTPException(status_code=400, detail='Vui lòng chọn một ảnh logo.')
+    if not r2_is_configured():
+        raise HTTPException(status_code=503, detail='Chưa cấu hình Cloudflare R2. Hãy thiết lập thông tin R2 trong Environment của Render để lưu logo bền vững.')
+    raw = await logo.read(_SITE_LOGO_MAX_BYTES + 1)
+    if not raw:
+        raise HTTPException(status_code=400, detail='File logo rỗng.')
+    if len(raw) > _SITE_LOGO_MAX_BYTES:
+        raise HTTPException(status_code=413, detail='Logo vượt quá 3 MB.')
+    try:
+        logo_png, favicon_png, favicon_ico, mode = _prepare_site_logo(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await logo.close()
+
+    version = secrets.token_hex(8)
+    logo_key = make_r2_key('branding', f'site-logo-{version}.png')
+    favicon_key = make_r2_key('branding', f'site-favicon-{version}.png')
+    favicon_ico_key = make_r2_key('branding', f'site-favicon-{version}.ico')
+    stored_keys = []
+    try:
+        put_r2_bytes(logo_key, logo_png, 'image/png')
+        stored_keys.append(logo_key)
+        put_r2_bytes(favicon_key, favicon_png, 'image/png')
+        stored_keys.append(favicon_key)
+        put_r2_bytes(favicon_ico_key, favicon_ico, 'image/x-icon')
+        stored_keys.append(favicon_ico_key)
+        _save_site_branding_settings(logo_key, favicon_key, favicon_ico_key, mode, version)
+    except Exception as exc:
+        for key in stored_keys:
+            delete_r2_object(key)
+        log.exception('Unable to save uploaded site branding assets')
+        raise HTTPException(status_code=503, detail='Không lưu được logo/favicon. Hãy kiểm tra kết nối Cloudflare R2 và PostgreSQL.') from exc
+
+    for old_key in (current['_logo_key'], current['_favicon_key'], current['_favicon_ico_key']):
+        if old_key and old_key not in stored_keys:
+            delete_r2_object(old_key)
+    state = _get_site_branding_state()
+    return {**_public_site_branding_payload(state), 'message': 'Đã lưu logo website và tạo favicon 192 × 192 px.'}
+
+
+@app.get('/api/public/site-branding')
+def get_public_site_branding(response: Response):
+    response.headers['Cache-Control'] = 'no-store'
+    try:
+        state = _get_site_branding_state()
+    except Exception:
+        log.warning('Public site branding settings unavailable; using bundled fallback.', exc_info=True)
+        state = {
+            'logo_url': '/static/site-logo.png?v=0.7.55',
+            'favicon_url': '/static/favicon.png?v=0.7.55',
+            'logo_mode': 'icon', 'is_custom': False, 'updated_at': None,
+        }
+    return _public_site_branding_payload(state)
+
+
+@app.get('/api/public/site-logo')
+def get_public_site_logo():
+    return _serve_site_branding_image('logo')
+
+
+@app.get('/api/public/site-favicon')
+def get_public_site_favicon():
+    return _serve_site_branding_image('favicon')
+
+
+@app.get('/favicon.ico', include_in_schema=False)
+def root_favicon():
+    # Browsers/crawlers that probe the conventional root favicon path get the same current brand icon.
+    return _serve_site_branding_image('ico')
 
 
 # End-user auth is separate from the existing administrator login.
