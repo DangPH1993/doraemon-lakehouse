@@ -265,10 +265,13 @@
     const id = articleMode ? Number(anchor.article_id) : (data.topic ? Number(data.topic.topic_id) : Number(data.entity.entity_id));
     const name = data.timeline_name || (data.topic ? data.topic.name : data.entity ? data.entity.canonical_name : anchor.title) || 'Timeline';
     state.selectedTimeline = {type, id, name};
+    state.timelinePage = Number(data.pagination?.page || state.timelinePage || 1);
     const modeText = data.mode === 'topic_id' ? 'Topic ID' : data.mode === 'entity_id' ? 'Entity ID' : 'Bài báo';
     $('#timelineSelectionLabel').textContent = `${modeText} · ${name}`;
     $('#timelineContainer').innerHTML = timelineItemsHTML(data.items || [], data.mode || type);
     renderPagination('#timelinePagination', data.pagination, 'timeline');
+    $('#shareTimelineButton').disabled = !(Number.isInteger(id) && id > 0 && ['topic', 'entity', 'article'].includes(type));
+    setFeedback('#timelineShareFeedback', '');
   }
   async function fetchTimelineData(type, id, page = 1, pageSize = 20) {
     if (type === 'article') return getJSON(`/api/public/news/articles/${encodeURIComponent(id)}/timeline?page=${page}&page_size=${pageSize}`);
@@ -276,7 +279,13 @@
     return getJSON(`/api/public/news/topics/${encodeURIComponent(id)}/timeline?page=${page}&page_size=${pageSize}`);
   }
   async function loadTimeline(type, id, page = 1, shouldScroll = true) {
-    state.timelinePage = page;
+    if (!['topic', 'entity', 'article'].includes(type) || !Number.isInteger(Number(id)) || Number(id) < 1) {
+      setMessage('#timelineContainer', 'Liên kết timeline không hợp lệ', 'Hãy kiểm tra lại loại timeline và mã timeline trong liên kết.', true);
+      return;
+    }
+    state.timelinePage = Math.max(1, Number(page) || 1);
+    $('#shareTimelineButton').disabled = true;
+    $('#timelineShareFeedback').textContent = '';
     $('#timelineContainer').innerHTML = '<div class="loading-card">Đang tải timeline…</div>';
     $('#timelinePagination').innerHTML = '';
     try {
@@ -285,6 +294,44 @@
       if (shouldScroll) $('#timeline').scrollIntoView({behavior:'smooth', block:'start'});
     } catch (error) {
       setMessage('#timelineContainer', 'Không tải được timeline', error.message, true);
+    }
+  }
+
+  function sharedTimelineFromURL() {
+    const params = new URLSearchParams(window.location.search);
+    const type = params.get('timeline_type');
+    const id = Number(params.get('timeline_id'));
+    const page = Number(params.get('timeline_page') || 1);
+    if (!['topic', 'entity', 'article'].includes(type) || !Number.isSafeInteger(id) || id < 1) return null;
+    return {type, id, page: Number.isSafeInteger(page) && page > 0 ? Math.min(page, 10000) : 1};
+  }
+  function buildTimelineShareURL() {
+    if (!state.selectedTimeline || !['topic', 'entity', 'article'].includes(state.selectedTimeline.type) || !Number.isSafeInteger(Number(state.selectedTimeline.id)) || Number(state.selectedTimeline.id) < 1) return null;
+    const url = new URL('/news', window.location.origin);
+    url.searchParams.set('timeline_type', state.selectedTimeline.type);
+    url.searchParams.set('timeline_id', String(state.selectedTimeline.id));
+    url.searchParams.set('timeline_page', String(Math.max(1, Number(state.timelinePage) || 1)));
+    return url.href;
+  }
+  async function copyTimelineShareURL() {
+    const shareURL = buildTimelineShareURL();
+    if (!shareURL) { setFeedback('#timelineShareFeedback', 'Hãy mở một timeline trước khi chia sẻ.'); return; }
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(shareURL);
+      } else {
+        const field = document.createElement('textarea');
+        field.value = shareURL; field.setAttribute('readonly', '');
+        field.style.position = 'fixed'; field.style.opacity = '0'; field.style.pointerEvents = 'none';
+        document.body.appendChild(field); field.select();
+        const copied = document.execCommand('copy'); field.remove();
+        if (!copied) throw new Error('Trình duyệt không cho phép sao chép tự động.');
+      }
+      setFeedback('#timelineShareFeedback', 'Đã sao chép link timeline. Gửi link này để người khác mở đúng timeline.', true);
+    } catch (error) {
+      // Prompt is a manual-copy fallback when clipboard permissions are denied.
+      window.prompt('Sao chép liên kết timeline này:', shareURL);
+      setFeedback('#timelineShareFeedback', 'Nếu liên kết chưa được sao chép, hãy sao chép từ hộp thoại vừa mở.');
     }
   }
 
@@ -816,6 +863,7 @@
       document.querySelectorAll('.period-btn').forEach(btn => { const active = btn.dataset.period === state.period; btn.classList.toggle('active', active); btn.setAttribute('aria-selected', String(active)); });
       await loadHotTopics(); return;
     }
+    if (event.target.closest('#shareTimelineButton')) { await copyTimelineShareURL(); return; }
     const articleTimelineAction = event.target.closest('[data-open-article-timeline]');
     if (articleTimelineAction) {
       const articleId = Number(articleTimelineAction.dataset.openArticleTimeline);
@@ -986,6 +1034,8 @@
     const jobs = [loadHotTopics(), loadEntityCloud(), loadArticles(1)];
     if (state.user) jobs.push(loadUserRadar());
     await Promise.all(jobs);
+    const sharedTimeline = sharedTimelineFromURL();
+    if (sharedTimeline) await loadTimeline(sharedTimeline.type, sharedTimeline.id, sharedTimeline.page, true);
     const resetToken = readPasswordResetToken();
     if (resetToken) {
       state.passwordResetToken = resetToken;

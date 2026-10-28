@@ -526,3 +526,7 @@ body{background:#fff;color:#202124;font-size:14px}
   .article-filter-tools .date-range-filter input[type="date"]{width:100%;min-width:0;max-width:none}
   .article-filter-tools .date-range-filter .date-filter-apply{grid-column:1/-1;justify-self:start;min-width:104px}
 }
+
+
+/* v0.7.51: shareable public timeline links. */
+.timeline-heading-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;max-width:54%}.timeline-share-button{flex-shrink:0}.timeline-share-button:disabled{opacity:.45;cursor:not-allowed;transform:none}.timeline-share-feedback{min-height:0;margin:8px 0 0;color:#1967d2;font-size:11px;line-height:1.5;overflow-wrap:anywhere}.timeline-share-feedback:empty{display:none}.timeline-section .section-heading{align-items:center}@media(max-width:640px){.timeline-heading-actions{max-width:100%;width:100%;justify-content:flex-start}.timeline-share-button{white-space:nowrap}.timeline-share-feedback{font-size:10px}}
