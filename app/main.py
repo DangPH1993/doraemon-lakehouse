@@ -28,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.57',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.59',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -253,9 +253,9 @@ def _get_site_branding_state() -> dict:
     favicon_key = (values.get('site_favicon_r2_key') or {}).get('setting_value') or ''
     favicon_ico_key = (values.get('site_favicon_ico_r2_key') or {}).get('setting_value') or ''
     mode = (values.get('site_logo_mode') or {}).get('setting_value') or 'icon'
-    version = (values.get('site_branding_version') or {}).get('setting_value') or 'default-0.7.57'
-    logo_url = f'/api/public/site-logo?v={version}' if logo_key else '/static/site-logo.png?v=0.7.57'
-    favicon_url = f'/api/public/site-favicon?v={version}' if favicon_key else '/static/favicon.png?v=0.7.57'
+    version = (values.get('site_branding_version') or {}).get('setting_value') or 'default-0.7.59'
+    logo_url = f'/api/public/site-logo?v={version}' if logo_key else '/static/site-logo.png?v=0.7.59'
+    favicon_url = f'/api/public/site-favicon?v={version}' if favicon_key else '/static/favicon.png?v=0.7.59'
     return {
         'logo_url': logo_url,
         'favicon_url': favicon_url,
@@ -440,8 +440,8 @@ def get_public_site_branding(response: Response):
     except Exception:
         log.warning('Public site branding settings unavailable; using bundled fallback.', exc_info=True)
         state = {
-            'logo_url': '/static/site-logo.png?v=0.7.57',
-            'favicon_url': '/static/favicon.png?v=0.7.57',
+            'logo_url': '/static/site-logo.png?v=0.7.59',
+            'favicon_url': '/static/favicon.png?v=0.7.59',
             'logo_mode': 'icon', 'is_custom': False, 'updated_at': None,
         }
     return _public_site_branding_payload(state)
@@ -1352,8 +1352,11 @@ def public_daily_articles(
     date_to: date | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=50),
+    progressive: bool = Query(default=False),
+    batch: int = Query(default=0, ge=0, le=100),
+    batch_size: int = Query(default=8, ge=1, le=20),
 ):
-    """List daily articles or search stored articles, optionally bounded by Vietnam-local publication dates."""
+    """List daily articles/search results; progressive mode avoids the expensive total-count query."""
     local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
     today = (local or {}).get('today')
     if today is None:
@@ -1460,10 +1463,28 @@ def public_daily_articles(
           )
         ) """
 
-    total_row = fetch_one(dedupe_cte + " SELECT count(*)::int AS total FROM deduped_candidates", vals)
-    total = int((total_row or {}).get('total', 0))
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = min(page, total_pages)
+    # Progressive requests treat page_size as the logical page size (20 by default)
+    # and return one small batch within that page. This keeps first paint fast while
+    # preserving real page navigation. Exact COUNT is kept only for legacy callers.
+    total = None
+    total_pages = None
+    batch_offset = 0
+    result_limit = page_size
+    query_offset = (page - 1) * page_size
+    if progressive:
+        batch_offset = batch * batch_size
+        if batch_offset >= page_size:
+            raise HTTPException(status_code=400, detail='Lô tin không hợp lệ cho trang này')
+        result_limit = min(batch_size, page_size - batch_offset)
+        query_offset += batch_offset
+        query_limit = result_limit + 1
+    else:
+        total_row = fetch_one(dedupe_cte + " SELECT count(*)::int AS total FROM deduped_candidates", vals)
+        total = int((total_row or {}).get('total', 0))
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        query_offset = (page - 1) * page_size
+        query_limit = page_size
     items = fetch_all(dedupe_cte + """SELECT a.article_id, a.title, a.url, a.image_url, a.author, a.language,
                               left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 320) AS snippet,
                               a.published_at, a.collected_at,
@@ -1491,19 +1512,39 @@ def public_daily_articles(
                        JOIN deduped_candidates dc ON dc.article_id=a.article_id
                        ORDER BY coalesce(a.published_at,a.collected_at) DESC, a.article_id DESC
                        LIMIT %s OFFSET %s""",
-                       vals + [page_size, (page - 1) * page_size])
+                       vals + [query_limit, query_offset])
+    if progressive:
+        has_extra = len(items) > result_limit
+        items = items[:result_limit]
+        page_has_more_batches = has_extra and (batch_offset + result_limit < page_size)
+        # A next page can be confirmed once the current logical page is complete.
+        # If this batch ended early, there are no more rows in the current page.
+        has_next_page = (has_extra if batch_offset + result_limit >= page_size else
+                         (False if not page_has_more_batches else None))
+        has_more = page_has_more_batches
+    else:
+        has_extra = False
+        has_more = page < (total_pages or 1)
+        has_next_page = has_more
     # Stored article_entities rows can be stale after earlier reconciliation runs. Never
     # expose an entity action/tag unless the entity is grounded in this article's title/summary.
     for item in items:
         item['entity_refs'] = filter_grounded_entity_references(
             item.get('title') or '', item.pop('_entity_grounding_summary', ''), item.get('entity_refs') or []
         )
+    pagination = ({'page': page, 'page_size': page_size, 'total': None,
+                   'total_pages': None, 'batch': batch, 'batch_size': batch_size,
+                   'start': (page - 1) * page_size + batch_offset + 1 if items else 0,
+                   'end': (page - 1) * page_size + batch_offset + len(items)}
+                  if progressive else pagination_meta(page, page_size, int(total or 0)))
     return {'date': today,
             'date_from': effective_date_from.isoformat() if effective_date_from else None,
             'date_to': effective_date_to.isoformat() if effective_date_to else None,
             'query': query or None, 'field_category': chosen_field or None,
             'field_categories': [*FIELD_CATEGORIES, 'Chưa phân loại'], 'items': items,
-            'pagination': pagination_meta(page, page_size, total)}
+            'has_more': has_more if progressive else None,
+            'has_next_page': has_next_page if progressive else None,
+            'pagination': pagination}
 
 
 @app.get('/api/user/feed')
