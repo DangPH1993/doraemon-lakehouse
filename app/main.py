@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl
+import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl, html as html_lib
 from io import BytesIO
 from datetime import date, timedelta, datetime, timezone
 from typing import Literal
@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import requests
 from fastapi import FastAPI, Depends, HTTPException, Query, Body, Request, Response, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from email.message import EmailMessage
@@ -28,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.58',description='Public root redirects to /news; admin UI is served at /admin. Brevo API email delivery and grounded article entity labels.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.60',description='SEO article pages with per-article URLs; public article cards open original publisher links while 3T permalinks retain server-rendered detail pages.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -164,6 +164,218 @@ def public_news_page():
 def public_standalone_timeline_page():
     # Dedicated share destination: fetches only the requested timeline, not the home news feed.
     return FileResponse('static/timeline.html', headers={'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'})
+
+# Public SEO surface: each article gets a stable, server-rendered URL.
+PUBLIC_SITE_URL = (settings.public_app_url or 'https://timtintuc.com').rstrip('/')
+if 'YOUR-NEWS-RADAR-DOMAIN' in PUBLIC_SITE_URL:
+    PUBLIC_SITE_URL = 'https://timtintuc.com'
+SITEMAP_PAGE_SIZE = 5000
+
+# Keep duplicate RSS records for provenance in Neon, but expose the best representative
+# of an exact headline to search crawlers. This mirrors the public feed's 72-hour policy.
+_SEO_CANONICAL_ARTICLE_FILTER = """a.is_excluded=false AND NOT EXISTS (
+    SELECT 1 FROM news_articles other
+    WHERE other.is_excluded=false
+      AND other.article_id<>a.article_id
+      AND other.headline_hash=a.headline_hash
+      AND coalesce(other.published_at,other.collected_at) >= coalesce(a.published_at,a.collected_at)-INTERVAL '72 hours'
+      AND coalesce(other.published_at,other.collected_at) <= coalesce(a.published_at,a.collected_at)+INTERVAL '72 hours'
+      AND (
+        coalesce(other.quality_score,0)>coalesce(a.quality_score,0)
+        OR (coalesce(other.quality_score,0)=coalesce(a.quality_score,0) AND other.image_url IS NOT NULL AND a.image_url IS NULL)
+        OR (coalesce(other.quality_score,0)=coalesce(a.quality_score,0) AND (other.image_url IS NOT NULL)=(a.image_url IS NOT NULL) AND length(coalesce(other.summary,''))>length(coalesce(a.summary,'')))
+        OR (coalesce(other.quality_score,0)=coalesce(a.quality_score,0) AND (other.image_url IS NOT NULL)=(a.image_url IS NOT NULL) AND length(coalesce(other.summary,''))=length(coalesce(a.summary,'')) AND coalesce(other.published_at,other.collected_at)>coalesce(a.published_at,a.collected_at))
+        OR (coalesce(other.quality_score,0)=coalesce(a.quality_score,0) AND (other.image_url IS NOT NULL)=(a.image_url IS NOT NULL) AND length(coalesce(other.summary,''))=length(coalesce(a.summary,'')) AND coalesce(other.published_at,other.collected_at)=coalesce(a.published_at,a.collected_at) AND other.article_id>a.article_id)
+      )
+)"""
+
+
+def _seo_article_path(article_id: int, title: str) -> str:
+    return f"/tin/{int(article_id)}/{slugify(title)}"
+
+
+def _seo_absolute_url(path: str) -> str:
+    return f"{PUBLIC_SITE_URL}{path if path.startswith('/') else '/' + path}"
+
+
+def _seo_html(value) -> str:
+    return html_lib.escape(str(value or ''), quote=True)
+
+
+def _seo_iso(value):
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, 'isoformat') else str(value)
+
+
+def _seo_json(value) -> str:
+    # Prevent untrusted RSS text from closing the JSON-LD script element.
+    return json.dumps(value, ensure_ascii=False, separators=(',', ':')).replace('<', r'\u003c').replace('>', r'\u003e').replace('&', r'\u0026')
+
+
+@app.get('/robots.txt', response_class=PlainTextResponse, include_in_schema=False)
+def public_robots_txt():
+    body = '\n'.join([
+        'User-agent: *',
+        'Allow: /',
+        'Disallow: /admin',
+        'Disallow: /api/',
+        f'Sitemap: {_seo_absolute_url("/sitemap.xml")}',
+        '',
+    ])
+    return PlainTextResponse(body, headers={'Cache-Control': 'public, max-age=3600'})
+
+
+@app.get('/sitemap.xml', response_class=Response, include_in_schema=False)
+def public_sitemap_index():
+    count_row = fetch_one(f"SELECT count(*)::int AS total FROM news_articles a WHERE {_SEO_CANONICAL_ARTICLE_FILTER}")
+    total = int((count_row or {}).get('total', 0))
+    page_count = max(1, (total + SITEMAP_PAGE_SIZE - 1) // SITEMAP_PAGE_SIZE)
+    sitemap_urls = ''.join(
+        '<sitemap><loc>' + _seo_html(_seo_absolute_url(f'/sitemap-articles-{page}.xml')) + '</loc></sitemap>'
+        for page in range(1, page_count + 1)
+    )
+    xml = '<?xml version="1.0" encoding="UTF-8"?>' + '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + sitemap_urls + '</sitemapindex>'
+    return Response(content=xml, media_type='application/xml; charset=utf-8', headers={'Cache-Control': 'public, max-age=3600'})
+
+
+@app.get('/sitemap-articles-{page}.xml', response_class=Response, include_in_schema=False)
+def public_article_sitemap(page: int):
+    if page < 1:
+        raise HTTPException(status_code=404, detail='Sitemap page not found')
+    count_row = fetch_one(f"SELECT count(*)::int AS total FROM news_articles a WHERE {_SEO_CANONICAL_ARTICLE_FILTER}")
+    total = int((count_row or {}).get('total', 0))
+    page_count = max(1, (total + SITEMAP_PAGE_SIZE - 1) // SITEMAP_PAGE_SIZE)
+    if page > page_count:
+        raise HTTPException(status_code=404, detail='Sitemap page not found')
+    rows = fetch_all(f"""SELECT a.article_id,a.title,a.updated_at,a.published_at,a.collected_at
+                         FROM news_articles a
+                         WHERE {_SEO_CANONICAL_ARTICLE_FILTER}
+                         ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
+                         LIMIT %s OFFSET %s""", (SITEMAP_PAGE_SIZE, (page - 1) * SITEMAP_PAGE_SIZE))
+    entries = []
+    for row in rows:
+        path = _seo_article_path(int(row['article_id']), row.get('title') or 'tin-tuc')
+        lastmod = _seo_iso(row.get('updated_at') or row.get('published_at') or row.get('collected_at'))
+        lastmod_xml = '<lastmod>' + _seo_html(lastmod) + '</lastmod>' if lastmod else ''
+        entries.append('<url><loc>' + _seo_html(_seo_absolute_url(path)) + '</loc>' + lastmod_xml + '</url>')
+    xml = '<?xml version="1.0" encoding="UTF-8"?>' + '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + ''.join(entries) + '</urlset>'
+    return Response(content=xml, media_type='application/xml; charset=utf-8', headers={'Cache-Control': 'public, max-age=3600'})
+
+
+@app.get('/tin/{article_id}/{slug}', response_class=HTMLResponse, include_in_schema=False)
+def public_article_page(article_id: int, slug: str):
+    article = fetch_one("""SELECT a.article_id,a.title,a.url,a.canonical_url,coalesce(nullif(a.summary,''),left(nullif(a.content_text,''),2400),'') AS summary,a.image_url,a.author,
+                                 a.published_at,a.collected_at,a.updated_at,
+                                 coalesce(a.field_category,'Tin tức') AS field_category,
+                                 s.name AS source_name
+                          FROM news_articles a
+                          JOIN data_sources s ON s.source_id=a.source_id
+                          WHERE a.article_id=%s AND a.is_excluded=false""", (article_id,))
+    if not article:
+        raise HTTPException(status_code=404, detail='Article not found')
+
+    title = str(article.get('title') or 'Tin tức')
+    canonical_path = _seo_article_path(article_id, title)
+    canonical_url = _seo_absolute_url(canonical_path)
+    if slug != slugify(title):
+        return RedirectResponse(url=canonical_path, status_code=301)
+
+    source_url = str(article.get('url') or '')
+    if not source_url.lower().startswith(('https://', 'http://')):
+        source_url = ''
+    image_url = str(article.get('image_url') or '')
+    if not image_url.lower().startswith(('https://', 'http://')):
+        image_url = ''
+
+    summary = ' '.join(str(article.get('summary') or '').split())[:4000]
+    source_name = str(article.get('source_name') or 'Nguồn báo chí')
+    if not summary:
+        summary = f'Tin được Tìm Tin Tức tổng hợp từ nguồn {source_name}. Mở bài gốc để xem thông tin chi tiết.'
+    description = summary[:300] if len(summary) > 300 else summary
+    published = article.get('published_at') or article.get('collected_at')
+    published_iso = _seo_iso(published)
+    modified_iso = _seo_iso(article.get('updated_at') or published)
+
+    topics = fetch_all("""SELECT t.topic_id,t.name
+                         FROM article_topics at JOIN topics t ON t.topic_id=at.topic_id
+                         WHERE at.article_id=%s AND t.status='active'
+                         ORDER BY t.name LIMIT 8""", (article_id,))
+    related = fetch_all("""SELECT * FROM (
+                             SELECT DISTINCT ON (a.article_id) a.article_id,a.title,a.summary,
+                                    a.published_at,a.collected_at,s.name AS source_name
+                             FROM article_topics own
+                             JOIN topics topic ON topic.topic_id=own.topic_id AND topic.status='active' AND topic.topic_type='event'
+                             JOIN article_topics other ON other.topic_id=topic.topic_id AND other.article_id<>own.article_id
+                             JOIN news_articles a ON a.article_id=other.article_id AND a.is_excluded=false
+                             JOIN data_sources s ON s.source_id=a.source_id
+                             WHERE own.article_id=%s
+                             ORDER BY a.article_id,coalesce(a.published_at,a.collected_at) DESC
+                         ) candidates
+                         ORDER BY coalesce(published_at,collected_at) DESC,article_id DESC LIMIT 5""", (article_id,))
+
+    topic_html_parts = []
+    for topic in topics:
+        topic_path = f'/timeline?type=topic&id={int(topic["topic_id"])}&page=1'
+        topic_html_parts.append('<a class="topic" href="' + _seo_html(_seo_absolute_url(topic_path)) + '">' + _seo_html(topic.get('name')) + '</a>')
+    topic_html = ''.join(topic_html_parts)
+    topic_block = '<nav class="topics" aria-label="Chủ đề liên quan">' + topic_html + '</nav>' if topic_html else ''
+
+    related_parts = []
+    for item in related:
+        related_path = _seo_article_path(int(item['article_id']), item.get('title') or 'tin-tuc')
+        related_date = _seo_iso(item.get('published_at') or item.get('collected_at')) or ''
+        related_parts.append('<li><a href="' + _seo_html(related_path) + '">' + _seo_html(item.get('title')) + '</a>'
+                             + '<small>' + _seo_html(item.get('source_name')) + ' · ' + _seo_html(related_date) + '</small></li>')
+    related_html = ''.join(related_parts) or '<li class="muted">Chưa có bài liên quan được gắn cùng sự kiện.</li>'
+
+    schema = {
+        '@context': 'https://schema.org',
+        '@type': 'NewsArticle',
+        'mainEntityOfPage': {'@type': 'WebPage', '@id': canonical_url},
+        'headline': title[:110],
+        'description': description,
+        'datePublished': published_iso,
+        'dateModified': modified_iso,
+        'articleSection': article.get('field_category') or 'Tin tức',
+        'inLanguage': 'vi',
+        'publisher': {'@type': 'Organization', 'name': 'Tìm Tin Tức', 'url': PUBLIC_SITE_URL},
+        'author': {'@type': 'Person', 'name': str(article.get('author'))} if article.get('author') else {'@type': 'Organization', 'name': source_name, 'url': source_url or PUBLIC_SITE_URL},
+    }
+    if image_url:
+        schema['image'] = [image_url]
+    schema = {key: value for key, value in schema.items() if value is not None}
+
+    values = {
+        '{{SEO_TITLE}}': _seo_html(title + ' | Tìm Tin Tức 3T'),
+        '{{TITLE}}': _seo_html(title),
+        '{{DESCRIPTION}}': _seo_html(description),
+        '{{CANONICAL_URL}}': _seo_html(canonical_url),
+        '{{OG_IMAGE_META}}': '<meta property="og:image" content="' + _seo_html(image_url) + '">' if image_url else '',
+        '{{TWITTER_CARD}}': 'summary_large_image' if image_url else 'summary',
+        '{{JSON_LD}}': _seo_json(schema),
+        '{{BRAND_URL}}': _seo_html(_seo_absolute_url('/news')),
+        '{{CATEGORY}}': _seo_html(article.get('field_category') or 'Tin tức'),
+        '{{SOURCE_NAME}}': _seo_html(source_name),
+        '{{PUBLISHED_ISO}}': _seo_html(published_iso or ''),
+        '{{PUBLISHED_TEXT}}': _seo_html(published_iso or 'Chưa rõ thời gian'),
+        '{{IMAGE_BLOCK}}': '<img class="hero" src="' + _seo_html(image_url) + '" alt="" loading="eager">' if image_url else '',
+        '{{SUMMARY}}': _seo_html(summary),
+        '{{AUTHOR_BLOCK}}': ' · Tác giả: ' + _seo_html(article.get('author')) if article.get('author') else '',
+        '{{SOURCE_LINK}}': '<a class="source-button" href="' + _seo_html(source_url) + '" target="_blank" rel="noopener noreferrer">Đọc bài gốc tại ' + _seo_html(source_name) + ' ↗</a>' if source_url else '<span class="muted">Nguồn gốc chưa có liên kết hợp lệ.</span>',
+        '{{TOPICS_BLOCK}}': topic_block,
+        '{{RELATED_ITEMS}}': related_html,
+    }
+    template_path = 'static/article.html'
+    try:
+        page_html = open(template_path, 'r', encoding='utf-8').read()
+    except OSError:
+        raise HTTPException(status_code=500, detail='Article page template is missing')
+    for token, value in values.items():
+        page_html = page_html.replace(token, value)
+    return HTMLResponse(content=page_html, headers={'Cache-Control': 'public, max-age=300'})
+
+
 
 @app.get('/news/following')
 def public_following_page(): return FileResponse('static/following.html')
