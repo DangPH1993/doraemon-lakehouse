@@ -156,13 +156,10 @@
       : `<span class="topic-spotlight-image-fallback" aria-hidden="true"><strong>3T</strong><span>${topicName}</span></span>`;
     const timestamp = localDateText(item?.timeline_at || item?.published_at || item?.collected_at, true);
     const innerLink = id > 0 ? `<a class="topic-spotlight-time-link" href="${pageURL}" title="Mở trang tin trên 3T"${tabAttr}>${esc(timestamp)}</a>` : `<span>${esc(timestamp)}</span>`;
-    const snippet = String(item?.snippet || '').trim();
     return `<article class="topic-spotlight-card">
       <a class="topic-spotlight-media${imageURL ? '' : ' no-image'}" href="${cardURL}"${targetAttrs}${tabAttr} aria-label="Mở bài gốc: ${title}">${imageHTML}</a>
       <div class="topic-spotlight-card-body">
-        <span class="topic-spotlight-topic">${topicName}</span>
         <h3><a href="${cardURL}"${targetAttrs}${tabAttr}>${title}</a></h3>
-        ${snippet ? `<p class="topic-spotlight-snippet">${esc(snippet)}</p>` : ''}
         <div class="topic-spotlight-meta"><span>${esc(item?.source_name || 'Nguồn báo chí')}</span>${innerLink}</div>
       </div>
     </article>`;
