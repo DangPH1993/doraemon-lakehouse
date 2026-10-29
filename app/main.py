@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl, html as html_lib
+import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl, html as html_lib, unicodedata
 from io import BytesIO
 from datetime import date, timedelta, datetime, timezone
 from typing import Literal
@@ -28,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.61',description='SEO article pages with publisher links on headlines and 3T detail links on article timestamps.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.62',description='SEO article pages with publisher links on headlines and 3T detail links on article timestamps.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -275,7 +275,9 @@ def public_article_page(article_id: int, slug: str):
     if not article:
         raise HTTPException(status_code=404, detail='Article not found')
 
-    title = str(article.get('title') or 'Tin tức')
+    # RSS sources sometimes provide Vietnamese accents as decomposed Unicode (NFD).
+    # Normalize before HTML/JSON-LD rendering so combining marks display correctly.
+    title = unicodedata.normalize('NFC', str(article.get('title') or 'Tin tức'))
     canonical_path = _seo_article_path(article_id, title)
     canonical_url = _seo_absolute_url(canonical_path)
     if slug != slugify(title):
