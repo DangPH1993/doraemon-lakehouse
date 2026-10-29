@@ -33,6 +33,8 @@
     .eyebrow { color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .badge { border-radius: 20px; padding: 3px 10px; background: #edf4fb; color: #17568a; font-weight: 700; }
     h1 { font-family: Georgia, "Times New Roman", serif; font-size: clamp(28px, 4.2vw, 42px); line-height: 1.23; margin: 18px 0 14px; letter-spacing: -.3px; }
+    .source-title-link { color: inherit; text-decoration: none; }
+    .source-title-link:hover, .source-title-link:focus-visible { color: var(--brand); text-decoration: underline; }
     .summary { font-size: 19px; line-height: 1.75; color: #363d44; font-weight: 500; overflow-wrap: anywhere; }
     .hero { width: 100%; max-height: 460px; object-fit: cover; border-radius: 10px; margin: 16px 0; }
     .source-row { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 18px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; }
@@ -63,7 +65,7 @@
   <main>
     <article class="article">
       <div class="eyebrow"><span class="badge">{{CATEGORY}}</span><span>{{SOURCE_NAME}}</span><span>·</span><time datetime="{{PUBLISHED_ISO}}">{{PUBLISHED_TEXT}}</time></div>
-      <h1>{{TITLE}}</h1>
+      <h1>{{TITLE_BLOCK}}</h1>
       {{IMAGE_BLOCK}}
       <p class="summary">{{SUMMARY}}</p>
       <div class="source-row">

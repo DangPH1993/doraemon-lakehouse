@@ -15,6 +15,12 @@
     const id = Number(item?.article_id || 0);
     return id > 0 ? `/tin/${id}/${articleSlug(item?.title)}` : safeHref(item?.url);
   }
+  function articleTimestampHTML(item, value) {
+    const label = localDateText(value);
+    const id = Number(item?.article_id || 0);
+    if (id < 1) return label;
+    return `<a class="article-timestamp-link" href="${articlePageHref(item)}" title="Mở trang tin trên 3T" aria-label="Mở trang tin 3T: ${esc(item?.title || 'Bài viết')}">${label}</a>`;
+  }
   function originalArticleURL(item) {
     try {
       const url = new URL(String(item?.url || ''));
@@ -31,10 +37,6 @@
   function articleSourceLinkHTML(item) {
     const sourceURL = originalArticleURL(item);
     return sourceURL ? `<a class="article-source-link" href="${esc(sourceURL)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a>` : '';
-  }
-  function articlePermalinkLinkHTML(item) {
-    const id = Number(item?.article_id || 0);
-    return id > 0 ? `<a class="article-source-link article-permalink-link" href="${articlePageHref(item)}" target="_blank" rel="noopener noreferrer">Trang tin 3T ↗</a>` : '';
   }
   function safeImageHref(value) {
     try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) && url.hostname && !url.username && !url.password ? esc(url.href) : ''; }
@@ -91,9 +93,9 @@
       const src = safeImageHref(item.image_url);
       const thumbnail = src ? `<a class="article-image-link timeline-thumbnail" href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}><img class="article-thumbnail-img" src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="strict-origin-when-cross-origin"></a>` : '';
       return `<article class="timeline-entry">
-        <div class="timeline-time">${esc(localDateText(item.timeline_at || item.published_at || item.collected_at))}</div>
+        <div class="timeline-time">${articleTimestampHTML(item, item.timeline_at || item.published_at || item.collected_at)}</div>
         <div class="timeline-rail"><span class="timeline-dot"></span><span class="timeline-line"></span></div>
-        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name || 'Nguồn tin')}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}>${esc(item.title || 'Bài viết')}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}<div class="timeline-source-footer">${articlePermalinkLinkHTML(item)}${articleSourceLinkHTML(item)}</div></div></div>
+        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name || 'Nguồn tin')}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}>${esc(item.title || 'Bài viết')}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}${articleSourceLinkHTML(item) ? `<div class="timeline-source-footer">${articleSourceLinkHTML(item)}</div>` : ''}</div></div>
       </article>`;
     }).join('');
   }

@@ -36,6 +36,12 @@
     const id = Number(item?.article_id || 0);
     return id > 0 ? `/tin/${id}/${articleSlug(item?.title)}` : safeHref(item?.url);
   }
+  function articleTimestampHTML(item, value, withTime = true) {
+    const label = localDateText(value, withTime);
+    const id = Number(item?.article_id || 0);
+    if (id < 1) return label;
+    return `<a class="article-timestamp-link" href="${articlePageHref(item)}" title="Mở trang tin trên 3T" aria-label="Mở trang tin 3T: ${esc(item?.title || 'Bài viết')}">${label}</a>`;
+  }
   function originalArticleURL(item) {
     try {
       const url = new URL(String(item?.url || ''));
@@ -52,10 +58,6 @@
   function articleSourceLinkHTML(item) {
     const sourceURL = originalArticleURL(item);
     return sourceURL ? `<a class="article-source-link" href="${esc(sourceURL)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a>` : '';
-  }
-  function articlePermalinkLinkHTML(item) {
-    const id = Number(item?.article_id || 0);
-    return id > 0 ? `<a class="article-source-link article-permalink-link" href="${articlePageHref(item)}" target="_blank" rel="noopener noreferrer">Trang tin 3T ↗</a>` : '';
   }
   const safeImageHref = (value) => {
     try {
@@ -281,9 +283,9 @@
       const related = [item.entities ? `Entity: ${item.entities}` : '', item.topics ? `Nhãn: ${item.topics}` : ''].filter(Boolean).join(' · ');
       const thumbnail = articleThumbnailHTML(item, 'timeline-thumbnail');
       return `<article class="timeline-entry">
-        <div class="timeline-time">${esc(localDateText(item.timeline_at || item.published_at || item.collected_at, true))}</div>
+        <div class="timeline-time">${articleTimestampHTML(item, item.timeline_at || item.published_at || item.collected_at, true)}</div>
         <div class="timeline-rail"><span class="timeline-dot"></span><span class="timeline-line"></span></div>
-        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name)}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}>${esc(item.title)}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}<div class="timeline-source-footer">${articlePermalinkLinkHTML(item)}${articleSourceLinkHTML(item)}</div></div></div>
+        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name)}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}>${esc(item.title)}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}${articleSourceLinkHTML(item) ? `<div class="timeline-source-footer">${articleSourceLinkHTML(item)}</div>` : ''}</div></div>
       </article>`;
     }).join('');
   }
@@ -409,19 +411,18 @@
     return buttons.length ? `<div class="article-follow-tags">${buttons.join('')}</div>` : '<div class="article-no-timeline">Chưa có tag topic/entity được phân loại.</div>';
   }
   function articleRowHTML(item, feedMode = false) {
-    const time = localDateText(item.published_at || item.collected_at, true);
     const followableTopicNames = new Set((feedMode ? (item.matched_topics || []) : (item.topic_refs || [])).map(tag => String(tag.name || '').toLocaleLowerCase('vi')));
     const tags = (feedMode ? [] : (item.topics || []).filter(name => !followableTopicNames.has(String(name || '').toLocaleLowerCase('vi'))).map(name => ({name})))
       .slice(0, 6).map(tag => `<span class="article-tag">${esc(tag.name)}</span>`).join('');
     const fieldTag = item.field_category ? `<span class="field-category-badge">${esc(item.field_category)}</span>` : '';
     const thumbnail = articleThumbnailHTML(item);
     return `<article class="radar-row article-row${feedMode ? ' feed-row' : ''}">
-      <div class="article-media-layout${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span>${fieldTag}${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
+      <div class="article-media-layout${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${articleTimestampHTML(item, item.published_at || item.collected_at, true)}</span>${fieldTag}${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
         <h3><a href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}>${esc(item.title)}</a></h3>
         ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}
         ${tags ? `<div class="article-tags">${tags}</div>` : ''}
         ${articleActionsHTML(item, feedMode)}
-        <div class="article-card-footer"><span></span>${articlePermalinkLinkHTML(item)}${articleSourceLinkHTML(item)}</div>
+        ${articleSourceLinkHTML(item) ? `<div class="article-card-footer">${articleSourceLinkHTML(item)}</div>` : ''}
       </div></div>
     </article>`;
   }
