@@ -75,6 +75,10 @@
       const link = event.target.closest('.article-image-link');
       if (link) { link.classList.add('image-failed'); const layout = link.closest('.article-media-layout, .timeline-card'); if (layout) layout.classList.remove('has-image'); }
     }
+    if (event.target && event.target.matches && event.target.matches('img.topic-spotlight-img')) {
+      const media = event.target.closest('.topic-spotlight-media');
+      if (media) media.classList.add('image-failed');
+    }
   }, true);
   function localDateText(value, withTime = false) {
     if (!value) return 'Chưa rõ thời gian';
@@ -126,11 +130,80 @@
     $('#hotTopics').innerHTML = '<div class="loading-card">Đang tải tin nổi bật…</div>';
     try {
       const data = await getJSON(`/api/public/news/hot-topics?period=${encodeURIComponent(state.period)}&limit=10`);
-      renderTopics(data.items || []);
+      const items = data.items || [];
+      renderTopics(items);
+      // Reuse this response for the image marquee; do not repeat the trend query.
+      renderTopicSpotlight(items.filter(item => Number(item.article_id || 0) > 0), data.period_label || periodLabels[state.period]);
     } catch (error) {
       setMessage('#hotTopics', 'Không tải được tin nổi bật', error.message, true);
+      renderTopicSpotlight([]);
     }
   }
+
+  function topicSpotlightCardHTML(item, clone = false) {
+    const id = Number(item?.article_id || 0);
+    const slug = articleSlug(item?.title || 'tin-tuc');
+    const pageURL = id > 0 ? `/tin/${id}/${slug}` : '#';
+    const sourceURL = originalArticleURL(item);
+    const cardURL = sourceURL ? esc(sourceURL) : pageURL;
+    const targetAttrs = sourceURL ? ' target="_blank" rel="noopener noreferrer"' : '';
+    const tabAttr = clone ? ' tabindex="-1"' : '';
+    const title = esc(item?.title || 'Tin mới');
+    const topicName = esc(item?.topic_name || 'Chủ đề nổi bật');
+    const imageURL = safeImageHref(item?.image_url);
+    const imageHTML = imageURL
+      ? `<img class="topic-spotlight-img" src="${imageURL}" alt="${title}" loading="lazy" decoding="async" referrerpolicy="strict-origin-when-cross-origin"><span class="topic-spotlight-image-fallback" aria-hidden="true"><strong>3T</strong><span>${topicName}</span></span>`
+      : `<span class="topic-spotlight-image-fallback" aria-hidden="true"><strong>3T</strong><span>${topicName}</span></span>`;
+    const timestamp = localDateText(item?.timeline_at || item?.published_at || item?.collected_at, true);
+    const innerLink = id > 0 ? `<a class="topic-spotlight-time-link" href="${pageURL}" title="Mở trang tin trên 3T"${tabAttr}>${esc(timestamp)}</a>` : `<span>${esc(timestamp)}</span>`;
+    const snippet = String(item?.snippet || '').trim();
+    return `<article class="topic-spotlight-card">
+      <a class="topic-spotlight-media${imageURL ? '' : ' no-image'}" href="${cardURL}"${targetAttrs}${tabAttr} aria-label="Mở bài gốc: ${title}">${imageHTML}</a>
+      <div class="topic-spotlight-card-body">
+        <span class="topic-spotlight-topic">${topicName}</span>
+        <h3><a href="${cardURL}"${targetAttrs}${tabAttr}>${title}</a></h3>
+        ${snippet ? `<p class="topic-spotlight-snippet">${esc(snippet)}</p>` : ''}
+        <div class="topic-spotlight-meta"><span>${esc(item?.source_name || 'Nguồn báo chí')}</span>${innerLink}</div>
+      </div>
+    </article>`;
+  }
+
+  function renderTopicSpotlight(items, periodLabel = 'Hôm nay') {
+    const section = $('#topicSpotlightSection');
+    const primary = $('#topicSpotlightPrimary');
+    const clone = $('#topicSpotlightClone');
+    const track = $('#topicSpotlightTrack');
+    const toggle = $('#topicSpotlightToggle');
+    if (!items.length) {
+      section.hidden = true;
+      primary.innerHTML = '';
+      clone.innerHTML = '';
+      track.classList.remove('is-running', 'is-paused');
+      toggle.hidden = true;
+      $('#topicSpotlightStatus').textContent = 'Chưa có đủ dữ liệu topic nổi bật để hiển thị.';
+      return;
+    }
+    const primaryHTML = items.map(item => topicSpotlightCardHTML(item, false)).join('');
+    const cloneHTML = items.map(item => topicSpotlightCardHTML(item, true)).join('');
+    primary.innerHTML = primaryHTML;
+    clone.innerHTML = cloneHTML;
+    clone.setAttribute('aria-hidden', 'true');
+    section.hidden = false;
+    track.classList.toggle('is-running', items.length > 1);
+    track.classList.remove('is-paused');
+    toggle.hidden = items.length < 2;
+    toggle.textContent = 'Ⅱ Tạm dừng';
+    toggle.setAttribute('aria-pressed', 'false');
+    $('#topicSpotlightStatus').textContent = `Đang hiển thị ${num(items.length)} bài mới nhất theo ${num(items.length)} topic nổi bật · ${periodLabel}. Nhấn vào ảnh hoặc tiêu đề để đọc bài gốc; nhấn thời gian để mở trang tin 3T.`;
+  }
+
+  $('#topicSpotlightToggle').addEventListener('click', () => {
+    const track = $('#topicSpotlightTrack');
+    const paused = !track.classList.contains('is-paused');
+    track.classList.toggle('is-paused', paused);
+    $('#topicSpotlightToggle').setAttribute('aria-pressed', String(paused));
+    $('#topicSpotlightToggle').textContent = paused ? '▶ Chạy tiếp' : 'Ⅱ Tạm dừng';
+  });
 
   let lastEntityCloudItems = [];
   let entityCloudResizeTimer = null;
