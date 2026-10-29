@@ -173,13 +173,11 @@
     const primary = $('#topicSpotlightPrimary');
     const clone = $('#topicSpotlightClone');
     const track = $('#topicSpotlightTrack');
-    const toggle = $('#topicSpotlightToggle');
     if (!items.length) {
       section.hidden = true;
       primary.innerHTML = '';
       clone.innerHTML = '';
-      track.classList.remove('is-running', 'is-paused');
-      toggle.hidden = true;
+      track.classList.remove('is-running');
       $('#topicSpotlightStatus').textContent = 'Chưa có đủ dữ liệu topic nổi bật để hiển thị.';
       return;
     }
@@ -190,20 +188,10 @@
     clone.setAttribute('aria-hidden', 'true');
     section.hidden = false;
     track.classList.toggle('is-running', items.length > 1);
-    track.classList.remove('is-paused');
-    toggle.hidden = items.length < 2;
-    toggle.textContent = 'Ⅱ Tạm dừng';
-    toggle.setAttribute('aria-pressed', 'false');
+    
     $('#topicSpotlightStatus').textContent = `Đang hiển thị ${num(items.length)} bài mới nhất theo ${num(items.length)} topic nổi bật · ${periodLabel}. Nhấn vào ảnh hoặc tiêu đề để đọc bài gốc; nhấn thời gian để mở trang tin 3T.`;
   }
 
-  $('#topicSpotlightToggle').addEventListener('click', () => {
-    const track = $('#topicSpotlightTrack');
-    const paused = !track.classList.contains('is-paused');
-    track.classList.toggle('is-paused', paused);
-    $('#topicSpotlightToggle').setAttribute('aria-pressed', String(paused));
-    $('#topicSpotlightToggle').textContent = paused ? '▶ Chạy tiếp' : 'Ⅱ Tạm dừng';
-  });
 
   let lastEntityCloudItems = [];
   let entityCloudResizeTimer = null;

@@ -6,10 +6,10 @@
   <meta name="theme-color" content="#ffffff">
   <link id="siteFavicon" rel="icon" type="image/x-icon" href="/favicon.ico?v=0.7.58">
   <link id="siteAppleTouchIcon" rel="apple-touch-icon" href="/static/favicon.png?v=0.7.58">
-  <meta name="app-version" content="0.7.64">
+  <meta name="app-version" content="0.7.65">
   <meta name="description" content="Tìm Tin Tức — tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>Tìm Tin Tức | timtintuc.com</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.64">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.65">
 </head>
 <body>
   <header class="site-header">
@@ -107,6 +107,22 @@
   </div>
 
   <main class="page-shell">
+    <section class="topic-spotlight" id="topicSpotlightSection" aria-labelledby="topicSpotlightTitle">
+      <div class="topic-spotlight-heading">
+        <div>
+          <h2 id="topicSpotlightTitle">Tin mới từ 10 chủ đề nổi bật</h2>
+          <p class="section-subtitle">Mỗi chủ đề một bài mới nhất · Cập nhật theo xu hướng tin tức hôm nay.</p>
+        </div>
+      </div>
+      <div class="topic-spotlight-viewport" role="region" aria-label="Các bài mới nhất từ mười chủ đề nổi bật" tabindex="0">
+        <div class="topic-spotlight-track" id="topicSpotlightTrack">
+          <div class="topic-spotlight-group" id="topicSpotlightPrimary"><div class="topic-spotlight-loading">Đang tải tin mới theo chủ đề…</div></div>
+          <div class="topic-spotlight-group" id="topicSpotlightClone" aria-hidden="true"></div>
+        </div>
+      </div>
+      <p id="topicSpotlightStatus" class="topic-spotlight-status" role="status" aria-live="polite">Đang lấy 10 chủ đề nổi bật.</p>
+    </section>
+
     <section class="search-home" id="searchHome" aria-labelledby="searchTitle">
       <p class="search-eyebrow"><span class="live-dot"></span> Tìm Tin Tức</p>
       <h1 id="searchTitle">Bạn muốn theo dõi <span>điều gì?</span></h1>
@@ -117,24 +133,6 @@
         <input id="radarSearch" type="search" placeholder="Tìm một sự kiện, nhân vật, doanh nghiệp…" maxlength="150" autocomplete="off">
         <button type="submit">Tìm kiếm</button>
       </form>
-    </section>
-
-    <section class="topic-spotlight" id="topicSpotlightSection" aria-labelledby="topicSpotlightTitle">
-      <div class="topic-spotlight-heading">
-        <div>
-          <p class="eyebrow">TOP 10 TOPICS</p>
-          <h2 id="topicSpotlightTitle">Tin mới từ 10 chủ đề nổi bật</h2>
-          <p class="section-subtitle">Mỗi chủ đề một bài mới nhất · Cập nhật theo xu hướng tin tức hôm nay.</p>
-        </div>
-        <button type="button" id="topicSpotlightToggle" class="topic-spotlight-toggle" aria-pressed="false">Ⅱ Tạm dừng</button>
-      </div>
-      <div class="topic-spotlight-viewport" role="region" aria-label="Các bài mới nhất từ mười chủ đề nổi bật" tabindex="0">
-        <div class="topic-spotlight-track" id="topicSpotlightTrack">
-          <div class="topic-spotlight-group" id="topicSpotlightPrimary"><div class="topic-spotlight-loading">Đang tải tin mới theo chủ đề…</div></div>
-          <div class="topic-spotlight-group" id="topicSpotlightClone" aria-hidden="true"></div>
-        </div>
-      </div>
-      <p id="topicSpotlightStatus" class="topic-spotlight-status" role="status" aria-live="polite">Đang lấy 10 chủ đề nổi bật.</p>
     </section>
 
     <div class="radar-layout" id="radarLayout">
@@ -264,6 +262,6 @@
 
   <script src="/static/analytics.js?v=0.7.58" defer></script>
   <script src="/static/branding.js?v=0.7.58" defer></script>
-  <script src="/static/news.js?v=0.7.64" defer></script>
+  <script src="/static/news.js?v=0.7.65" defer></script>
 </body>
 </html>
