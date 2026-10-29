@@ -29,6 +29,34 @@
     try { const url = new URL(String(value || ''), window.location.origin); return ['http:', 'https:'].includes(url.protocol) ? esc(url.href) : '#'; }
     catch { return '#'; }
   };
+  function articleSlug(value) {
+    return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\x00-\x7F]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 90) || 'topic';
+  }
+  function articlePageHref(item) {
+    const id = Number(item?.article_id || 0);
+    return id > 0 ? `/tin/${id}/${articleSlug(item?.title)}` : safeHref(item?.url);
+  }
+  function originalArticleURL(item) {
+    try {
+      const url = new URL(String(item?.url || ''));
+      return ['http:', 'https:'].includes(url.protocol) && url.hostname && !url.username && !url.password ? url.href : '';
+    } catch { return ''; }
+  }
+  function articlePrimaryHref(item) {
+    const sourceURL = originalArticleURL(item);
+    return sourceURL ? esc(sourceURL) : articlePageHref(item);
+  }
+  function articlePrimaryTargetAttrs(item) {
+    return originalArticleURL(item) ? ' target="_blank" rel="noopener noreferrer"' : '';
+  }
+  function articleSourceLinkHTML(item) {
+    const sourceURL = originalArticleURL(item);
+    return sourceURL ? `<a class="article-source-link" href="${esc(sourceURL)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a>` : '';
+  }
+  function articlePermalinkLinkHTML(item) {
+    const id = Number(item?.article_id || 0);
+    return id > 0 ? `<a class="article-source-link article-permalink-link" href="${articlePageHref(item)}" target="_blank" rel="noopener noreferrer">Trang tin 3T ↗</a>` : '';
+  }
   const safeImageHref = (value) => {
     try {
       const url = new URL(String(value || ''));
@@ -38,7 +66,7 @@
   function articleThumbnailHTML(item, className = 'article-thumbnail') {
     const src = safeImageHref(item.image_url);
     if (!src) return '';
-    return `<a class="article-image-link ${className}" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer" tabindex="-1" aria-hidden="true"><img class="article-thumbnail-img" src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="strict-origin-when-cross-origin"></a>`;
+    return `<a class="article-image-link ${className}" href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)} tabindex="-1" aria-hidden="true"><img class="article-thumbnail-img" src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="strict-origin-when-cross-origin"></a>`;
   }
   document.addEventListener('error', (event) => {
     if (event.target && event.target.matches && event.target.matches('img.article-thumbnail-img')) {
@@ -255,7 +283,7 @@
       return `<article class="timeline-entry">
         <div class="timeline-time">${esc(localDateText(item.timeline_at || item.published_at || item.collected_at, true))}</div>
         <div class="timeline-rail"><span class="timeline-dot"></span><span class="timeline-line"></span></div>
-        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name)}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}</div></div>
+        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name)}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}>${esc(item.title)}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}<div class="timeline-source-footer">${articlePermalinkLinkHTML(item)}${articleSourceLinkHTML(item)}</div></div></div>
       </article>`;
     }).join('');
   }
@@ -389,11 +417,11 @@
     const thumbnail = articleThumbnailHTML(item);
     return `<article class="radar-row article-row${feedMode ? ' feed-row' : ''}">
       <div class="article-media-layout${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="radar-row-main"><div class="radar-row-meta"><span class="source-chip">${esc(item.source_name)}</span><span>${esc(time)}</span>${fieldTag}${feedMode ? '<span class="feed-match-label">LIÊN QUAN ĐẾN BẠN</span>' : ''}</div>
-        <h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>
+        <h3><a href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}>${esc(item.title)}</a></h3>
         ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}
         ${tags ? `<div class="article-tags">${tags}</div>` : ''}
         ${articleActionsHTML(item, feedMode)}
-        <div class="article-card-footer"><span></span><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a></div>
+        <div class="article-card-footer"><span></span>${articlePermalinkLinkHTML(item)}${articleSourceLinkHTML(item)}</div>
       </div></div>
     </article>`;
   }

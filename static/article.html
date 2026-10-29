@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{SEO_TITLE}}</title>
+  <meta name="description" content="{{DESCRIPTION}}">
+  <meta name="robots" content="index,follow,max-image-preview:large">
+  <link rel="canonical" href="{{CANONICAL_URL}}">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Tìm Tin Tức">
+  <meta property="og:title" content="{{TITLE}}">
+  <meta property="og:description" content="{{DESCRIPTION}}">
+  <meta property="og:url" content="{{CANONICAL_URL}}">
+  {{OG_IMAGE_META}}
+  <meta name="twitter:card" content="{{TWITTER_CARD}}">
+  <meta name="twitter:title" content="{{TITLE}}">
+  <meta name="twitter:description" content="{{DESCRIPTION}}">
+  <script type="application/ld+json">{{JSON_LD}}</script>
+  <style>
+    :root { color-scheme: light; --ink: #20252b; --muted: #68717b; --line: #e2e6e9; --brand: #165c9b; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f7f9; color: var(--ink); font-family: Arial, "Segoe UI", sans-serif; line-height: 1.65; }
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .site-header { background: #fff; border-bottom: 1px solid var(--line); }
+    .header-inner { max-width: 980px; margin: auto; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { font-size: 21px; font-weight: 800; color: #174c80; letter-spacing: .2px; }
+    .brand em { font-style: normal; color: #f28c28; }
+    .header-nav { font-size: 14px; }
+    main { max-width: 900px; margin: 24px auto; padding: 0 18px; }
+    .article { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: clamp(20px, 4vw, 42px); box-shadow: 0 5px 24px #15253608; }
+    .eyebrow { color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .badge { border-radius: 20px; padding: 3px 10px; background: #edf4fb; color: #17568a; font-weight: 700; }
+    h1 { font-family: Georgia, "Times New Roman", serif; font-size: clamp(28px, 4.2vw, 42px); line-height: 1.23; margin: 18px 0 14px; letter-spacing: -.3px; }
+    .summary { font-size: 19px; line-height: 1.75; color: #363d44; font-weight: 500; overflow-wrap: anywhere; }
+    .hero { width: 100%; max-height: 460px; object-fit: cover; border-radius: 10px; margin: 16px 0; }
+    .source-row { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 18px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; }
+    .source-button { display: inline-block; background: #155b93; color: #fff; padding: 10px 15px; border-radius: 8px; font-weight: 700; }
+    .source-button:hover { color: #fff; background: #104b7a; text-decoration: none; }
+    .topics { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
+    .topic { background: #f1f5f8; border: 1px solid #e0e7ec; border-radius: 20px; padding: 5px 10px; font-size: 13px; }
+    .related { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 22px 26px; margin-top: 18px; }
+    h2 { font-size: 19px; margin: 0 0 12px; }
+    .related ul { padding-left: 0; list-style: none; margin: 0; }
+    .related li { padding: 12px 0; border-top: 1px solid var(--line); }
+    .related li:first-child { border-top: 0; }
+    .related li a { font-weight: 700; }
+    .related small { display: block; color: var(--muted); margin-top: 3px; }
+    .note { color: var(--muted); font-size: 13px; margin: 22px 2px; }
+    .muted { color: var(--muted); }
+    footer { text-align: center; color: var(--muted); font-size: 13px; padding: 22px; }
+    @media (max-width: 600px) { .header-inner { padding: 12px 16px; } .article { padding: 20px 17px; } .summary { font-size: 17px; } .related { padding: 18px; } }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="{{BRAND_URL}}">3<em>T</em> · Tìm Tin Tức</a>
+      <nav class="header-nav"><a href="{{BRAND_URL}}">Trang chủ</a></nav>
+    </div>
+  </header>
+  <main>
+    <article class="article">
+      <div class="eyebrow"><span class="badge">{{CATEGORY}}</span><span>{{SOURCE_NAME}}</span><span>·</span><time datetime="{{PUBLISHED_ISO}}">{{PUBLISHED_TEXT}}</time></div>
+      <h1>{{TITLE}}</h1>
+      {{IMAGE_BLOCK}}
+      <p class="summary">{{SUMMARY}}</p>
+      <div class="source-row">
+        <span>Nguồn: <strong>{{SOURCE_NAME}}</strong>{{AUTHOR_BLOCK}}</span>
+        {{SOURCE_LINK}}
+      </div>
+      {{TOPICS_BLOCK}}
+    </article>
+    <section class="related" aria-labelledby="related-heading">
+      <h2 id="related-heading">Tin liên quan cùng sự kiện</h2>
+      <ul>{{RELATED_ITEMS}}</ul>
+    </section>
+    <p class="note">Tìm Tin Tức 3T tổng hợp tiêu đề, mô tả nguồn cấp tin và các liên kết theo dõi sự kiện. Để đọc nội dung đầy đủ và đối chiếu ngữ cảnh gốc, vui lòng truy cập nhà xuất bản qua liên kết “Đọc bài gốc”.</p>
+  </main>
+  <footer>© Tìm Tin Tức · Theo dõi xu hướng và diễn biến sự kiện</footer>
+</body>
+</html>

@@ -8,6 +8,34 @@
     try { const url = new URL(String(value || ''), window.location.origin); return ['http:', 'https:'].includes(url.protocol) ? esc(url.href) : '#'; }
     catch { return '#'; }
   }
+  function articleSlug(value) {
+    return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\x00-\x7F]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 90) || 'topic';
+  }
+  function articlePageHref(item) {
+    const id = Number(item?.article_id || 0);
+    return id > 0 ? `/tin/${id}/${articleSlug(item?.title)}` : safeHref(item?.url);
+  }
+  function originalArticleURL(item) {
+    try {
+      const url = new URL(String(item?.url || ''));
+      return ['http:', 'https:'].includes(url.protocol) && url.hostname && !url.username && !url.password ? url.href : '';
+    } catch { return ''; }
+  }
+  function articlePrimaryHref(item) {
+    const sourceURL = originalArticleURL(item);
+    return sourceURL ? esc(sourceURL) : articlePageHref(item);
+  }
+  function articlePrimaryTargetAttrs(item) {
+    return originalArticleURL(item) ? ' target="_blank" rel="noopener noreferrer"' : '';
+  }
+  function articleSourceLinkHTML(item) {
+    const sourceURL = originalArticleURL(item);
+    return sourceURL ? `<a class="article-source-link" href="${esc(sourceURL)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a>` : '';
+  }
+  function articlePermalinkLinkHTML(item) {
+    const id = Number(item?.article_id || 0);
+    return id > 0 ? `<a class="article-source-link article-permalink-link" href="${articlePageHref(item)}" target="_blank" rel="noopener noreferrer">Trang tin 3T ↗</a>` : '';
+  }
   function safeImageHref(value) {
     try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) && url.hostname && !url.username && !url.password ? esc(url.href) : ''; }
     catch { return ''; }
@@ -61,11 +89,11 @@
     return items.map(item => {
       const related = [item.entities ? `Thực thể: ${item.entities}` : '', item.topics ? `Chủ đề: ${item.topics}` : ''].filter(Boolean).join(' · ');
       const src = safeImageHref(item.image_url);
-      const thumbnail = src ? `<a class="article-image-link timeline-thumbnail" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer"><img class="article-thumbnail-img" src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="strict-origin-when-cross-origin"></a>` : '';
+      const thumbnail = src ? `<a class="article-image-link timeline-thumbnail" href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}><img class="article-thumbnail-img" src="${src}" alt="" loading="lazy" decoding="async" referrerpolicy="strict-origin-when-cross-origin"></a>` : '';
       return `<article class="timeline-entry">
         <div class="timeline-time">${esc(localDateText(item.timeline_at || item.published_at || item.collected_at))}</div>
         <div class="timeline-rail"><span class="timeline-dot"></span><span class="timeline-line"></span></div>
-        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name || 'Nguồn tin')}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title || 'Bài viết')}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}</div></div>
+        <div class="timeline-card${thumbnail ? ' has-image' : ''}">${thumbnail}<div class="timeline-card-body"><div class="timeline-meta"><span>${esc(item.source_name || 'Nguồn tin')}</span>${item.author ? `<span>· ${esc(item.author)}</span>` : ''}</div><h3><a href="${articlePrimaryHref(item)}"${articlePrimaryTargetAttrs(item)}>${esc(item.title || 'Bài viết')}</a></h3>${item.snippet ? `<p>${esc(item.snippet)}</p>` : ''}${related ? `<div class="entity-list">${esc(related)}</div>` : ''}<div class="timeline-source-footer">${articlePermalinkLinkHTML(item)}${articleSourceLinkHTML(item)}</div></div></div>
       </article>`;
     }).join('');
   }

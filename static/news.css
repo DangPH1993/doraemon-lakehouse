@@ -633,3 +633,10 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 #articleLoadSentinel{width:100%;height:1px;pointer-events:none}
 @keyframes article-skeleton-shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
 @media(prefers-reduced-motion:reduce){.article-skeleton-meta,.article-skeleton-title,.article-skeleton-summary{animation:none}}
+
+/* Direct publisher links and optional 3T permalink for each story. */
+.timeline-source-footer{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:10px;padding-top:8px;border-top:1px solid #eeece5;font-size:10px}
+.timeline-source-footer a,.article-permalink-link{color:#c66e47;text-decoration:none;font-weight:800}
+.timeline-source-footer a:hover,.article-permalink-link:hover{text-decoration:underline}
+.article-card-footer .article-source-link{white-space:nowrap}
+@media(max-width:480px){.article-row .article-card-footer{flex-wrap:wrap;justify-content:flex-start}.article-row .article-card-footer>span{display:none}}
