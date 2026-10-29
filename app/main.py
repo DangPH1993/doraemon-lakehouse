@@ -28,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.62',description='SEO article pages with publisher links on headlines and 3T detail links on article timestamps.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.63',description='SEO article pages with hardened sitemap responses.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -171,24 +171,6 @@ if 'YOUR-NEWS-RADAR-DOMAIN' in PUBLIC_SITE_URL:
     PUBLIC_SITE_URL = 'https://timtintuc.com'
 SITEMAP_PAGE_SIZE = 5000
 
-# Keep duplicate RSS records for provenance in Neon, but expose the best representative
-# of an exact headline to search crawlers. This mirrors the public feed's 72-hour policy.
-_SEO_CANONICAL_ARTICLE_FILTER = """a.is_excluded=false AND NOT EXISTS (
-    SELECT 1 FROM news_articles other
-    WHERE other.is_excluded=false
-      AND other.article_id<>a.article_id
-      AND other.headline_hash=a.headline_hash
-      AND coalesce(other.published_at,other.collected_at) >= coalesce(a.published_at,a.collected_at)-INTERVAL '72 hours'
-      AND coalesce(other.published_at,other.collected_at) <= coalesce(a.published_at,a.collected_at)+INTERVAL '72 hours'
-      AND (
-        coalesce(other.quality_score,0)>coalesce(a.quality_score,0)
-        OR (coalesce(other.quality_score,0)=coalesce(a.quality_score,0) AND other.image_url IS NOT NULL AND a.image_url IS NULL)
-        OR (coalesce(other.quality_score,0)=coalesce(a.quality_score,0) AND (other.image_url IS NOT NULL)=(a.image_url IS NOT NULL) AND length(coalesce(other.summary,''))>length(coalesce(a.summary,'')))
-        OR (coalesce(other.quality_score,0)=coalesce(a.quality_score,0) AND (other.image_url IS NOT NULL)=(a.image_url IS NOT NULL) AND length(coalesce(other.summary,''))=length(coalesce(a.summary,'')) AND coalesce(other.published_at,other.collected_at)>coalesce(a.published_at,a.collected_at))
-        OR (coalesce(other.quality_score,0)=coalesce(a.quality_score,0) AND (other.image_url IS NOT NULL)=(a.image_url IS NOT NULL) AND length(coalesce(other.summary,''))=length(coalesce(a.summary,'')) AND coalesce(other.published_at,other.collected_at)=coalesce(a.published_at,a.collected_at) AND other.article_id>a.article_id)
-      )
-)"""
-
 
 def _seo_article_path(article_id: int, title: str) -> str:
     return f"/tin/{int(article_id)}/{slugify(title)}"
@@ -213,6 +195,20 @@ def _seo_json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(',', ':')).replace('<', r'\u003c').replace('>', r'\u003e').replace('&', r'\u0026')
 
 
+def _sitemap_xml_response(xml: str) -> Response:
+    # Use an explicit XML media type. Avoid depending on browser XML rendering;
+    # Googlebot consumes the raw HTTP body and Content-Type.
+    return Response(
+        content=xml,
+        media_type='application/xml',
+        headers={
+            'Content-Type': 'application/xml; charset=UTF-8',
+            'X-Content-Type-Options': 'nosniff',
+            'Cache-Control': 'public, max-age=300',
+        },
+    )
+
+
 @app.get('/robots.txt', response_class=PlainTextResponse, include_in_schema=False)
 def public_robots_txt():
     body = '\n'.join([
@@ -223,34 +219,39 @@ def public_robots_txt():
         f'Sitemap: {_seo_absolute_url("/sitemap.xml")}',
         '',
     ])
-    return PlainTextResponse(body, headers={'Cache-Control': 'public, max-age=3600'})
+    return PlainTextResponse(body, headers={'Cache-Control': 'public, max-age=300'})
 
 
 @app.get('/sitemap.xml', response_class=Response, include_in_schema=False)
 def public_sitemap_index():
-    count_row = fetch_one(f"SELECT count(*)::int AS total FROM news_articles a WHERE {_SEO_CANONICAL_ARTICLE_FILTER}")
+    # Keep the index fast: counting with a correlated duplicate-title anti-join
+    # can make Googlebot time out on larger datasets. Canonical pages and their
+    # URLs remain stable; Google can resolve duplicate article content itself.
+    count_row = fetch_one("SELECT count(*)::int AS total FROM news_articles WHERE is_excluded=false")
     total = int((count_row or {}).get('total', 0))
     page_count = max(1, (total + SITEMAP_PAGE_SIZE - 1) // SITEMAP_PAGE_SIZE)
     sitemap_urls = ''.join(
         '<sitemap><loc>' + _seo_html(_seo_absolute_url(f'/sitemap-articles-{page}.xml')) + '</loc></sitemap>'
         for page in range(1, page_count + 1)
     )
-    xml = '<?xml version="1.0" encoding="UTF-8"?>' + '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + sitemap_urls + '</sitemapindex>'
-    return Response(content=xml, media_type='application/xml; charset=utf-8', headers={'Cache-Control': 'public, max-age=3600'})
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + sitemap_urls + '</sitemapindex>'
+    return _sitemap_xml_response(xml)
 
 
 @app.get('/sitemap-articles-{page}.xml', response_class=Response, include_in_schema=False)
 def public_article_sitemap(page: int):
     if page < 1:
         raise HTTPException(status_code=404, detail='Sitemap page not found')
-    count_row = fetch_one(f"SELECT count(*)::int AS total FROM news_articles a WHERE {_SEO_CANONICAL_ARTICLE_FILTER}")
+    count_row = fetch_one("SELECT count(*)::int AS total FROM news_articles WHERE is_excluded=false")
     total = int((count_row or {}).get('total', 0))
     page_count = max(1, (total + SITEMAP_PAGE_SIZE - 1) // SITEMAP_PAGE_SIZE)
     if page > page_count:
         raise HTTPException(status_code=404, detail='Sitemap page not found')
-    rows = fetch_all(f"""SELECT a.article_id,a.title,a.updated_at,a.published_at,a.collected_at
+    # Use a straightforward indexed/date-ordered query instead of a correlated
+    # NOT EXISTS filter, reducing response latency for crawler requests.
+    rows = fetch_all("""SELECT a.article_id,a.title,a.updated_at,a.published_at,a.collected_at
                          FROM news_articles a
-                         WHERE {_SEO_CANONICAL_ARTICLE_FILTER}
+                         WHERE a.is_excluded=false
                          ORDER BY coalesce(a.published_at,a.collected_at) DESC,a.article_id DESC
                          LIMIT %s OFFSET %s""", (SITEMAP_PAGE_SIZE, (page - 1) * SITEMAP_PAGE_SIZE))
     entries = []
@@ -259,8 +260,8 @@ def public_article_sitemap(page: int):
         lastmod = _seo_iso(row.get('updated_at') or row.get('published_at') or row.get('collected_at'))
         lastmod_xml = '<lastmod>' + _seo_html(lastmod) + '</lastmod>' if lastmod else ''
         entries.append('<url><loc>' + _seo_html(_seo_absolute_url(path)) + '</loc>' + lastmod_xml + '</url>')
-    xml = '<?xml version="1.0" encoding="UTF-8"?>' + '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + ''.join(entries) + '</urlset>'
-    return Response(content=xml, media_type='application/xml; charset=utf-8', headers={'Cache-Control': 'public, max-age=3600'})
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + ''.join(entries) + '</urlset>'
+    return _sitemap_xml_response(xml)
 
 
 @app.get('/tin/{article_id}/{slug}', response_class=HTMLResponse, include_in_schema=False)
