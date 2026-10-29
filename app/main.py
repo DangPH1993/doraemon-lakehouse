@@ -28,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.60',description='SEO article pages with per-article URLs; public article cards open original publisher links while 3T permalinks retain server-rendered detail pages.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.61',description='SEO article pages with publisher links on headlines and 3T detail links on article timestamps.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -349,6 +349,7 @@ def public_article_page(article_id: int, slug: str):
     values = {
         '{{SEO_TITLE}}': _seo_html(title + ' | Tìm Tin Tức 3T'),
         '{{TITLE}}': _seo_html(title),
+        '{{TITLE_BLOCK}}': '<a class="source-title-link" href="' + _seo_html(source_url) + '" target="_blank" rel="noopener noreferrer">' + _seo_html(title) + '</a>' if source_url else _seo_html(title),
         '{{DESCRIPTION}}': _seo_html(description),
         '{{CANONICAL_URL}}': _seo_html(canonical_url),
         '{{OG_IMAGE_META}}': '<meta property="og:image" content="' + _seo_html(image_url) + '">' if image_url else '',
