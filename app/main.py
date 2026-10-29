@@ -28,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.63',description='SEO article pages with hardened sitemap responses.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.64',description='SEO article pages and trending-topic spotlight carousel.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -1523,7 +1523,7 @@ def public_hot_topics(
     period: str = Query(default='day', pattern='^(day|week|month)$'),
     limit: int = Query(default=10, ge=1, le=30),
 ):
-    """Return current event-topic ranking for today, this week or this month."""
+    """Return ranked event topics with each topic's newest article for the homepage."""
     local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
     today = (local or {}).get('today')
     if today is None:
@@ -1537,20 +1537,33 @@ def public_hot_topics(
     else:
         period_start = date(today.year, today.month, 1)
         label = 'Tháng này'
+    # Use a single ranked query to serve both the sidebar and homepage marquee.
+    # The lateral lookup returns one latest article per topic, without extra timeline calls.
     items = fetch_all("""SELECT f.topic_id, t.slug, t.name AS topic_name,
                               t.description, f.period_type, f.period_start,
                               f.article_count, f.source_count,
                               f.previous_article_count, f.growth_pct,
                               f.hotness_score, f.rank_position,
-                              (SELECT at.article_id
-                               FROM article_topics at
-                               JOIN news_articles anchor ON anchor.article_id=at.article_id
-                               WHERE at.topic_id=t.topic_id AND anchor.is_excluded=false
-                               ORDER BY coalesce(anchor.published_at,anchor.collected_at) DESC,
-                                        anchor.article_id DESC
-                               LIMIT 1) AS anchor_article_id
+                              latest.article_id AS anchor_article_id,
+                              latest.article_id, latest.title, latest.url, latest.image_url,
+                              latest.snippet, latest.published_at, latest.collected_at,
+                              latest.timeline_at, latest.source_name
                        FROM fact_topic_trending f
                        JOIN topics t ON t.topic_id=f.topic_id
+                       LEFT JOIN LATERAL (
+                           SELECT a.article_id, a.title, a.url, a.image_url,
+                                  left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 260) AS snippet,
+                                  a.published_at, a.collected_at,
+                                  coalesce(a.published_at,a.collected_at) AS timeline_at,
+                                  ds.name AS source_name
+                           FROM article_topics rel
+                           JOIN news_articles a ON a.article_id=rel.article_id
+                           JOIN data_sources ds ON ds.source_id=a.source_id
+                           WHERE rel.topic_id=t.topic_id AND a.is_excluded=false
+                           ORDER BY coalesce(a.published_at,a.collected_at) DESC NULLS LAST,
+                                    a.article_id DESC
+                           LIMIT 1
+                       ) latest ON true
                        WHERE f.period_type=%s AND f.period_start=%s
                          AND t.status='active' AND t.topic_type='event'
                        ORDER BY f.rank_position ASC, f.hotness_score DESC
