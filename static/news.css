@@ -684,12 +684,14 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
  .topic-spotlight-card-body{padding:7px 8px 8px;min-height:53px}
  .topic-spotlight-card h3{font-size:11px;line-height:1.35}
 }
+/* v0.7.69: keep the spotlight as one continuously moving row even when the OS
+   requests reduced motion. The user-facing ticker is an intentional navigation feature. */
 @media(prefers-reduced-motion:reduce){
- .topic-spotlight-track.is-running{animation:none;will-change:auto}
- .topic-spotlight-viewport{overflow:hidden}
- .topic-spotlight-track{display:block;width:100%;transform:none}
- .topic-spotlight-group{display:flex;flex-wrap:wrap;padding:0;gap:9px}
- #topicSpotlightClone{display:none}
+ .topic-spotlight-viewport{overflow:hidden;scrollbar-width:none}
+ .topic-spotlight-track{display:flex;width:max-content;transform:translateZ(0);will-change:transform}
+ .topic-spotlight-track.is-running{animation:topic-spotlight-marquee 62s linear infinite;will-change:transform}
+ .topic-spotlight-group{display:flex;flex-wrap:nowrap;align-items:stretch;flex:0 0 auto;padding-right:11px;gap:11px}
+ #topicSpotlightClone{display:flex}
  .topic-spotlight-card{scroll-snap-align:none}
  .topic-spotlight-img,.topic-spotlight-card{transition:none}
 }
