@@ -733,11 +733,11 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 }
 
 
-/* v0.7.74: colored period icons above the AI briefing labels. */
+/* v0.7.75: place each colored period icon inline before its label. */
 .news-briefing{width:min(740px,100%);margin:13px auto 0;display:flex;flex-direction:column;align-items:center;gap:12px}
-.news-briefing-actions{display:flex;justify-content:space-between;align-items:flex-start;gap:clamp(12px,2.6vw,28px);flex-wrap:nowrap;width:100%}
-.news-briefing-btn{appearance:none;border:0;background:transparent;padding:5px 2px;color:#202124;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:650;line-height:1.5;cursor:pointer;text-decoration:none;white-space:normal;flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:7px;text-align:center}
-.news-briefing-btn span{display:block}
+.news-briefing-actions{display:flex;justify-content:space-between;align-items:center;gap:clamp(12px,2.6vw,28px);flex-wrap:nowrap;width:100%}
+.news-briefing-btn{appearance:none;border:0;background:transparent;padding:5px 2px;color:#202124;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:650;line-height:1.5;cursor:pointer;text-decoration:none;white-space:normal;flex:1 1 0;min-width:0;display:flex;flex-direction:row;align-items:center;justify-content:center;gap:8px;text-align:left}
+.news-briefing-btn span{display:inline;min-width:0}
 .news-briefing-icon{display:block;width:18px;height:18px;flex:0 0 18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .news-briefing-icon--day{color:#e6a11a}
 .news-briefing-icon--week{color:#4285f4}
@@ -753,4 +753,4 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 .news-briefing-result.is-loading p{color:#70757a}
 .news-briefing-result.is-error{border-color:#f1c7c3;background:#fff9f8}
 .news-briefing-result.is-error p{color:#a33b32}
-@media(max-width:640px){.news-briefing{margin-top:11px;gap:10px}.news-briefing-actions{gap:5px 10px}.news-briefing-btn{font-size:11px;line-height:1.4;gap:6px}.news-briefing-icon{width:17px;height:17px;flex-basis:17px}.news-briefing-result{padding:12px 13px}.news-briefing-result p{font-size:12px;line-height:1.7}}
+@media(max-width:640px){.news-briefing{margin-top:11px;gap:10px}.news-briefing-actions{gap:5px 10px}.news-briefing-btn{font-size:11px;line-height:1.4;gap:5px;padding-inline:0}.news-briefing-icon{width:17px;height:17px;flex-basis:17px}.news-briefing-result{padding:12px 13px}.news-briefing-result p{font-size:12px;line-height:1.7}}
