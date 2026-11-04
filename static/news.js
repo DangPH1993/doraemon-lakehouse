@@ -1222,6 +1222,40 @@
   $('#authModal').addEventListener('click', event => { if (event.target.id === 'authModal') closeAuthModal(); });
   document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#authModal').hidden) closeAuthModal(); if (event.key === 'Escape' && !$('#accountModal').hidden) closeAccountModal(); if (event.key === 'Escape' && !$('#proUpgradeModal').hidden) closeProUpgradePopup(); if (event.key === 'Escape' && !$('#timelineShareModal').hidden) closeTimelineShareDialog(); });
 
+  const newsBriefingLabels = {day: 'Tóm tắt tin hôm nay', week: 'Tóm tắt tin tuần này', month: 'Tóm tắt tin tháng này'};
+  let newsBriefingLoading = false;
+  async function loadNewsBriefing(period) {
+    if (newsBriefingLoading || !newsBriefingLabels[period]) return;
+    const buttons = [...document.querySelectorAll('[data-news-briefing-period]')];
+    const result = $('#newsBriefingResult');
+    newsBriefingLoading = true;
+    buttons.forEach(button => {
+      const selected = button.dataset.newsBriefingPeriod === period;
+      button.disabled = true;
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    });
+    result.hidden = false;
+    result.className = 'news-briefing-result is-loading';
+    result.innerHTML = `<div class="news-briefing-result-heading">${esc(newsBriefingLabels[period])}</div><p>AI đang tổng hợp 10 chủ đề nổi bật và các bài báo liên quan…</p>`;
+    try {
+      const data = await sendJSON('/api/public/news/briefing', 'POST', {period});
+      result.className = 'news-briefing-result';
+      const count = Number(data.topic_count || 0);
+      const sourceLabel = count ? ` · ${num(count)} chủ đề nổi bật` : '';
+      result.innerHTML = `<div class="news-briefing-result-heading">${esc(newsBriefingLabels[period])}${sourceLabel}</div><p>${esc(data.summary || 'Chưa có nội dung tóm tắt.')}</p>`;
+    } catch (error) {
+      result.className = 'news-briefing-result is-error';
+      result.innerHTML = `<div class="news-briefing-result-heading">${esc(newsBriefingLabels[period])}</div><p>${esc(error.message || 'Không thể tạo bản tóm tắt lúc này.')}</p>`;
+    } finally {
+      newsBriefingLoading = false;
+      buttons.forEach(button => { button.disabled = false; });
+    }
+  }
+  document.querySelectorAll('[data-news-briefing-period]').forEach(button => {
+    button.addEventListener('click', () => loadNewsBriefing(button.dataset.newsBriefingPeriod));
+  });
+
   async function initialize() {
     // Older shared links point at /news?timeline_type=...; forward them before
     // loading the homepage feed so article loading cannot push the timeline away.
