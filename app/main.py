@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl, html as html_lib, unicodedata
+import json, logging, threading, secrets, hmac, re, hashlib, smtplib, ssl, html as html_lib, unicodedata, time
 from io import BytesIO
 from datetime import date, timedelta, datetime, timezone
 from typing import Literal
@@ -25,10 +25,11 @@ from .r2_storage import (R2NotConfigured, delete_object as delete_r2_object, get
                          is_configured as r2_is_configured, make_object_key as make_r2_key,
                          put_bytes as put_r2_bytes)
 from .subscriptions import expire_pro_plans
+from .news_briefing import generate_news_briefing
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.72',description='SEO article pages, topic spotlight ticker, and period-filtered entity cloud and consistent timeline typography.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.73',description='AI-generated concise daily, weekly and monthly news briefings from top topics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -130,6 +131,9 @@ class EntityBody(BaseModel):
 class ArticleClassificationBody(BaseModel):
     topic_names: list[str] = Field(default_factory=list, max_length=30)
     entity_names: list[str] = Field(default_factory=list, max_length=30)
+
+class NewsBriefingBody(BaseModel):
+    period: Literal['day', 'week', 'month'] = 'day'
 
 class RuleBody(BaseModel):
     name: str = Field(min_length=2,max_length=180)
@@ -1605,6 +1609,121 @@ def public_hot_topics(
     items = [item for item in items if not is_broad_field_topic(item.get('topic_name'))][:limit]
     return {'period': period, 'period_start': period_start, 'period_label': label,
             'items': items, 'count': len(items)}
+
+
+# Per-process cache prevents repeated AI calls when visitors request the same
+# period summary within a short window. No generated article content is persisted.
+_NEWS_BRIEFING_CACHE: dict[tuple[str, date], tuple[float, dict]] = {}
+_NEWS_BRIEFING_CACHE_LOCK = threading.Lock()
+_NEWS_BRIEFING_CACHE_TTL_SECONDS = 1800
+
+
+def _news_briefing_period(period: str, today: date) -> tuple[date, str]:
+    if period == 'day':
+        return today, 'Hôm nay'
+    if period == 'week':
+        return today - timedelta(days=today.weekday()), 'Tuần này'
+    return date(today.year, today.month, 1), 'Tháng này'
+
+
+def _fetch_news_briefing_topics(period: str, period_start: date) -> list[dict]:
+    """Fetch the top ten ranked event topics and representative articles in one query."""
+    candidates = fetch_all("""WITH ranked_topics AS (
+        SELECT f.topic_id, t.name AS topic_name, f.article_count, f.source_count,
+               f.hotness_score, f.rank_position
+        FROM fact_topic_trending f
+        JOIN topics t ON t.topic_id=f.topic_id
+        WHERE f.period_type=%s AND f.period_start=%s
+          AND t.status='active' AND t.topic_type='event'
+        ORDER BY f.rank_position ASC, f.hotness_score DESC, f.article_count DESC
+        LIMIT 60
+    ), topic_samples AS (
+        SELECT ranked.topic_id,
+               json_agg(json_build_object(
+                   'title', sample.title,
+                   'snippet', sample.snippet,
+                   'source_name', sample.source_name
+               ) ORDER BY sample.article_order) AS sample_articles
+        FROM ranked_topics ranked
+        JOIN LATERAL (
+            SELECT a.article_id, a.title,
+                   left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 380) AS snippet,
+                   ds.name AS source_name,
+                   row_number() OVER (ORDER BY coalesce(a.published_at,a.collected_at) DESC NULLS LAST,
+                                               a.article_id DESC) AS article_order
+            FROM article_topics rel
+            JOIN news_articles a ON a.article_id=rel.article_id
+            JOIN data_sources ds ON ds.source_id=a.source_id
+            WHERE rel.topic_id=ranked.topic_id AND a.is_excluded=false
+            ORDER BY coalesce(a.published_at,a.collected_at) DESC NULLS LAST, a.article_id DESC
+            LIMIT 3
+        ) sample ON true
+        GROUP BY ranked.topic_id
+    )
+    SELECT ranked.topic_id, ranked.topic_name, ranked.article_count,
+           ranked.source_count, ranked.hotness_score, ranked.rank_position,
+           topic_samples.sample_articles
+    FROM ranked_topics ranked
+    JOIN topic_samples ON topic_samples.topic_id=ranked.topic_id
+    ORDER BY ranked.rank_position ASC, ranked.hotness_score DESC, ranked.article_count DESC
+    """, (period, period_start))
+    # Do not let broad editorial categories consume one of the ten summary slots.
+    return [row for row in candidates if not is_broad_field_topic(row.get('topic_name'))][:10]
+
+
+@app.post('/api/public/news/briefing')
+def public_news_briefing(body: NewsBriefingBody):
+    """Generate a short Vietnamese summary of the ten leading topics for a period."""
+    local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
+    today = (local or {}).get('today')
+    if today is None:
+        raise HTTPException(status_code=503, detail='Không xác định được ngày theo múi giờ website.')
+    period_start, period_label = _news_briefing_period(body.period, today)
+    cache_key = (body.period, period_start)
+
+    with _NEWS_BRIEFING_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _NEWS_BRIEFING_CACHE.get(cache_key)
+        if cached and now - cached[0] < _NEWS_BRIEFING_CACHE_TTL_SECONDS:
+            return {**cached[1], 'cached': True}
+
+        topics = _fetch_news_briefing_topics(body.period, period_start)
+        if not topics:
+            return {
+                'period': body.period,
+                'period_start': period_start,
+                'period_label': period_label,
+                'topic_count': 0,
+                'summary': f'Chưa có đủ dữ liệu tin tức đã được phân loại để tạo tóm tắt cho kỳ {period_label.lower()}.',
+                'cached': False,
+            }
+        try:
+            summary = generate_news_briefing(period_label, topics)
+        except RuntimeError as exc:
+            message = str(exc)
+            if 'OPENAI_API_KEY is not configured' in message:
+                log.error('News briefing skipped: OPENAI_API_KEY is not configured.')
+                raise HTTPException(status_code=503, detail='Chức năng tóm tắt AI chưa được cấu hình. Vui lòng kiểm tra OPENAI_API_KEY trên Render.') from exc
+            log.exception('OpenAI news briefing failed for period=%s start=%s', body.period, period_start)
+            raise HTTPException(status_code=502, detail='AI chưa tạo được bản tóm tắt. Vui lòng thử lại sau.') from exc
+        except Exception as exc:
+            log.exception('Unexpected news briefing failure for period=%s start=%s', body.period, period_start)
+            raise HTTPException(status_code=502, detail='Không thể tạo bản tóm tắt lúc này. Vui lòng thử lại sau.') from exc
+
+        result = {
+            'period': body.period,
+            'period_start': period_start,
+            'period_label': period_label,
+            'topic_count': len(topics),
+            'summary': summary,
+            'cached': False,
+        }
+        _NEWS_BRIEFING_CACHE[cache_key] = (now, result)
+        # Keep the tiny in-memory cache bounded to the most recent few period keys.
+        if len(_NEWS_BRIEFING_CACHE) > 6:
+            oldest_key = min(_NEWS_BRIEFING_CACHE, key=lambda key: _NEWS_BRIEFING_CACHE[key][0])
+            _NEWS_BRIEFING_CACHE.pop(oldest_key, None)
+        return result
 
 
 @app.get('/api/public/news/articles')
