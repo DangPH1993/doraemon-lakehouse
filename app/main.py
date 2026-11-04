@@ -28,7 +28,7 @@ from .subscriptions import expire_pro_plans
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.69',description='SEO article pages and single-row continuously moving trending-topic spotlight ticker above homepage search.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.70',description='SEO article pages, topic spotlight ticker, and period-filtered entity cloud.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -1485,14 +1485,40 @@ def public_news_overview():
 
 @app.get('/api/public/news/entity-cloud')
 def public_entity_cloud(
+    period: str = Query(default='day', pattern='^(day|week|month)$'),
     limit: int = Query(default=20, ge=5, le=20),
 ):
-    """Return the top 20 story entities in the rolling 24-hour news window.
+    """Return the most-mentioned story entities for the selected period.
 
-    Counts distinct included articles (not raw mentions); publisher/source labels are excluded
-    because source names are metadata, not story entities users should follow.
+    Day keeps the existing rolling 24-hour window. Week starts Monday 00:00 and
+    month starts on day 1 at 00:00 in the configured application timezone.
+    Counts are distinct included articles, not raw mentions.
     """
-    candidates = fetch_all("""SELECT e.entity_id,
+    local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
+    today = (local or {}).get('today')
+    if today is None:
+        raise HTTPException(status_code=503, detail='Could not resolve local date')
+
+    if period == 'day':
+        period_label = '24 giờ gần nhất'
+        time_filter = "(a.published_at >= now() - interval '24 hours' OR (a.published_at IS NULL AND a.collected_at >= now() - interval '24 hours'))"
+        params = ()
+        window_start = None
+    else:
+        if period == 'week':
+            period_start = today - timedelta(days=today.weekday())
+            period_label = 'Tuần này'
+        else:
+            period_start = date(today.year, today.month, 1)
+            period_label = 'Tháng này'
+        # Convert the local period boundary to timestamptz in PostgreSQL so
+        # articles published/collected around midnight are grouped correctly.
+        period_start_local = datetime.combine(period_start, datetime.min.time())
+        time_filter = "(a.published_at >= (%s AT TIME ZONE %s) OR (a.published_at IS NULL AND a.collected_at >= (%s AT TIME ZONE %s)))"
+        params = (period_start_local, settings.timezone, period_start_local, settings.timezone)
+        window_start = period_start_local.isoformat()
+
+    query = f"""SELECT e.entity_id,
                               e.canonical_name AS name,
                               e.entity_type,
                               coalesce(e.description, '') AS description,
@@ -1505,17 +1531,25 @@ def public_entity_cloud(
                        WHERE e.status='active'
                          AND nullif(btrim(e.canonical_name), '') IS NOT NULL
                          AND a.is_excluded=false
-                         AND (a.published_at >= now() - interval '24 hours'
-                              OR (a.published_at IS NULL AND a.collected_at >= now() - interval '24 hours'))
+                         AND {time_filter}
                        GROUP BY e.entity_id, e.canonical_name, e.entity_type, e.description
                        ORDER BY count(DISTINCT a.article_id) DESC,
                                 max(coalesce(a.published_at, a.collected_at)) DESC,
                                 e.canonical_name ASC
-                       LIMIT 300""")
+                       LIMIT 300"""
+    candidates = fetch_all(query, params)
     items = [item for item in candidates
              if should_track_entity(str(item.get('name') or ''), str(item.get('entity_type') or 'UNKNOWN'))
              and not is_media_source_entity(str(item.get('name') or ''), str(item.get('entity_type') or 'UNKNOWN'))][:limit]
-    return {'window_hours': 24, 'items': items, 'count': len(items), 'limit': limit}
+    return {
+        'period': period,
+        'period_label': period_label,
+        'window_hours': 24 if period == 'day' else None,
+        'window_start': window_start,
+        'items': items,
+        'count': len(items),
+        'limit': limit,
+    }
 
 
 @app.get('/api/public/news/hot-topics')
