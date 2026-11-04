@@ -8,6 +8,7 @@
   let page = Math.max(1, Number(params.get('page')) || 1);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const num = value => new Intl.NumberFormat('vi-VN').format(Number(value || 0));
+  const externalArrowIconHTML = () => '<span class="ui-external-icon" aria-hidden="true"></span>';
   const safeHref = value => {
     try { const url = new URL(String(value || ''), window.location.origin); return ['http:','https:'].includes(url.protocol) ? esc(url.href) : '#'; }
     catch { return '#'; }
@@ -54,7 +55,7 @@
           <h3><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a></h3>
           ${item.snippet ? `<p class="radar-row-snippet">${esc(item.snippet)}</p>` : ''}
           ${related ? `<p class="following-related">${relatedLabel}${esc(related)}</p>` : ''}
-        </div></div><div class="radar-row-end"><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a></div>
+        </div></div><div class="radar-row-end"><a class="article-source-link" href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ${externalArrowIconHTML()}</a></div>
       </article>`;
     }).join('');
   }

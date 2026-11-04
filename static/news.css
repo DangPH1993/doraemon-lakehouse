@@ -391,9 +391,9 @@ body{background:#fff;color:#202124;font-size:14px}
 
 /* v0.7.29: frameless circular entity bubble cloud */
 .entity-cloud-section{width:min(900px,100%);margin:16px 0 0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;text-align:left}
-.entity-cloud-heading{display:flex;align-items:center;justify-content:flex-end;gap:14px;margin:0 0 4px}
+.entity-cloud-heading{position:relative;z-index:5;pointer-events:auto;display:flex;align-items:center;justify-content:flex-end;gap:14px;margin:0 0 4px}
 .entity-cloud-window{flex:0 0 auto;border:1px solid #dbe7fd;border-radius:999px;padding:6px 9px;background:#f2f6ff;color:#3568b8;font-size:9px;font-weight:750;white-space:nowrap}
-.entity-cloud{position:relative;display:block;width:min(680px,100%);height:auto;aspect-ratio:1;min-height:0;padding:0;margin:8px auto 0;max-width:100%;overflow:visible}
+.entity-cloud{position:relative;z-index:1;display:block;width:min(680px,100%);height:auto;aspect-ratio:1;min-height:0;padding:0;margin:8px auto 0;max-width:100%;overflow:visible}
 .entity-bubble{position:absolute;left:50%;top:50%;width:var(--bubble-size,80px);height:var(--bubble-size,80px);display:flex;flex:0 0 auto;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:7px;border:1px solid transparent;border-radius:50%;overflow:hidden;text-align:center;cursor:pointer;color:#18364a;box-shadow:0 3px 9px rgba(36,57,72,.08);transform:translate(-50%,-50%);transition:left .16s ease,top .16s ease,transform .16s ease,box-shadow .16s ease,filter .16s ease;font:inherit}
 .entity-bubble:hover,.entity-bubble:focus-visible{transform:translate(-50%,calc(-50% - 3px)) scale(1.04);box-shadow:0 8px 18px rgba(36,57,72,.16);outline:2px solid #8ab4f8;outline-offset:2px;filter:saturate(1.08);z-index:2}
 .entity-bubble.tone-blue{background:#e8f0fe;border-color:#d4e2fd;color:#174ea6}.entity-bubble.tone-teal{background:#e0f2f1;border-color:#c5e7e3;color:#0b625b}.entity-bubble.tone-violet{background:#f0e9ff;border-color:#e1d4ff;color:#6741a5}.entity-bubble.tone-orange{background:#fff0e2;border-color:#ffdfc3;color:#a64b12}.entity-bubble.tone-green{background:#e6f4ea;border-color:#cce8d3;color:#137333}.entity-bubble.tone-slate{background:#eef2f6;border-color:#dde4ed;color:#425466}
@@ -702,14 +702,16 @@ body{font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#222}
 @media(max-width:640px){.search-home{padding-top:28px}}
 
 
-/* v0.7.70: entity cloud time range controls and font-independent external-link arrows. */
+/* v0.7.71: clickable entity-period controls and CSS-drawn external-link marks. */
 .entity-cloud-period-switch{display:inline-flex;align-items:center;gap:4px;padding:3px;border:1px solid #e5eaf2;border-radius:999px;background:#f5f7fa;max-width:100%;}
 .entity-cloud-period-btn{appearance:none;border:0;border-radius:999px;padding:6px 10px;background:transparent;color:#5f6b7a;font:650 9px/1.2 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;white-space:nowrap;cursor:pointer;}
 .entity-cloud-period-btn:hover{background:#eaf1ff;color:#1a73e8;}
 .entity-cloud-period-btn.active{background:#fff;color:#1a73e8;box-shadow:0 1px 3px #20212420;}
 .entity-cloud-period-btn:focus-visible{outline:2px solid #8ab4f8;outline-offset:2px;}
-.ui-arrow-icon{display:inline-block;width:12px;height:12px;flex:0 0 12px;vertical-align:-2px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;}
-.timeline-action .ui-arrow-icon{width:11px;height:11px;flex-basis:11px;}
-.timeline-share-button .ui-arrow-icon{width:13px;height:13px;flex-basis:13px;}
-.article-source-link .ui-arrow-icon{width:10px;height:10px;flex-basis:10px;}
+.ui-external-icon{position:relative;display:inline-block;width:12px;height:12px;flex:0 0 12px;vertical-align:-2px;color:currentColor;}
+.ui-external-icon::before{content:"";position:absolute;left:1px;bottom:1px;width:7px;height:7px;border:1.4px solid currentColor;border-top:0;border-right:0;border-radius:0 0 0 2px;}
+.ui-external-icon::after{content:"";position:absolute;right:1px;top:1px;width:6px;height:6px;border-top:1.6px solid currentColor;border-right:1.6px solid currentColor;}
+.timeline-action .ui-external-icon{width:11px;height:11px;flex-basis:11px;}
+.timeline-share-button .ui-external-icon{width:13px;height:13px;flex-basis:13px;}
+.article-source-link .ui-external-icon{width:10px;height:10px;flex-basis:10px;}
 @media(max-width:640px){.entity-cloud-period-switch{gap:2px;padding:2px}.entity-cloud-period-btn{padding:6px 8px;font-size:9px}}

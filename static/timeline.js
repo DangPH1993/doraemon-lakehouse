@@ -21,6 +21,7 @@
     if (id < 1) return label;
     return `<a class="article-timestamp-link" href="${articlePageHref(item)}" title="Mở trang tin trên 3T" aria-label="Mở trang tin 3T: ${esc(item?.title || 'Bài viết')}">${label}</a>`;
   }
+  const externalArrowIconHTML = () => '<span class="ui-external-icon" aria-hidden="true"></span>';
   function originalArticleURL(item) {
     try {
       const url = new URL(String(item?.url || ''));
@@ -36,7 +37,7 @@
   }
   function articleSourceLinkHTML(item) {
     const sourceURL = originalArticleURL(item);
-    return sourceURL ? `<a class="article-source-link" href="${esc(sourceURL)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ↗</a>` : '';
+    return sourceURL ? `<a class="article-source-link" href="${esc(sourceURL)}" target="_blank" rel="noopener noreferrer">Đọc bài gốc ${externalArrowIconHTML()}</a>` : '';
   }
   function safeImageHref(value) {
     try { const url = new URL(String(value || '')); return ['http:', 'https:'].includes(url.protocol) && url.hostname && !url.username && !url.password ? esc(url.href) : ''; }

@@ -24,7 +24,7 @@
   $('#articleDateTo').value = initialToday;
   const periodLabels = {day: 'Hôm nay', week: 'Tuần này', month: 'Tháng này'};
   const entityCloudPeriodLabels = {day: '24 giờ gần nhất', week: 'Tuần này', month: 'Tháng này'};
-  const externalArrowIconHTML = () => '<svg class="ui-arrow-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M5 11 12 4M6 4h6v6" /></svg>';
+  const externalArrowIconHTML = () => '<span class="ui-external-icon" aria-hidden="true"></span>';
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const num = (value) => new Intl.NumberFormat('vi-VN').format(Number(value || 0));
   const safeHref = (value) => {
