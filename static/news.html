@@ -139,9 +139,27 @@
       </form>
       <div class="news-briefing" id="newsBriefing">
         <div class="news-briefing-actions" role="group" aria-label="Chọn kỳ tóm tắt tin tức">
-          <button type="button" class="news-briefing-btn" data-news-briefing-period="day" aria-pressed="false">Tóm tắt tin hôm nay</button>
-          <button type="button" class="news-briefing-btn" data-news-briefing-period="week" aria-pressed="false">Tóm tắt tin tuần này</button>
-          <button type="button" class="news-briefing-btn" data-news-briefing-period="month" aria-pressed="false">Tóm tắt tin tháng này</button>
+          <button type="button" class="news-briefing-btn" data-news-briefing-period="day" aria-pressed="false">
+            <svg class="news-briefing-icon news-briefing-icon--day" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="12" r="3.5" />
+              <path d="M12 2.5v2.2M12 19.3v2.2M4.8 4.8l1.6 1.6m11.2 11.2 1.6 1.6M2.5 12h2.2m14.6 0h2.2M4.8 19.2l1.6-1.6M17.6 6.4l1.6-1.6" />
+            </svg>
+            <span>Tóm tắt tin hôm nay</span>
+          </button>
+          <button type="button" class="news-briefing-btn" data-news-briefing-period="week" aria-pressed="false">
+            <svg class="news-briefing-icon news-briefing-icon--week" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <rect x="3.5" y="5" width="17" height="15.5" rx="2" />
+              <path d="M7.5 3v4M16.5 3v4M3.5 9h17M8 12.5h2m4 0h2M8 16h2" />
+            </svg>
+            <span>Tóm tắt tin tuần này</span>
+          </button>
+          <button type="button" class="news-briefing-btn" data-news-briefing-period="month" aria-pressed="false">
+            <svg class="news-briefing-icon news-briefing-icon--month" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <rect x="3.5" y="5" width="17" height="15.5" rx="2" />
+              <path d="M7.5 3v4M16.5 3v4M3.5 9h17M8 12.5h2m4 0h2M8 16h2m4 0h2" />
+            </svg>
+            <span>Tóm tắt tin tháng này</span>
+          </button>
         </div>
         <section class="news-briefing-result" id="newsBriefingResult" aria-live="polite" aria-atomic="true" hidden></section>
       </div>
@@ -281,4 +299,3 @@
   <script src="/static/news.js?v=0.7.73" defer></script>
 </body>
 </html>
-
