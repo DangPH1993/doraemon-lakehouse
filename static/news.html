@@ -6,11 +6,11 @@
   <meta name="theme-color" content="#ffffff">
   <link id="siteFavicon" rel="icon" type="image/x-icon" href="/favicon.ico?v=0.7.58">
   <link id="siteAppleTouchIcon" rel="apple-touch-icon" href="/static/favicon.png?v=0.7.58">
-  <meta name="app-version" content="0.7.69">
+  <meta name="app-version" content="0.7.70">
   <meta name="description" content="Tìm Tin Tức — tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>Tìm Tin Tức | timtintuc.com</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.69">
-  <!-- Google tag (gtag.js) -->
+  <link rel="stylesheet" href="/static/news.css?v=0.7.70">
+   <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18540111997">
 </script>
 <script>
@@ -146,9 +146,13 @@
       <div id="searchResults" class="radar-list" aria-live="polite"></div>
       <div id="searchPagination" class="pagination-row"></div>
     </section>
-      <section class="entity-cloud-section" id="entityCloudSection" aria-label="Entity nổi bật trong 24 giờ">
+      <section class="entity-cloud-section" id="entityCloudSection" aria-label="Entity nổi bật theo khoảng thời gian">
         <div class="entity-cloud-heading">
-          <span class="entity-cloud-window">24 giờ gần nhất</span>
+          <div class="entity-cloud-period-switch" role="group" aria-label="Khoảng thời gian thống kê entity">
+            <button type="button" class="entity-cloud-period-btn active" data-entity-period="day" aria-pressed="true">24 giờ gần nhất</button>
+            <button type="button" class="entity-cloud-period-btn" data-entity-period="week" aria-pressed="false">Tuần này</button>
+            <button type="button" class="entity-cloud-period-btn" data-entity-period="month" aria-pressed="false">Tháng này</button>
+          </div>
         </div>
         <div id="entityCloud" class="entity-cloud" aria-live="polite"><div class="entity-cloud-loading">Đang tải entity nổi bật…</div></div>
       </section>
@@ -197,7 +201,7 @@
         <div><p class="eyebrow">FOLLOW THE STORY</p><h2>Timeline chi tiết</h2><p class="section-subtitle">Mở timeline từ tin nổi bật hoặc tin trong ngày để xem toàn bộ diễn biến.</p></div>
         <div class="timeline-heading-actions">
           <div class="timeline-selected" id="timelineSelectionLabel">Chưa chọn sự kiện hoặc đối tượng</div>
-          <button class="auth-button auth-button-secondary timeline-share-button" id="shareTimelineButton" type="button" disabled title="Mở một timeline trước khi chia sẻ">↗ Chia sẻ timeline</button>
+          <button class="auth-button auth-button-secondary timeline-share-button" id="shareTimelineButton" type="button" disabled title="Mở một timeline trước khi chia sẻ"><svg class="ui-arrow-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M5 11 12 4M6 4h6v6" /></svg> Chia sẻ timeline</button>
         </div>
       </div>
       <div id="timelineContainer" class="timeline-container"><div class="empty-state"><span class="empty-icon">◎</span><strong>Chọn “Xem timeline” trên một tin</strong><p>Các bài báo liên quan sẽ hiển thị tại đây theo trình tự thời gian.</p></div></div>
@@ -266,6 +270,6 @@
 
   <script src="/static/analytics.js?v=0.7.58" defer></script>
   <script src="/static/branding.js?v=0.7.58" defer></script>
-  <script src="/static/news.js?v=0.7.69" defer></script>
+  <script src="/static/news.js?v=0.7.70" defer></script>
 </body>
 </html>
