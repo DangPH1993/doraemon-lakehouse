@@ -29,7 +29,7 @@ from .news_briefing import generate_news_briefing
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.74',description='AI-generated concise daily, weekly and monthly news briefings from top topics.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.75',description='AI-generated concise daily, weekly and monthly news briefings from top topics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
