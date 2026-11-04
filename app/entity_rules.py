@@ -148,6 +148,41 @@ _MEDIA_SOURCE_NAMES = {
 _MEDIA_SOURCE_FOLDED = {_fold(x) for x in _MEDIA_SOURCE_NAMES}
 _MEDIA_SOURCE_TYPES = {'SOURCE', 'NEWS_SOURCE', 'MEDIA_SOURCE', 'MEDIA_OUTLET', 'NEWS_OUTLET', 'PUBLISHER', 'PUBLICATION'}
 
+# Lower-case predicates that commonly remain attached when an NER/model extracts only
+# the beginning of a Vietnamese sentence as an entity (for example, "Donald Trump bảo").
+# The case-sensitive guard deliberately preserves real name tokens such as "Bảo".
+_CLAUSE_TAIL_FRAGMENTS = (
+    'cho biết', 'cho hay', 'cho rằng', 'lên tiếng', 'cảnh báo', 'khẳng định',
+    'nhấn mạnh', 'tuyên bố', 'đề nghị', 'yêu cầu', 'kêu gọi', 'tiết lộ',
+    'chia sẻ', 'bày tỏ', 'nhận định', 'đánh giá', 'thông báo', 'cam kết',
+    'mong muốn', 'đồng ý', 'phản đối', 'ủng hộ', 'bác bỏ', 'nói', 'bảo',
+    'viết', 'đăng', 'phát biểu', 'trả lời', 'cho biết thêm',
+)
+
+
+def is_clause_fragment_entity(name: str) -> bool:
+    'Detect a proper-name prefix accidentally extended by a lower-case predicate.'
+    raw = normalize_space(str(name or '')).strip(' .,:;!?…')
+    if not raw:
+        return False
+    raw_words = raw.split()
+    folded = _fold(raw)
+    for tail in sorted(_CLAUSE_TAIL_FRAGMENTS, key=len, reverse=True):
+        tail_folded = _fold(tail)
+        if not folded.endswith(' ' + tail_folded):
+            continue
+        tail_count = len(tail.split())
+        if len(raw_words) <= tail_count:
+            continue
+        raw_tail = ' '.join(raw_words[-tail_count:])
+        # A lower-case predicate after a capitalized proper-name prefix is a sentence
+        # fragment. A capitalized token such as "Bảo" may be a legitimate name component.
+        if raw_tail == raw_tail.lower():
+            prefix = raw_words[:-tail_count]
+            if len(prefix) >= 1 and any(any(ch.isupper() for ch in word) for word in prefix):
+                return True
+    return False
+
 
 def is_media_source_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
     """Return True for publisher/source labels, which are not story-follow entities."""
@@ -367,6 +402,8 @@ def should_track_entity(name: str, entity_type: str = 'UNKNOWN') -> bool:
     if len(normalized) < 2 or len(normalized) > 180:
         return False
     if is_media_source_entity(name, entity_type):
+        return False
+    if is_clause_fragment_entity(name):
         return False
     if is_numeric_or_date_entity(name):
         return False

@@ -28,7 +28,7 @@ from psycopg.rows import dict_row
 from .config import settings
 from .db import get_conn, get_lock_database_url
 from .field_categories import is_broad_field_topic
-from .entity_rules import is_media_source_entity, should_track_entity
+from .entity_rules import is_clause_fragment_entity, is_media_source_entity, should_track_entity
 from .processing import norm_name
 
 log = logging.getLogger('mini-lakehouse.reconcile')
@@ -278,6 +278,8 @@ def call_openai_entity_quality(items: list[dict]) -> list[dict]:
             'KEEP only when the name and supplied context identify a specific entity/referent, not merely a type, concept, common word, role, label, fragment, or ambiguous name.',
             'Specific entities include identifiable people, organizations, companies, locations, events, named products/brands, groups, works, and other particular named objects.',
             'REJECT generic nouns, bare ambiguous words, category labels, ordinal labels such as "Kỳ 1", noisy extraction fragments, and entries whose context is insufficient to identify a particular entity.',
+            'REJECT sentence fragments where a valid name is followed by a lower-case Vietnamese reporting/action predicate, e.g. "Donald Trump bảo", "Apple cho biết", or "Bộ Công an cảnh báo". Keep the proper name only if it is independently present as a complete name.',
+            'Do not reject a legitimate capitalized name component merely because it resembles a verb when capitalized (for example, the name token "Bảo").',
             'Do not infer an identity from a short name alone or from a famous name association without support in the supplied context.',
             'When uncertain, choose REJECT. Do not invent facts. The decision must be grounded only in the supplied name, type, aliases, description and article context.',
             'Evaluate identity/eligibility, not whether two records are duplicates. Do not merge or rename records.',
@@ -320,7 +322,29 @@ def validate_discovered_entities(items: list[dict], stats: dict) -> set[int]:
     stats.setdefault('entity_quality_rejected', 0)
     stats.setdefault('entity_quality_deleted', 0)
     stats.setdefault('entity_quality_deleted_from_previous_runs', 0)
+    stats.setdefault('entity_quality_rule_rejected', 0)
     model_name = settings.openai_model.strip() or 'gpt-4.1-mini'
+
+    # Deterministically remove obvious clause tails before GenAI review. The entity-cloud
+    # endpoint also filters these names immediately, while this job physically removes
+    # discovered rows, cascades their article links, and tombstones the identity to prevent
+    # recurring extraction noise from consuming tokens on every reconciliation run.
+    clause_fragments = [item for item in items
+                        if str(item.get('origin') or 'discovered').lower() == 'discovered'
+                        and is_clause_fragment_entity(str(item.get('name') or ''))]
+    if clause_fragments:
+        with get_conn() as conn, conn.cursor() as cur:
+            for item in clause_fragments:
+                _persist_rejection_tombstone(cur, item)
+            deleted = _delete_discovered_entities(cur, [int(item['id']) for item in clause_fragments])
+        stats['entity_quality_rule_rejected'] += deleted
+        stats['entity_quality_rejected'] += deleted
+        stats['entity_quality_deleted'] += deleted
+        rejected_ids = {int(item['id']) for item in clause_fragments}
+        items = [item for item in items if int(item['id']) not in rejected_ids]
+        log.info('Entity quality deterministic gate: rejected %s clause-fragment entities', deleted)
+    if not items:
+        return set()
 
     # Migrate decisions from v0.7.10: formerly rejected rows were archived. Persist a detached
     # tombstone before physically deleting them so the next article cannot trigger the same call.
