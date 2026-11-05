@@ -14,7 +14,7 @@
   const initialToday = todayInVietnam();
   const state = {
     period: 'day', selectedTimeline: null, timelinePage: 1, articlePage: 1, searchPage: 1,
-    articlePageSize: 8, searchPageSize: 20, timelinePageSize: 20, searchQuery: '', fieldCategory: '', entityCloudPeriod: 'day',
+    articlePageSize: 8, searchPageSize: 20, timelinePageSize: 20, searchQuery: '', fieldCategory: '', entityCloudPeriod: 'day', entityCloudField: '',
     articleHasMore: false, articleLoading: false, articleVisibleCount: 0, articleRequestSeq: 0, articleLoadError: '',
     dateFrom: initialToday, dateTo: initialToday,
     user: null, savedTimelines: [], picked: new Set(), followMeta: new Map(),
@@ -24,6 +24,7 @@
   $('#articleDateTo').value = initialToday;
   const periodLabels = {day: 'Hôm nay', week: 'Tuần này', month: 'Tháng này'};
   const entityCloudPeriodLabels = {day: '24 giờ gần nhất', week: 'Tuần này', month: 'Tháng này'};
+  const entityCloudFieldLabels = ['Thời sự', 'Thế giới', 'Thể thao', 'Kinh doanh', 'Khoa học', 'Đời sống'];
   const externalArrowIconHTML = () => '<span class="ui-external-icon" aria-hidden="true"></span>';
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const num = (value) => new Intl.NumberFormat('vi-VN').format(Number(value || 0));
@@ -291,9 +292,11 @@
   function renderEntityCloud(items, period = state.entityCloudPeriod) {
     const container = $('#entityCloud');
     const periodLabel = entityCloudPeriodLabels[period] || entityCloudPeriodLabels.day;
+    const fieldLabel = state.entityCloudField || '';
     if (!items.length) {
       lastEntityCloudItems = [];
-      container.innerHTML = `<div class="entity-cloud-empty">Chưa có entity nổi bật trong ${esc(periodLabel.toLocaleLowerCase('vi-VN'))}. Các bubble sẽ xuất hiện khi bài báo được liên kết với entity chuẩn.</div>`;
+      const fieldHint = fieldLabel ? ` trong lĩnh vực ${esc(fieldLabel)}` : '';
+      container.innerHTML = `<div class="entity-cloud-empty">Chưa có entity nổi bật trong ${esc(periodLabel.toLocaleLowerCase('vi-VN'))}${fieldHint}. Các bubble sẽ xuất hiện khi bài báo được liên kết với entity chuẩn.</div>`;
       return;
     }
     const tones = ['blue','teal','violet','orange','green','slate'];
@@ -304,7 +307,8 @@
     container.innerHTML = cloudItems.map((entity, index) => {
       const count = Math.max(1, Number(entity.article_count || 1));
       const longName = String(entity.name || '').length > 19 ? ' is-long' : '';
-      const title = `${entity.name || 'Entity'} · ${num(count)} bài báo trong ${periodLabel.toLocaleLowerCase('vi-VN')} · ${num(entity.source_count)} nguồn`;
+      const fieldHint = fieldLabel ? ` thuộc lĩnh vực ${fieldLabel}` : '';
+      const title = `${entity.name || 'Entity'} · ${num(count)} bài báo trong ${periodLabel.toLocaleLowerCase('vi-VN')}${fieldHint} · ${num(entity.source_count)} nguồn`;
       return `<button type="button" class="entity-bubble tone-${tones[index % tones.length]}${longName}" data-cloud-index="${index}" data-open-timeline="entity" data-timeline-id="${Number(entity.entity_id)}" data-timeline-name="${esc(entity.name)}" title="${esc(title)}" aria-label="Mở timeline ${esc(entity.name)}; ${num(count)} bài báo trong ${esc(periodLabel.toLocaleLowerCase('vi-VN'))}">
         <span class="entity-bubble-name">${esc(entity.name)}</span><span class="entity-bubble-count">${num(count)} bài</span>
       </button>`;
@@ -318,14 +322,16 @@
       if (container && lastEntityCloudItems.length) layoutEntityCloud(container, lastEntityCloudItems);
     }, 120);
   });
-  async function loadEntityCloud(period = state.entityCloudPeriod) {
+  async function loadEntityCloud(period = state.entityCloudPeriod, fieldCategory = state.entityCloudField) {
     const container = $('#entityCloud');
     if (!container) return;
     const requestSeq = ++entityCloudRequestSeq;
     state.entityCloudPeriod = ['day', 'week', 'month'].includes(period) ? period : 'day';
+    state.entityCloudField = entityCloudFieldLabels.includes(fieldCategory) ? fieldCategory : '';
     container.innerHTML = '<div class="entity-cloud-loading">Đang tải entity nổi bật…</div>';
     try {
-      const data = await getJSON(`/api/public/news/entity-cloud?limit=20&period=${encodeURIComponent(state.entityCloudPeriod)}`);
+      const fieldQuery = state.entityCloudField ? `&field_category=${encodeURIComponent(state.entityCloudField)}` : '';
+      const data = await getJSON(`/api/public/news/entity-cloud?limit=20&period=${encodeURIComponent(state.entityCloudPeriod)}${fieldQuery}`);
       if (requestSeq !== entityCloudRequestSeq) return;
       renderEntityCloud(data.items || [], state.entityCloudPeriod);
     } catch (error) {
@@ -993,6 +999,16 @@
     renderAuthArea(); $('#userFeedContainer').innerHTML = ''; $('#savedTimelineTags').innerHTML = ''; $('#telegramStatus').textContent = 'Đăng nhập để cấu hình Telegram.'; syncFollowButtons(); updateSelectionCount();
   }
 
+  document.addEventListener('change', async event => {
+    const fieldSelect = event.target.closest('#entityCloudFieldSelect');
+    if (!fieldSelect) return;
+    const selectedField = fieldSelect.value || '';
+    if ((selectedField === '' || entityCloudFieldLabels.includes(selectedField)) && selectedField !== state.entityCloudField) {
+      state.entityCloudField = selectedField;
+      await loadEntityCloud(state.entityCloudPeriod, selectedField);
+    }
+  });
+
   document.addEventListener('click', async event => {
     const authOpen = event.target.closest('[data-auth-open]'); if (authOpen) { openAuthModal(authOpen.dataset.authOpen); return; }
     const authClose = event.target.closest('[data-auth-close]'); if (authClose) { closeAuthModal(); return; }
@@ -1043,7 +1059,7 @@
           btn.classList.toggle('active', active);
           btn.setAttribute('aria-pressed', String(active));
         });
-        await loadEntityCloud(selectedPeriod);
+        await loadEntityCloud(selectedPeriod, state.entityCloudField);
       }
       return;
     }
