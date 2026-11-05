@@ -6,10 +6,10 @@
   <meta name="theme-color" content="#ffffff">
   <link id="siteFavicon" rel="icon" type="image/x-icon" href="/favicon.ico?v=0.7.58">
   <link id="siteAppleTouchIcon" rel="apple-touch-icon" href="/static/favicon.png?v=0.7.58">
-  <meta name="app-version" content="0.7.77">
+  <meta name="app-version" content="0.7.78">
   <meta name="description" content="Tìm Tin Tức — tìm kiếm tin tức và theo dõi timeline sự kiện, nhân vật, tổ chức từ nhiều nguồn báo chí.">
   <title>Tìm Tin Tức | timtintuc.com</title>
-  <link rel="stylesheet" href="/static/news.css?v=0.7.77">
+  <link rel="stylesheet" href="/static/news.css?v=0.7.78">
   <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18540111997">
 </script>
@@ -174,18 +174,24 @@
     </section>
       <section class="entity-cloud-section" id="entityCloudSection" aria-label="Entity nổi bật theo lĩnh vực và khoảng thời gian">
         <div class="entity-cloud-heading">
-          <label class="entity-cloud-field-select-wrap" for="entityCloudFieldSelect">
-            <span>Lĩnh vực</span>
-            <select id="entityCloudFieldSelect" class="entity-cloud-field-select" aria-label="Lọc entity theo lĩnh vực">
-              <option value="" selected>Tất cả</option>
-              <option value="Thời sự">Thời sự</option>
-              <option value="Thế giới">Thế giới</option>
-              <option value="Thể thao">Thể thao</option>
-              <option value="Kinh doanh">Kinh doanh</option>
-              <option value="Khoa học">Khoa học</option>
-              <option value="Đời sống">Đời sống</option>
-            </select>
-          </label>
+          <div class="entity-cloud-field-filter">
+            <span class="entity-cloud-field-label" id="entityCloudFieldLabel">Lĩnh vực</span>
+            <div class="entity-cloud-field-dropdown" id="entityCloudFieldDropdown">
+              <button type="button" class="entity-cloud-field-trigger" id="entityCloudFieldTrigger" aria-label="Lọc entity theo lĩnh vực" aria-haspopup="listbox" aria-expanded="false" aria-controls="entityCloudFieldMenu">
+                <span id="entityCloudFieldValue">Tất cả</span>
+                <svg class="entity-cloud-field-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <div class="entity-cloud-field-menu" id="entityCloudFieldMenu" role="listbox" aria-labelledby="entityCloudFieldLabel" hidden>
+                <button type="button" class="entity-cloud-field-option is-selected" role="option" aria-selected="true" aria-label="Tất cả" data-entity-field="" data-label="Tất cả" tabindex="0"><span>Tất cả</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg></button>
+                <button type="button" class="entity-cloud-field-option" role="option" aria-selected="false" aria-label="Thời sự" data-entity-field="Thời sự" data-label="Thời sự" tabindex="-1"><span>Thời sự</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg></button>
+                <button type="button" class="entity-cloud-field-option" role="option" aria-selected="false" aria-label="Thế giới" data-entity-field="Thế giới" data-label="Thế giới" tabindex="-1"><span>Thế giới</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg></button>
+                <button type="button" class="entity-cloud-field-option" role="option" aria-selected="false" aria-label="Thể thao" data-entity-field="Thể thao" data-label="Thể thao" tabindex="-1"><span>Thể thao</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg></button>
+                <button type="button" class="entity-cloud-field-option" role="option" aria-selected="false" aria-label="Kinh doanh" data-entity-field="Kinh doanh" data-label="Kinh doanh" tabindex="-1"><span>Kinh doanh</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg></button>
+                <button type="button" class="entity-cloud-field-option" role="option" aria-selected="false" aria-label="Khoa học" data-entity-field="Khoa học" data-label="Khoa học" tabindex="-1"><span>Khoa học</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg></button>
+                <button type="button" class="entity-cloud-field-option" role="option" aria-selected="false" aria-label="Đời sống" data-entity-field="Đời sống" data-label="Đời sống" tabindex="-1"><span>Đời sống</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg></button>
+              </div>
+            </div>
+          </div>
           <div class="entity-cloud-period-switch" role="group" aria-label="Khoảng thời gian thống kê entity">
             <button type="button" class="entity-cloud-period-btn active" data-entity-period="day" aria-pressed="true">24 giờ gần nhất</button>
             <button type="button" class="entity-cloud-period-btn" data-entity-period="week" aria-pressed="false">Tuần này</button>
@@ -308,6 +314,6 @@
 
   <script src="/static/analytics.js?v=0.7.58" defer></script>
   <script src="/static/branding.js?v=0.7.58" defer></script>
-  <script src="/static/news.js?v=0.7.77" defer></script>
+  <script src="/static/news.js?v=0.7.78" defer></script>
 </body>
 </html>
