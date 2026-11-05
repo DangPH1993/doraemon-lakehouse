@@ -999,17 +999,65 @@
     renderAuthArea(); $('#userFeedContainer').innerHTML = ''; $('#savedTimelineTags').innerHTML = ''; $('#telegramStatus').textContent = 'Đăng nhập để cấu hình Telegram.'; syncFollowButtons(); updateSelectionCount();
   }
 
-  document.addEventListener('change', async event => {
-    const fieldSelect = event.target.closest('#entityCloudFieldSelect');
-    if (!fieldSelect) return;
-    const selectedField = fieldSelect.value || '';
-    if ((selectedField === '' || entityCloudFieldLabels.includes(selectedField)) && selectedField !== state.entityCloudField) {
-      state.entityCloudField = selectedField;
-      await loadEntityCloud(state.entityCloudPeriod, selectedField);
-    }
-  });
+  function closeEntityCloudFieldMenu(restoreFocus = false) {
+    const trigger = $('#entityCloudFieldTrigger');
+    const menu = $('#entityCloudFieldMenu');
+    const dropdown = $('#entityCloudFieldDropdown');
+    if (!trigger || !menu || !dropdown) return;
+    menu.hidden = true;
+    dropdown.classList.remove('is-open');
+    trigger.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) trigger.focus();
+  }
+
+  function syncEntityCloudFieldMenu(selectedField) {
+    const validField = entityCloudFieldLabels.includes(selectedField) ? selectedField : '';
+    const currentValue = $('#entityCloudFieldValue');
+    const menu = $('#entityCloudFieldMenu');
+    if (!currentValue || !menu) return;
+    const options = Array.from(menu.querySelectorAll('[data-entity-field]'));
+    const selectedOption = options.find(option => (option.dataset.entityField || '') === validField);
+    currentValue.textContent = selectedOption?.dataset.label || 'Tất cả';
+    options.forEach(option => {
+      const selected = (option.dataset.entityField || '') === validField;
+      option.setAttribute('aria-selected', String(selected));
+      option.tabIndex = selected ? 0 : -1;
+      option.classList.toggle('is-selected', selected);
+    });
+  }
 
   document.addEventListener('click', async event => {
+    const fieldDropdown = $('#entityCloudFieldDropdown');
+    if (fieldDropdown && !fieldDropdown.contains(event.target)) closeEntityCloudFieldMenu();
+
+    const fieldTrigger = event.target.closest('#entityCloudFieldTrigger');
+    if (fieldTrigger) {
+      const menu = $('#entityCloudFieldMenu');
+      const dropdown = $('#entityCloudFieldDropdown');
+      const opening = Boolean(menu?.hidden);
+      if (menu && dropdown) {
+        menu.hidden = !opening;
+        dropdown.classList.toggle('is-open', opening);
+        fieldTrigger.setAttribute('aria-expanded', String(opening));
+        if (opening) menu.querySelector('[aria-selected="true"]')?.focus();
+      }
+      return;
+    }
+
+    const fieldOption = event.target.closest('[data-entity-field]');
+    if (fieldOption) {
+      const selectedField = fieldOption.dataset.entityField || '';
+      if ((selectedField === '' || entityCloudFieldLabels.includes(selectedField)) && selectedField !== state.entityCloudField) {
+        state.entityCloudField = selectedField;
+        syncEntityCloudFieldMenu(selectedField);
+        closeEntityCloudFieldMenu(true);
+        await loadEntityCloud(state.entityCloudPeriod, selectedField);
+      } else {
+        closeEntityCloudFieldMenu();
+      }
+      return;
+    }
+
     const authOpen = event.target.closest('[data-auth-open]'); if (authOpen) { openAuthModal(authOpen.dataset.authOpen); return; }
     const authClose = event.target.closest('[data-auth-close]'); if (authClose) { closeAuthModal(); return; }
     const authSwitch = event.target.closest('[data-switch-auth]'); if (authSwitch) { openAuthModal(authSwitch.dataset.switchAuth); return; }
@@ -1091,6 +1139,43 @@
       else if (pager.dataset.pager === 'timeline' && state.selectedTimeline) await loadTimeline(state.selectedTimeline.type, state.selectedTimeline.id, Math.max(1, state.timelinePage + dir));
     }
   });
+  document.addEventListener('keydown', event => {
+    const menu = $('#entityCloudFieldMenu');
+    const trigger = $('#entityCloudFieldTrigger');
+    if (!menu || !trigger) return;
+    if (menu.hidden) {
+      if (event.target.closest?.('#entityCloudFieldTrigger') && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
+        event.preventDefault();
+        menu.hidden = false;
+        $('#entityCloudFieldDropdown')?.classList.add('is-open');
+        trigger.setAttribute('aria-expanded', 'true');
+        menu.querySelector('[aria-selected="true"]')?.focus();
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeEntityCloudFieldMenu(true);
+      return;
+    }
+    if (event.key === 'Tab') {
+      closeEntityCloudFieldMenu();
+      return;
+    }
+    const activeOption = event.target.closest?.('[data-entity-field]');
+    if (!activeOption) return;
+    const options = Array.from(menu.querySelectorAll('[data-entity-field]'));
+    const index = options.indexOf(activeOption);
+    let nextIndex = index;
+    if (event.key === 'ArrowDown') nextIndex = Math.min(options.length - 1, index + 1);
+    else if (event.key === 'ArrowUp') nextIndex = Math.max(0, index - 1);
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = options.length - 1;
+    else return;
+    event.preventDefault();
+    options[nextIndex]?.focus();
+  });
+
   async function selectFieldCategory(category) {
     state.fieldCategory = String(category || '');
     $('#fieldCategoryFilter').querySelectorAll('[data-field-category]').forEach(tab => {
