@@ -29,7 +29,7 @@ from .news_briefing import generate_news_briefing
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.75',description='AI-generated concise daily, weekly and monthly news briefings from top topics.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.77',description='AI-generated concise daily, weekly and monthly news briefings from top topics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -1490,12 +1490,14 @@ def public_news_overview():
 @app.get('/api/public/news/entity-cloud')
 def public_entity_cloud(
     period: str = Query(default='day', pattern='^(day|week|month)$'),
+    field_category: str | None = Query(default=None, pattern='^(Thời sự|Thế giới|Thể thao|Kinh doanh|Khoa học|Đời sống)$'),
     limit: int = Query(default=20, ge=5, le=20),
 ):
     """Return the most-mentioned story entities for the selected period.
 
     Day keeps the existing rolling 24-hour window. Week starts Monday 00:00 and
     month starts on day 1 at 00:00 in the configured application timezone.
+    An optional editorial field restricts the article set before entity ranking.
     Counts are distinct included articles, not raw mentions.
     """
     local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
@@ -1522,6 +1524,14 @@ def public_entity_cloud(
         params = (period_start_local, settings.timezone, period_start_local, settings.timezone)
         window_start = period_start_local.isoformat()
 
+    field_filter = ''
+    query_params = params
+    if field_category:
+        # field_category is an editorial classification stored on the article;
+        # it is deliberately independent from Topic and Entity catalogs.
+        field_filter = ' AND a.field_category=%s'
+        query_params = (*params, field_category)
+
     query = f"""SELECT e.entity_id,
                               e.canonical_name AS name,
                               e.entity_type,
@@ -1536,12 +1546,13 @@ def public_entity_cloud(
                          AND nullif(btrim(e.canonical_name), '') IS NOT NULL
                          AND a.is_excluded=false
                          AND {time_filter}
+                         {field_filter}
                        GROUP BY e.entity_id, e.canonical_name, e.entity_type, e.description
                        ORDER BY count(DISTINCT a.article_id) DESC,
                                 max(coalesce(a.published_at, a.collected_at)) DESC,
                                 e.canonical_name ASC
                        LIMIT 300"""
-    candidates = fetch_all(query, params)
+    candidates = fetch_all(query, query_params)
     items = [item for item in candidates
              if should_track_entity(str(item.get('name') or ''), str(item.get('entity_type') or 'UNKNOWN'))
              and not is_media_source_entity(str(item.get('name') or ''), str(item.get('entity_type') or 'UNKNOWN'))][:limit]
