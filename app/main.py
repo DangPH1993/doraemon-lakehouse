@@ -25,11 +25,11 @@ from .r2_storage import (R2NotConfigured, delete_object as delete_r2_object, get
                          is_configured as r2_is_configured, make_object_key as make_r2_key,
                          put_bytes as put_r2_bytes)
 from .subscriptions import expire_pro_plans
-from .news_briefing import generate_news_briefing
+from .news_briefing import generate_news_briefing, generate_news_topic_briefings
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('mini-lakehouse.api')
-app=FastAPI(title='Tìm Tin Tức',version='0.7.79',description='AI-generated concise daily, weekly and monthly news briefings from top topics.')
+app=FastAPI(title='Tìm Tin Tức',version='0.7.80',description='AI-generated concise daily, weekly and monthly news briefings from top topics.')
 app.add_middleware(CORSMiddleware,allow_origins=list(settings.cors_origins) or ['*'],allow_credentials=False,allow_methods=['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],allow_headers=['Authorization','Content-Type'])
 app.mount('/static',StaticFiles(directory='static'),name='static')
 _pipeline_thread_lock=threading.Lock()
@@ -1637,8 +1637,9 @@ def _news_briefing_period(period: str, today: date) -> tuple[date, str]:
     return date(today.year, today.month, 1), 'Tháng này'
 
 
-def _fetch_news_briefing_topics(period: str, period_start: date) -> list[dict]:
-    """Fetch the top ten ranked event topics and representative articles in one query."""
+def _fetch_news_briefing_topics(period: str, period_start: date, period_end_exclusive: date) -> list[dict]:
+    """Fetch top-ten ranked topics and representative articles from the same period."""
+    sample_limit = 3 if period == 'day' else 5
     candidates = fetch_all("""WITH ranked_topics AS (
         SELECT f.topic_id, t.name AS topic_name, f.article_count, f.source_count,
                f.hotness_score, f.rank_position
@@ -1658,7 +1659,7 @@ def _fetch_news_briefing_topics(period: str, period_start: date) -> list[dict]:
         FROM ranked_topics ranked
         JOIN LATERAL (
             SELECT a.article_id, a.title,
-                   left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 380) AS snippet,
+                   left(coalesce(nullif(a.summary,''), nullif(a.content_text,''), ''), 420) AS snippet,
                    ds.name AS source_name,
                    row_number() OVER (ORDER BY coalesce(a.published_at,a.collected_at) DESC NULLS LAST,
                                                a.article_id DESC) AS article_order
@@ -1666,8 +1667,10 @@ def _fetch_news_briefing_topics(period: str, period_start: date) -> list[dict]:
             JOIN news_articles a ON a.article_id=rel.article_id
             JOIN data_sources ds ON ds.source_id=a.source_id
             WHERE rel.topic_id=ranked.topic_id AND a.is_excluded=false
+              AND coalesce(a.published_at,a.collected_at) >= (%s::date::timestamp AT TIME ZONE %s)
+              AND coalesce(a.published_at,a.collected_at) < (%s::date::timestamp AT TIME ZONE %s)
             ORDER BY coalesce(a.published_at,a.collected_at) DESC NULLS LAST, a.article_id DESC
-            LIMIT 3
+            LIMIT %s
         ) sample ON true
         GROUP BY ranked.topic_id
     )
@@ -1677,19 +1680,24 @@ def _fetch_news_briefing_topics(period: str, period_start: date) -> list[dict]:
     FROM ranked_topics ranked
     JOIN topic_samples ON topic_samples.topic_id=ranked.topic_id
     ORDER BY ranked.rank_position ASC, ranked.hotness_score DESC, ranked.article_count DESC
-    """, (period, period_start))
+    """, (
+        period, period_start,
+        period_start, settings.timezone,
+        period_end_exclusive, settings.timezone,
+        sample_limit,
+    ))
     # Do not let broad editorial categories consume one of the ten summary slots.
     return [row for row in candidates if not is_broad_field_topic(row.get('topic_name'))][:10]
 
-
 @app.post('/api/public/news/briefing')
 def public_news_briefing(body: NewsBriefingBody):
-    """Generate a short Vietnamese summary of the ten leading topics for a period."""
+    """Generate a daily digest or separate per-topic summaries for week/month."""
     local = fetch_one("select (now() at time zone %s)::date as today", (settings.timezone,))
     today = (local or {}).get('today')
     if today is None:
         raise HTTPException(status_code=503, detail='Không xác định được ngày theo múi giờ website.')
     period_start, period_label = _news_briefing_period(body.period, today)
+    period_end_exclusive = today + timedelta(days=1)
     cache_key = (body.period, period_start)
 
     with _NEWS_BRIEFING_CACHE_LOCK:
@@ -1698,18 +1706,26 @@ def public_news_briefing(body: NewsBriefingBody):
         if cached and now - cached[0] < _NEWS_BRIEFING_CACHE_TTL_SECONDS:
             return {**cached[1], 'cached': True}
 
-        topics = _fetch_news_briefing_topics(body.period, period_start)
+        topics = _fetch_news_briefing_topics(body.period, period_start, period_end_exclusive)
         if not topics:
             return {
                 'period': body.period,
                 'period_start': period_start,
                 'period_label': period_label,
                 'topic_count': 0,
+                'topic_summaries': [],
                 'summary': f'Chưa có đủ dữ liệu tin tức đã được phân loại để tạo tóm tắt cho kỳ {period_label.lower()}.',
                 'cached': False,
             }
         try:
-            summary = generate_news_briefing(period_label, topics)
+            if body.period == 'day':
+                summary = generate_news_briefing(period_label, topics)
+                topic_summaries = []
+            else:
+                topic_summaries = generate_news_topic_briefings(period_label, topics)
+                summary = '\n\n'.join(
+                    f"{item['topic_name']}\n{item['summary']}" for item in topic_summaries
+                )
         except RuntimeError as exc:
             message = str(exc)
             if 'OPENAI_API_KEY is not configured' in message:
@@ -1726,6 +1742,7 @@ def public_news_briefing(body: NewsBriefingBody):
             'period_start': period_start,
             'period_label': period_label,
             'topic_count': len(topics),
+            'topic_summaries': topic_summaries,
             'summary': summary,
             'cached': False,
         }
@@ -1735,7 +1752,6 @@ def public_news_briefing(body: NewsBriefingBody):
             oldest_key = min(_NEWS_BRIEFING_CACHE, key=lambda key: _NEWS_BRIEFING_CACHE[key][0])
             _NEWS_BRIEFING_CACHE.pop(oldest_key, None)
         return result
-
 
 @app.get('/api/public/news/articles')
 def public_daily_articles(
