@@ -1338,13 +1338,17 @@
     });
     result.hidden = false;
     result.className = 'news-briefing-result is-loading';
-    result.innerHTML = `<div class="news-briefing-result-heading">${esc(newsBriefingLabels[period])}</div><p>AI đang tổng hợp 10 chủ đề nổi bật và các bài báo liên quan…</p>`;
+    result.innerHTML = `<div class="news-briefing-result-heading">${esc(newsBriefingLabels[period])}</div><p>${period === 'day' ? 'AI đang tổng hợp các chủ đề nổi bật…' : 'AI đang viết phần tổng hợp riêng cho từng topic nổi bật…'}</p>`;
     try {
       const data = await sendJSON('/api/public/news/briefing', 'POST', {period});
       result.className = 'news-briefing-result';
       const count = Number(data.topic_count || 0);
       const sourceLabel = count ? ` · ${num(count)} chủ đề nổi bật` : '';
-      result.innerHTML = `<div class="news-briefing-result-heading">${esc(newsBriefingLabels[period])}${sourceLabel}</div><p>${esc(data.summary || 'Chưa có nội dung tóm tắt.')}</p>`;
+      const topicSummaries = Array.isArray(data.topic_summaries) ? data.topic_summaries : [];
+      const topicMarkup = topicSummaries.length
+        ? `<div class="news-briefing-topic-list">${topicSummaries.map((item, index) => `<article class="news-briefing-topic"><h3>${index + 1}. ${esc(item.topic_name || 'Chủ đề')}</h3><p>${esc(item.summary || '')}</p></article>`).join('')}</div>`
+        : `<p>${esc(data.summary || 'Chưa có nội dung tóm tắt.')}</p>`;
+      result.innerHTML = `<div class="news-briefing-result-heading">${esc(newsBriefingLabels[period])}${sourceLabel}</div>${topicMarkup}`;
     } catch (error) {
       result.className = 'news-briefing-result is-error';
       result.innerHTML = `<div class="news-briefing-result-heading">${esc(newsBriefingLabels[period])}</div><p>${esc(error.message || 'Không thể tạo bản tóm tắt lúc này.')}</p>`;
