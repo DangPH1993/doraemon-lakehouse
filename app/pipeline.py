@@ -868,88 +868,149 @@ def refresh_facts():
                        from news_articles where coalesce((published_at at time zone %s)::date,(collected_at at time zone %s)::date)>=current_date-30 group by 1,2""",(settings.timezone,settings.timezone,settings.timezone,settings.timezone))
     log.info('FACT base and daily aggregates refreshed; fact_article_rows=%s; elapsed=%.1fs', facts_rows, time.monotonic()-started)
     refresh_started = time.monotonic()
-    refresh_topic_trending()
-    log.info('FACT topic trends refreshed; elapsed=%.1fs', time.monotonic()-refresh_started)
+    try:
+        trend_stats = refresh_topic_trending()
+        log.info('FACT topic trends refreshed; stats=%s; elapsed=%.1fs',
+                 trend_stats, time.monotonic()-refresh_started)
+        return {'fact_article_rows': facts_rows,
+                'topic_trending_periods_refreshed': trend_stats.get('periods_refreshed', [])}
+    except Exception as exc:
+        # The main and daily FACT tables have already committed above. Topic trending powers
+        # optional News Briefing rankings; retain its previous rows and allow ingestion/raw
+        # cleanup to finish rather than marking a successful RSS run as failed.
+        warning = f'{type(exc).__name__}: {str(exc)[:500]}'
+        log.exception('FACT Topic trend refresh failed non-blocking; core FACT rows are committed: %s', exc)
+        return {'fact_article_rows': facts_rows, 'topic_trending_error': warning}
 
 def refresh_topic_trending():
-    """Recompute topic rankings for today, rolling weeks and calendar months in the configured timezone.
+    """Refresh day, week and month Topic rankings in separate bounded transactions.
 
-    Ranking favors article volume, then cross-source coverage, with a small bonus for positive
-    period-over-period growth. It is a descriptive heat score, not a truth or importance score.
+    The previous single statement scanned a 400-day article/topic set and expanded it into
+    three period types before aggregating. On larger Neon databases that statement could exceed
+    the standard 120-second timeout and fail the whole ingestion run after FACT rows had already
+    been committed. Each period is now calculated independently, with indexable timestamp
+    predicates and its own transaction/timeout. A failed period rolls back only its own refresh.
     """
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""select (now() at time zone %s)::date as local_today""", (settings.timezone,))
+        cur.execute("select (now() at time zone %s)::date as local_today", (settings.timezone,))
         today = cur.fetchone()['local_today']
-        cur.execute("""delete from fact_topic_trending
-                       where (period_type='day' and period_start >= %s - 60)
-                          or (period_type='week' and period_start >= %s - 183)
-                          or (period_type='month' and period_start >= date_trunc('month', %s::timestamp)::date - interval '12 months')""",
-                    (today, today, today))
-        cur.execute(r"""
-            WITH cfg AS (
-              SELECT %s::text AS tz, (now() at time zone %s)::date AS today
-            ), article_topic_base AS (
-              SELECT a.article_id, a.source_id, at.topic_id,
-                     (coalesce(a.published_at,a.collected_at) at time zone cfg.tz) AS local_ts,
-                     ((coalesce(a.published_at,a.collected_at) at time zone cfg.tz)::date) AS local_date,
-                     cfg.today
-              FROM news_articles a
-              JOIN article_topics at ON at.article_id=a.article_id
-              JOIN topics t ON t.topic_id=at.topic_id AND t.status='active' AND t.topic_type='event'
-              CROSS JOIN cfg
-              WHERE a.is_excluded=false
-                AND ((coalesce(a.published_at,a.collected_at) at time zone cfg.tz)::date) >= cfg.today - 400
-            ), period_rows AS (
-              SELECT 'day'::text AS period_type, local_date AS period_start, topic_id, article_id, source_id, today
-              FROM article_topic_base WHERE local_date >= today - 60 AND local_date <= today
-              UNION ALL
-              SELECT 'week'::text, date_trunc('week',local_ts)::date, topic_id, article_id, source_id, today
-              FROM article_topic_base WHERE local_date >= today - 183 AND local_date <= today
-              UNION ALL
-              SELECT 'month'::text, date_trunc('month',local_ts)::date, topic_id, article_id, source_id, today
-              FROM article_topic_base
-              WHERE local_date >= (date_trunc('month',today::timestamp) - interval '12 months')::date
-                AND local_date <= today
-            ), aggregated AS (
-              SELECT period_type, period_start, topic_id,
-                     count(DISTINCT article_id)::int AS article_count,
-                     count(DISTINCT source_id)::int AS source_count
-              FROM period_rows GROUP BY period_type, period_start, topic_id
-            ), with_previous AS (
-              SELECT a.*,
-                coalesce(p.article_count,0)::int AS previous_article_count,
-                CASE WHEN coalesce(p.article_count,0) > 0
-                     THEN round(100.0 * (a.article_count - p.article_count) / p.article_count, 2)
-                     ELSE NULL END AS growth_pct
-              FROM aggregated a
-              LEFT JOIN aggregated p ON p.period_type=a.period_type AND p.topic_id=a.topic_id
-                AND p.period_start = CASE
-                  WHEN a.period_type='day' THEN a.period_start - 1
-                  WHEN a.period_type='week' THEN a.period_start - 7
-                  WHEN a.period_type='month' THEN (a.period_start - interval '1 month')::date
-                END
-            ), scored AS (
-              SELECT *,
-                (article_count + (2.0 * ln(1 + source_count))
-                  + (least(greatest(coalesce(growth_pct,0),0),200) / 100.0))::numeric(12,3) AS hotness_score
-              FROM with_previous
-            ), ranked AS (
-              SELECT *, row_number() OVER (PARTITION BY period_type,period_start
-                            ORDER BY hotness_score DESC, article_count DESC, source_count DESC, topic_id)::int AS rank_position
-              FROM scored
-            )
-            INSERT INTO fact_topic_trending(
-              period_type,period_start,topic_id,article_count,source_count,
-              previous_article_count,growth_pct,hotness_score,rank_position,updated_at
-            )
-            SELECT period_type,period_start,topic_id,article_count,source_count,
-                   previous_article_count,growth_pct,hotness_score,rank_position,now()
-            FROM ranked
-            ON CONFLICT(period_type,period_start,topic_id) DO UPDATE SET
-              article_count=excluded.article_count, source_count=excluded.source_count,
-              previous_article_count=excluded.previous_article_count, growth_pct=excluded.growth_pct,
-              hotness_score=excluded.hotness_score, rank_position=excluded.rank_position, updated_at=now()
-        """, (settings.timezone, settings.timezone))
+
+    # Match the existing rolling windows exactly: 60 days, 183 days, and 12 calendar months.
+    month_index = today.year * 12 + (today.month - 1) - 12
+    month_window_start = datetime(month_index // 12, month_index % 12 + 1, 1).date()
+    period_specs = (
+        ('day', today - timedelta(days=60)),
+        ('week', today - timedelta(days=183)),
+        ('month', month_window_start),
+    )
+    period_errors = []
+    refreshed = {}
+
+    for period_type, window_start in period_specs:
+        period_started = time.monotonic()
+        try:
+            with get_conn() as conn, conn.cursor() as cur:
+                # get_conn applies the normal 120s limit. Trending is an optional analytical
+                # aggregate, so give each isolated period up to four minutes without changing
+                # timeout behavior for ingestion, APIs, or other database operations.
+                cur.execute("SET LOCAL statement_timeout = '240s'")
+                cur.execute(
+                    "delete from fact_topic_trending where period_type=%s and period_start >= %s",
+                    (period_type, window_start),
+                )
+                cur.execute(r"""
+                    WITH cfg AS MATERIALIZED (
+                      SELECT %s::date AS today, %s::date AS window_start,
+                             %s::text AS tz, %s::text AS period_type,
+                             (%s::date::timestamp AT TIME ZONE %s) AS start_ts,
+                             ((%s::date + 1)::timestamp AT TIME ZONE %s) AS end_ts
+                    ), article_topic_base AS (
+                      SELECT a.article_id, a.source_id, at.topic_id,
+                             (coalesce(a.published_at,a.collected_at) AT TIME ZONE cfg.tz) AS local_ts
+                      FROM news_articles a
+                      JOIN article_topics at ON at.article_id=a.article_id
+                      JOIN topics t ON t.topic_id=at.topic_id
+                        AND t.status='active' AND t.topic_type='event'
+                      CROSS JOIN cfg
+                      WHERE a.is_excluded=false
+                        AND (
+                          (a.published_at IS NOT NULL
+                           AND a.published_at >= cfg.start_ts AND a.published_at < cfg.end_ts)
+                          OR
+                          (a.published_at IS NULL
+                           AND a.collected_at >= cfg.start_ts AND a.collected_at < cfg.end_ts)
+                        )
+                    ), period_rows AS (
+                      SELECT
+                        CASE
+                          WHEN cfg.period_type='day' THEN b.local_ts::date
+                          WHEN cfg.period_type='week' THEN date_trunc('week',b.local_ts)::date
+                          ELSE date_trunc('month',b.local_ts)::date
+                        END AS period_start,
+                        b.topic_id, b.article_id, b.source_id
+                      FROM article_topic_base b CROSS JOIN cfg
+                    ), aggregated AS (
+                      SELECT period_start, topic_id,
+                             -- article_topics has PRIMARY KEY(article_id, topic_id), so each
+                             -- article contributes at most one row to a given Topic.
+                             count(*)::int AS article_count,
+                             count(DISTINCT source_id)::int AS source_count
+                      FROM period_rows
+                      GROUP BY period_start, topic_id
+                    ), with_previous AS (
+                      SELECT a.*,
+                        coalesce(p.article_count,0)::int AS previous_article_count,
+                        CASE WHEN coalesce(p.article_count,0) > 0
+                             THEN round(100.0 * (a.article_count - p.article_count) / p.article_count, 2)
+                             ELSE NULL END AS growth_pct
+                      FROM aggregated a CROSS JOIN cfg
+                      LEFT JOIN aggregated p ON p.topic_id=a.topic_id
+                        AND p.period_start = CASE
+                          WHEN cfg.period_type='day' THEN a.period_start - 1
+                          WHEN cfg.period_type='week' THEN a.period_start - 7
+                          ELSE (a.period_start - interval '1 month')::date
+                        END
+                    ), scored AS (
+                      SELECT *,
+                        (article_count + (2.0 * ln(1 + source_count))
+                          + (least(greatest(coalesce(growth_pct,0),0),200) / 100.0))::numeric(12,3) AS hotness_score
+                      FROM with_previous
+                    ), ranked AS (
+                      SELECT *, row_number() OVER (
+                        PARTITION BY period_start
+                        ORDER BY hotness_score DESC, article_count DESC, source_count DESC, topic_id
+                      )::int AS rank_position
+                      FROM scored
+                    )
+                    INSERT INTO fact_topic_trending(
+                      period_type,period_start,topic_id,article_count,source_count,
+                      previous_article_count,growth_pct,hotness_score,rank_position,updated_at
+                    )
+                    SELECT cfg.period_type, ranked.period_start, ranked.topic_id,
+                           ranked.article_count, ranked.source_count,
+                           ranked.previous_article_count, ranked.growth_pct,
+                           ranked.hotness_score, ranked.rank_position, now()
+                    FROM ranked CROSS JOIN cfg
+                    ON CONFLICT(period_type,period_start,topic_id) DO UPDATE SET
+                      article_count=excluded.article_count, source_count=excluded.source_count,
+                      previous_article_count=excluded.previous_article_count, growth_pct=excluded.growth_pct,
+                      hotness_score=excluded.hotness_score, rank_position=excluded.rank_position, updated_at=now()
+                """, (
+                    today, window_start, settings.timezone, period_type,
+                    window_start, settings.timezone, today, settings.timezone,
+                ))
+                refreshed[period_type] = max(0, cur.rowcount)
+            log.info('FACT Topic trend refresh complete: period=%s; rows=%s; elapsed=%.1fs',
+                     period_type, refreshed[period_type], time.monotonic()-period_started)
+        except Exception as exc:
+            error = f'{period_type}: {type(exc).__name__}: {str(exc)[:240]}'
+            period_errors.append(error)
+            log.exception('FACT Topic trend refresh failed for period=%s; previous rows for this period were retained: %s',
+                          period_type, exc)
+
+    if period_errors:
+        raise RuntimeError('Topic trend refresh incomplete; ' + ' | '.join(period_errors))
+    return {'periods_refreshed': list(refreshed), 'rows_written': refreshed}
 
 
 def purge_raw_feed_items_after_fact_refresh() -> int:
@@ -1091,8 +1152,11 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
         # is deliberately not run because the admin no longer needs a moderation step.
         totals['topic_candidates'] = 0
         stage_started = time.monotonic()
-        refresh_facts()
-        log.info('Stage FACT refresh complete; elapsed=%.1fs', time.monotonic()-stage_started)
+        fact_refresh_stats = refresh_facts()
+        if fact_refresh_stats:
+            totals.update(fact_refresh_stats)
+        log.info('Stage FACT refresh complete; stats=%s; elapsed=%.1fs',
+                 fact_refresh_stats, time.monotonic()-stage_started)
         # Telegram delivery is handled by its own scheduled workflow.
         # Raw capture is temporary: after facts are persisted for every clean article,
         # purge RSS payloads to conserve PostgreSQL database storage.
@@ -1104,6 +1168,9 @@ def _run_pipeline_impl(trigger_type='scheduled', source_ids: list[int] | None = 
         totals['status'] = status
         end=datetime.now(timezone.utc)
         run_message = f"Completed in {(end-started).total_seconds():.1f}s; {len(totals['source_errors'])} source error(s)."
+        if totals.get('topic_trending_error'):
+            run_message = (run_message + ' Topic trending warning: ' +
+                           str(totals['topic_trending_error'])[:500])[:1000]
         if totals['source_errors']:
             # Put the first few concrete failures in the compact dashboard message as well as
             # details JSON, so an admin can diagnose a red run without scrolling to JSON logs.
